@@ -15,7 +15,8 @@
   "autoload": {
     "psr-4": {
       "Tinvar\\Orm\\": "src/Orm/"
-    }
+    },
+    "files": ["aliases.php"]
   },
   "config": { "sort-packages": true },
   "minimum-stability": "stable"

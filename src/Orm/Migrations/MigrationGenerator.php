@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm\Migrations;
 
-use Tinvar\Attributes\Column as ColumnAttribute;
+use Tinvar\Orm\Attributes\Column as ColumnAttribute;
 use Tinvar\Orm\Connection;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\Model;
@@ -261,7 +261,7 @@ final class MigrationGenerator
     private static function columnOf(\ReflectionProperty $property): array
     {
         $type = $property->getType();
-        $declared = $property->getAttributes(ColumnAttribute::class)[0] ?? null;
+        $declared = $property->getAttributes(ColumnAttribute::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
         $cast = Metadata::castOf($property->getDeclaringClass()->getName(), $property);
         $storage = $declared?->newInstance()->type ?? ($cast === null ? null : $cast::columnType());
         $typeName = $type instanceof \ReflectionNamedType ? $type->getName() : 'mixed';

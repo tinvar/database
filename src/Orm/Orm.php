@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
-use Tinvar\Data\Lazy;
+use Tinvar\Support\Lazy;
 use Tinvar\Support\Uuid;
 
 /**

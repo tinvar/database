@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
-use Tinvar\Attributes\BeforeSave;
-use Tinvar\Attributes\BelongsTo;
-use Tinvar\Attributes\Column;
-use Tinvar\Attributes\HasMany;
-use Tinvar\Attributes\Id;
-use Tinvar\Attributes\Table;
-use Tinvar\Attributes\TenantScoped;
+use Tinvar\Orm\Attributes\BeforeSave;
+use Tinvar\Orm\Attributes\BelongsTo;
+use Tinvar\Orm\Attributes\Column;
+use Tinvar\Orm\Attributes\HasMany;
+use Tinvar\Orm\Attributes\Id;
+use Tinvar\Orm\Attributes\Table;
+use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Support\Str;
 
 /**
@@ -66,11 +66,16 @@ final class Metadata
     {
         $reflection = new \ReflectionClass($class);
 
-        $table = $reflection->getAttributes(Table::class)[0] ?? null;
+        // Every attribute is read as an instance of its class, not by the
+        // name it was written with: a model still spelling an attribute by
+        // its name from before the split (packages/database/aliases.php)
+        // names an alias, and read by name alone #[TenantScoped] would match
+        // nothing and the model would read every tenant's rows.
+        $table = $reflection->getAttributes(Table::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
         if ($table === null) {
             throw MappingException::noTable($class);
         }
-        $tenant = $reflection->getAttributes(TenantScoped::class)[0] ?? null;
+        $tenant = $reflection->getAttributes(TenantScoped::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
 
         $columns = [];
         $relations = [];
@@ -86,8 +91,8 @@ final class Metadata
                 continue;
             }
 
-            $isId = $property->getAttributes(Id::class) !== [];
-            $columnAttribute = $property->getAttributes(Column::class)[0] ?? null;
+            $isId = $property->getAttributes(Id::class, \ReflectionAttribute::IS_INSTANCEOF) !== [];
+            $columnAttribute = $property->getAttributes(Column::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
             if (!$isId && $columnAttribute === null) {
                 continue;   // virtual properties, computed hooks and plain state are not columns
             }
@@ -304,7 +309,7 @@ final class Metadata
     /** @param class-string<Model> $class */
     private static function relationFor(string $class, \ReflectionProperty $property): ?RelationMeta
     {
-        if ($hasMany = ($property->getAttributes(HasMany::class)[0] ?? null)) {
+        if ($hasMany = ($property->getAttributes(HasMany::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null)) {
             $attribute = $hasMany->newInstance();
 
             return new RelationMeta(
@@ -317,7 +322,7 @@ final class Metadata
             );
         }
 
-        if ($belongsTo = ($property->getAttributes(BelongsTo::class)[0] ?? null)) {
+        if ($belongsTo = ($property->getAttributes(BelongsTo::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null)) {
             $attribute = $belongsTo->newInstance();
             $target = $attribute->target ?? self::typeOf($property);
             if ($target === null || !is_subclass_of($target, Model::class)) {
@@ -359,7 +364,7 @@ final class Metadata
      */
     public static function castOf(string $class, \ReflectionProperty $property): ?string
     {
-        $named = ($property->getAttributes(Column::class)[0] ?? null)?->newInstance()->cast;
+        $named = ($property->getAttributes(Column::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null)?->newInstance()->cast;
         $typeName = self::typeOf($property);
 
         if ($named !== null) {
@@ -580,7 +585,7 @@ final class Metadata
             $scope = $level->getName();
             foreach ($level->getMethods() as $method) {
                 $name = $method->getName();
-                if ($method->getDeclaringClass()->getName() !== $scope || $method->getAttributes(BeforeSave::class) === []) {
+                if ($method->getDeclaringClass()->getName() !== $scope || $method->getAttributes(BeforeSave::class, \ReflectionAttribute::IS_INSTANCEOF) === []) {
                     continue;
                 }
                 // Overridden, it is still one method: called once, from the
