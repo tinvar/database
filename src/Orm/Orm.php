@@ -124,14 +124,18 @@ final class Orm
     private ?array $reads = null;
 
     /**
-     * @param TenantSubtrees|null $tenants the application's tenant tree: what
+     * @param TenantHierarchy|null $tenants the application's tenant tree: what
      *        withinSubtree() reads across, and what lets a host's tenant bound a
      *        session's (ResolveTenant). Null for tenants with no hierarchy.
+     *        The final class, not an interface, so its limits -- a walk
+     *        that loops or runs too deep says "not under", a subtree too
+     *        large to read throws -- hold for every Orm by its type, with
+     *        this package alone as with the framework (ADR 0055).
      */
     public function __construct(
         private readonly Connection $connection,
         private readonly IdentityMap $identityMap = new IdentityMap(),
-        private readonly ?TenantSubtrees $tenants = null,
+        private readonly ?TenantHierarchy $tenants = null,
     ) {
         $this->unscopedByFiber = new \WeakMap();
         $this->readOnlyByFiber = new \WeakMap();
@@ -185,7 +189,7 @@ final class Orm
     }
 
     /** The application's tenant tree, or null when its tenants have none. */
-    public function tenants(): ?TenantSubtrees
+    public function tenants(): ?TenantHierarchy
     {
         return $this->tenants;
     }

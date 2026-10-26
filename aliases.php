@@ -3,10 +3,11 @@
 declare(strict_types=1);
 
 /**
- * The names the ORM's attributes had before the framework was split into
- * packages, kept for one release (ADR 0055).
+ * The names the ORM's attributes and the tenant tree had before the
+ * framework was split into packages, kept for one release (ADR 0055).
  *
- * @deprecated since 0.4: use Tinvar\Orm\Attributes\*. Removed in 0.5.
+ * @deprecated since 0.4: use Tinvar\Orm\Attributes\*, Tinvar\Orm\TenantTree
+ *             and Tinvar\Orm\TenantHierarchy. Removed in 0.5.
  *
  * An old name is aliased when something first asks for it, not when this
  * file loads, and is reported once per process as a deprecation. The alias
@@ -17,7 +18,7 @@ declare(strict_types=1);
  * and a tenant-scoped model would quietly read every tenant's rows.
  *
  * It lives beside src/ rather than in it, because it names the old
- * namespace, which is the framework's, on purpose: the layer rule reads
+ * namespaces, which are the framework's, on purpose: the layer rule reads
  * src/ alone.
  */
 spl_autoload_register(static function (string $class): void {
@@ -29,6 +30,8 @@ spl_autoload_register(static function (string $class): void {
         'tinvar\\attributes\\hasmany' => Tinvar\Orm\Attributes\HasMany::class,
         'tinvar\\attributes\\beforesave' => Tinvar\Orm\Attributes\BeforeSave::class,
         'tinvar\\attributes\\tenantscoped' => Tinvar\Orm\Attributes\TenantScoped::class,
+        'tinvar\\tenancy\\tenanttree' => Tinvar\Orm\TenantTree::class,
+        'tinvar\\tenancy\\tenanthierarchy' => Tinvar\Orm\TenantHierarchy::class,
     ][strtolower(ltrim($class, '\\'))] ?? null;
 
     if ($renamed !== null) {
