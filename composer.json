@@ -1,0 +1,22 @@
+{
+  "name": "tinvar/database",
+  "description": "Tinvar's ORM: models, the identity map, batched lazy loading, tenancy held by row-level security, migrations and the schema builder.",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.5",
+    "ext-json": "*",
+    "tinvar/support": "0.4.*"
+  },
+  "suggest": {
+    "ext-pdo": "Every connection the ORM makes is a PDO connection.",
+    "ext-pdo_pgsql": "PostgreSQL driver, with the row-level security that holds a tenant's rows to it."
+  },
+  "autoload": {
+    "psr-4": {
+      "Tinvar\\Orm\\": "src/Orm/"
+    }
+  },
+  "config": { "sort-packages": true },
+  "minimum-stability": "stable"
+}
