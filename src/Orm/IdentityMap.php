@@ -179,6 +179,9 @@ final class IdentityMap
      * them; the caller tells them apart.
      *
      * @return list<object>
+     *
+     * @internal for the testing layer (tinvar/testing), released with this
+     *     package at one version; not for applications
      */
     public function all(): array
     {

@@ -171,6 +171,9 @@ final class Orm
      * never enter it, and leaving acrossTenants() empties it, so a page
      * reading there was not checked at all. Off unless a test turns it on;
      * flush() empties it.
+     *
+     * @internal for the testing layer (tinvar/testing), released with this
+     *     package at one version; not for applications
      */
     public function recordReads(bool $on): void
     {
@@ -182,6 +185,9 @@ final class Orm
      * the last flush(); none while it is off.
      *
      * @return list<Model>
+     *
+     * @internal for the testing layer (tinvar/testing), released with this
+     *     package at one version; not for applications
      */
     public function readsRecorded(): array
     {
@@ -203,13 +209,21 @@ final class Orm
      * Records every lazy relation load from now on in $loads, or none with
      * null: for a test, never a request. Kept across flush(), which is a
      * request's reset, since a test records across its requests.
+     *
+     * @internal for the testing layer (tinvar/testing), released with this
+     *     package at one version; not for applications
      */
     public function recordLazyLoads(?LazyLoads $loads): void
     {
         $this->lazyLoads = $loads;
     }
 
-    /** Where lazy relation loads are being recorded, or null when they are not. */
+    /**
+     * Where lazy relation loads are being recorded, or null when they are not.
+     *
+     * @internal for the testing layer (tinvar/testing), released with this
+     *     package at one version; not for applications
+     */
     public function lazyLoads(): ?LazyLoads
     {
         return $this->lazyLoads;
@@ -986,6 +1000,9 @@ final class Orm
      * @param class-string<T> $class
      * @param list<array<string, mixed>> $rows
      * @return list<T>
+     *
+     * @internal for the Orm's own relation loading and the batch
+     *     scheduler's, inside this package
      */
     public function hydrateAll(string $class, array $rows): array
     {
@@ -1716,7 +1733,12 @@ final class Orm
         return $set === [] ? [$parent] : $set;
     }
 
-    /** @return list<Model> */
+    /**
+     * @return list<Model>
+     *
+     * @internal for the Orm's own relation loading and the batch
+     *     scheduler's, inside this package
+     */
     public function resolveHasMany(RelationMeta $relation, Model $parent): array
     {
         $key = $this->relationCacheKey($relation);
@@ -1773,7 +1795,12 @@ final class Orm
         return $this->hydrateAll($relation->target, $rows);
     }
 
-    /** @return array<string, mixed>|null */
+    /**
+     * @return array<string, mixed>|null
+     *
+     * @internal for the Orm's own relation loading and the batch
+     *     scheduler's, inside this package
+     */
     public function resolveBelongsToRow(RelationMeta $relation, Model $parent, string $foreignKey): ?array
     {
         $key = $this->relationCacheKey($relation);
@@ -1811,6 +1838,9 @@ final class Orm
      *        every parent a tick awaited. Otherwise read from the parents (batchOf())
      *        -- and only when a test records lazy loads.
      * @return array<string, list<array<string, mixed>>>
+     *
+     * @internal for the Orm's own relation loading and the batch
+     *     scheduler's, inside this package
      */
     public function loadRelationRows(RelationMeta $relation, array $parents, ?string $key = null, ?string $batch = null): array
     {
@@ -1912,6 +1942,7 @@ final class Orm
         return $set !== null && !$set->alone && $set->models === $parents ? LazyLoad::RESULT_SET : LazyLoad::ALONE;
     }
 
+    /** @internal for the Orm's relation loading and the batch scheduler's */
     public function hasRows(string $relationKey, string $groupKey): bool
     {
         return \array_key_exists($groupKey, $this->relationRows[$relationKey] ?? []);
@@ -1938,6 +1969,7 @@ final class Orm
         }
     }
 
+    /** @internal for the Orm's relation loading and the batch scheduler's */
     public function relationCacheKey(RelationMeta $relation): string
     {
         return $this->tenant() . "\0" . $relation->key();
