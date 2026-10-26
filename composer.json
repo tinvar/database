@@ -8,6 +8,9 @@
     "ext-json": "*",
     "tinvar/support": "0.4.*"
   },
+  "require-dev": {
+    "pestphp/pest": "^4.0"
+  },
   "suggest": {
     "ext-pdo": "Every connection the ORM makes is a PDO connection.",
     "ext-pdo_pgsql": "PostgreSQL driver, with the row-level security that holds a tenant's rows to it."
@@ -16,7 +19,9 @@
     "psr-4": {
       "Tinvar\\Orm\\": "src/Orm/"
     },
-    "files": ["aliases.php"]
+    "files": [
+      "aliases.php"
+    ]
   },
   "config": { "sort-packages": true },
   "minimum-stability": "stable"
