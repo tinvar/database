@@ -23,9 +23,11 @@ use Tinvar\Orm\Model;
 use Tinvar\Orm\NoTenantContext;
 use Tinvar\Orm\Orm;
 use Tinvar\Tests\Orm\Fixtures\Script;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 #[\Tinvar\Attributes\Table('scripts'), \Tinvar\Attributes\TenantScoped]
 final class OldScript extends Model
@@ -104,7 +106,7 @@ it('compiles a model written with the old names to what the new names give it', 
 
 it('holds a model written with the old #[TenantScoped] to the tenant in force, and to nothing without one', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('renamed'));
+    $orm = new Orm($fixture->connection, new IdentityMap('renamed'), tenants: Tenancy::flat());
 
     expect(fn () => $orm->all(OldScript::class))->toThrow(NoTenantContext::class);
 
@@ -120,7 +122,7 @@ it('holds a model written with the old #[TenantScoped] to the tenant in force, a
 
 it('runs an old-named #[BeforeSave] hook', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('renamed'));
+    $orm = new Orm($fixture->connection, new IdentityMap('renamed'), tenants: Tenancy::flat());
 
     $saved = $orm->actAs('acme', function () use ($orm, $fixture): string {
         $script = $orm->find(OldScript::class, $fixture->scripts['acme'][0]) ?? throw new \LogicException('no script');

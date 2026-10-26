@@ -21,12 +21,14 @@ use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\Site;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 use Tinvar\Tests\Orm\Fixtures\Unit;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 final class NoTable extends Model
 {
@@ -93,7 +95,7 @@ function sqlite(string ...$schema): Orm
         $pdo->exec($statement);
     }
 
-    return new Orm(new PdoConnection($pdo), new IdentityMap('test'));
+    return new Orm(new PdoConnection($pdo), new IdentityMap('test'), tenants: Tenancy::flat());
 }
 
 function unit(string $name): Unit
@@ -163,7 +165,7 @@ describe('model metadata', function () {
     // the model's own columns, not merely quoted.
     it('refuses an order-by column the model does not have, or a malformed one', function (string $column, string $message) {
         $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-        $orm = new Orm($fixture->connection, new IdentityMap('test'));
+        $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
         expect(fn () => $orm->all(Rack::class, $column))->toThrow(MappingException::class, $message);
     })->with([
@@ -176,7 +178,7 @@ describe('model metadata', function () {
 // render would hang until its deadline instead of failing.
 it('reports a render whose fibers wait on nothing it can load', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-    $scheduler = new BatchScheduler(new Orm($fixture->connection, new IdentityMap('test')));
+    $scheduler = new BatchScheduler(new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat()));
 
     expect(fn () => $scheduler->run(['stuck' => static fn () => \Fiber::suspend()]))
         ->toThrow(\LogicException::class, 'Render stalled: 1 fiber(s) suspended with no pending relation load.');
@@ -252,7 +254,7 @@ describe('unscoped reads', function () {
     // straight from the rows rather than from a shared ghost.
     it('reads a belongsTo across tenants without remembering it', function () {
         $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-        $orm = new Orm($fixture->connection, new IdentityMap('test'));
+        $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
         $code = $orm->acrossTenants(fn () => $orm->find(Rack::class, $fixture->ids['racks'][0])?->site->code);
 
@@ -263,7 +265,7 @@ describe('unscoped reads', function () {
 
 it('deletes a tenant-scoped row only inside its own tenant', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $script = $orm->actAs('acme', fn () => $orm->find(Script::class, $fixture->scripts['acme'][0]));
 
     $fixture->connection->resetStatementCount();
@@ -276,7 +278,7 @@ it('deletes a tenant-scoped row only inside its own tenant', function () {
 
 it('asks nothing of the database for an empty whereIn or relation load, or a flush with nothing pending', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
     expect($orm->whereIn(Rack::class, 'id', []))->toBe([])
         ->and($orm->loadRelationRows(Rack::meta()->relations['units'], []))->toBe([]);

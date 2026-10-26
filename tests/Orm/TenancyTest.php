@@ -11,15 +11,17 @@ use Tinvar\Orm\NoTenantContext;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\ReadOnlyViolation;
 use Tinvar\Tests\Orm\Fixtures\Script;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 function tenantOrm(TenantFixture $fixture): Orm
 {
-    return new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    return new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
 }
 
 it('fails closed when a tenant-scoped model is read with no active tenant', function () {
@@ -176,7 +178,7 @@ describe('acrossTenants', function () {
 
 it('leaves a model with no TenantScoped attribute alone', function () {
     $fixture = new Tinvar\Tests\Orm\Fixtures\Fixture(racks: 2, unitsPerRack: 1);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
     expect($orm->all(Tinvar\Tests\Orm\Fixtures\Rack::class))->toHaveCount(2);
 });
@@ -449,7 +451,7 @@ describe('relations inside acrossTenants', function () {
  */
 it('names a dangling relation instead of leaving a hollow object', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
     $fixture->connection->execute(
         'INSERT INTO racks (id, name, height_u, site_id) VALUES (?, ?, ?, ?)',

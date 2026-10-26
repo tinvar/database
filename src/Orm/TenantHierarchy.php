@@ -14,28 +14,27 @@ namespace Tinvar\Orm;
  * A subtree larger than a read can carry is an error rather than a part of
  * one, since a part would be a silently wrong answer.
  *
- * It ships with the ORM and is what the ORM takes, as a final class, so the
- * limits hold for everyone using this package, with the framework or
- * without it: an application writes the tree, never the walk (ADR 0055).
- * Above the ORM, the code that bounds a session's tenant by a host's and
- * tells the pages reading across a subtree of a write below them asks the
- * same object, through Orm::tenants().
+ * It is the tree tenancy registers with the Orm, as the Orm's
+ * TenantSubtrees: an application writes the tree, never the walk. The Orm
+ * reads it through TenantBounds, which holds its answers to the same limits
+ * again, so they hold for any implementation of the port, this one or an
+ * application's own (ADR 0056).
  */
-final readonly class TenantHierarchy
+final readonly class TenantHierarchy implements TenantSubtrees
 {
     /** Levels walked up from a tenant before it is taken to be under nothing. */
-    public const int MAX_DEPTH = 32;
+    public const int MAX_DEPTH = TenantBounds::MAX_DEPTH;
 
-    /**
-     * Tenants in one subtree, root included, beyond which a read across it
-     * is refused. Each is a bound value in the read's IN list and in the
-     * setting Postgres's policy reads, so the bound is what a statement can
-     * carry with room to spare -- and a parent with more children than this
-     * reads across them with a report or a job, not a page's loader.
-     */
-    public const int MAX_SUBTREE = 1000;
+    /** Tenants in one subtree, root included, beyond which a read across it is refused. */
+    public const int MAX_SUBTREE = TenantBounds::MAX_SUBTREE;
 
     public function __construct(private TenantTree $tree) {}
+
+    /** A tree is a hierarchy, even one whose every tenant is a root. */
+    public function hierarchical(): bool
+    {
+        return true;
+    }
 
     /**
      * Whether $tenant is $root or below it.

@@ -32,9 +32,11 @@ use Tinvar\Support\Uuid;
 use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Site;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 /** @param iterable<Rack> $racks @return list<string> */
 function names(iterable $racks): array
@@ -51,7 +53,7 @@ function names(iterable $racks): array
 function twoSites(): array
 {
     $fixture = new Fixture(racks: 2, unitsPerRack: 0, sites: 2);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     [$first, $second] = $orm->all(Site::class, 'code');
 
     expect(names($first->racks))->toBe(['R-01'])
@@ -126,7 +128,7 @@ it('re-sorts a loaded relation when a write changes the column it is ordered by'
 // to patch; what it reads later comes from the relation-row cache.
 it('serves the write to a relation read afterwards, from the cache', function () {
     $fixture = new Fixture(racks: 2, unitsPerRack: 0, sites: 2);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     [$first, $second] = $orm->all(Site::class, 'code');
     expect(names($first->racks))->toBe(['R-01']);   // loads both sites' rows
     expect($second->racks->isLoaded())->toBeFalse();
@@ -142,7 +144,7 @@ it('serves the write to a relation read afterwards, from the cache', function ()
 
 it('does not serve a deleted row to a belongsTo hydrated afterwards', function () {
     $fixture = new Fixture(racks: 2, unitsPerRack: 0, sites: 1);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     [$firstId, $secondId] = $fixture->ids['racks'];
 
     $site = $orm->find(Rack::class, $firstId)?->site ?? throw new \LogicException('no site');
@@ -207,7 +209,7 @@ it('does not patch another tenant\'s row into a loaded relation from an unscoped
     $pdo->prepare('INSERT INTO cards VALUES (?, ?, ?, ?)')->execute([Uuid::v7(), 'acme-card', $acmeBoard, 'acme']);
     $pdo->prepare('INSERT INTO cards VALUES (?, ?, ?, ?)')->execute([$globexCard, 'globex-card', $globexBoard, 'globex']);
 
-    $orm = new Orm(new PdoConnection($pdo), new IdentityMap('test'));
+    $orm = new Orm(new PdoConnection($pdo), new IdentityMap('test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $board = $orm->find(Board::class, $acmeBoard) ?? throw new \LogicException('no board');
     expect(array_map(static fn (Card $c): string => $c->name, $board->cards->all()))->toBe(['acme-card']);

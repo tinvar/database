@@ -28,11 +28,13 @@ use Tinvar\Orm\Schema\PostgresDialect;
 use Tinvar\Tests\Orm\Fixtures\MigrationFiles;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\Databases;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 
 require_once __DIR__ . '/Fixtures/migrations.php';
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
 require_once __DIR__ . '/Fixtures/databases.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 /**
  * Runs $test in a scratch schema, with public after it on the search path
@@ -207,7 +209,7 @@ describe('row-level security by migration', function () {
                 PHP);
             $migrator = new Migrator($connection, $files->directory);
             $migrator->migrate();
-            $orm = new Orm($connection, new IdentityMap('pgsql'));
+            $orm = new Orm($connection, new IdentityMap('pgsql'), tenants: Tenancy::flat());
 
             expect($migrator->dialect()->hasTenantPolicy($connection, 'scripts'))->toBeTrue()
                 // With no tenant, no row may be written by the owner either.
@@ -229,7 +231,7 @@ describe('row-level security by migration', function () {
             $files->add('2026_10_24_000001_hold_runs', "\$schema->tenantPolicy('runs');", "\$schema->dropTenantPolicy('runs');");
             $migrator = new Migrator($connection, $files->directory);
             $migrator->migrate();
-            $orm = new Orm($connection, new IdentityMap('pgsql'));
+            $orm = new Orm($connection, new IdentityMap('pgsql'), tenants: Tenancy::flat());
 
             expect($orm->actAs(ACME, static fn (): array => $connection->select('SELECT tenant_id FROM runs')))->toBe([['tenant_id' => ACME]])
                 ->and($connection->select('SELECT tenant_id FROM runs'))->toBe([])

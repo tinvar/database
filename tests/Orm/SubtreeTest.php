@@ -16,7 +16,9 @@ namespace Tinvar\Tests\Orm\Subtree;
 
 use Tinvar\Orm\MissingRow;
 use Tinvar\Orm\Orm;
+use Tinvar\Orm\TenantBounds;
 use Tinvar\Orm\TenantHierarchy;
+use Tinvar\Orm\TenantSubtrees;
 use Tinvar\Orm\TenantTree;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\ScriptRun;
@@ -114,19 +116,20 @@ describe('the hierarchy', function () {
         expect(fn () => $huge->subtree('root'))->toThrow(\LengthException::class, 'more than the 1000');
     });
 
-    // The limits ship with the ORM and hold by the Orm's own signature: it
-    // takes this final class, so no tree an application gives it is walked
-    // without them, with this package alone or with the framework (ADR 0055).
-    it('is the final class the Orm takes, so no implementation of it can drop the limits', function () {
+    // The Orm takes the tree through a port, and reads every answer through
+    // its own final TenantBounds, so the limits hold whatever implementation
+    // it is given (ADR 0056; TreeBoundsTest gives it ones that drop them).
+    it('is read by the Orm through its own checks, whatever implements the port', function () {
         $parameter = new \ReflectionMethod(Orm::class, '__construct')->getParameters()[2];
         $type = $parameter->getType();
-        $tenants = new TenantHierarchy(new Tree());
+        $orm = new Orm(new Tenants()->connection, tenants: new TenantHierarchy(new Tree()));
 
         expect($parameter->getName())->toBe('tenants')
-            ->and($type instanceof \ReflectionNamedType ? $type->getName() : null)->toBe(TenantHierarchy::class)
-            ->and(new \ReflectionClass(TenantHierarchy::class)->isFinal())->toBeTrue()
-            ->and(new \ReflectionMethod(Orm::class, 'tenants')->getReturnType()?->__toString())->toBe('?' . TenantHierarchy::class)
-            ->and(new Orm(new Tenants()->connection, tenants: $tenants)->tenants())->toBe($tenants);
+            ->and($type instanceof \ReflectionNamedType ? $type->getName() : null)->toBe(TenantSubtrees::class)
+            ->and(new \ReflectionClass(TenantBounds::class)->isFinal())->toBeTrue()
+            ->and(new \ReflectionMethod(Orm::class, 'tenants')->getReturnType()?->__toString())->toBe('?' . TenantBounds::class)
+            ->and($orm->tenants())->toBeInstanceOf(TenantBounds::class)
+            ->and($orm->tenants()?->contains('reseller', 'acme-west'))->toBeTrue();
     });
 
     it('keeps its names from before the split as aliases, for one release', function () {

@@ -19,11 +19,13 @@ use Tinvar\Orm\Orm;
 use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Script;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 function rackCount(Fixture $fixture): int
 {
@@ -32,7 +34,7 @@ function rackCount(Fixture $fixture): int
 
 it('refuses to update a row that is no longer there', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 0);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     $rack = $orm->find(Rack::class, $fixture->ids['racks'][0]) ?? throw new \LogicException('no rack');
 
     // Deleted by someone else since it was read.
@@ -45,7 +47,7 @@ it('refuses to update a row that is no longer there', function () {
 
 it('refuses to update a row that belongs to another tenant', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $id = $fixture->scripts['globex'][0];
     $globex = $orm->acrossTenants(static fn () => $orm->find(Script::class, $id))
@@ -61,7 +63,7 @@ it('refuses to update a row that belongs to another tenant', function () {
 
 it('words a missing row and another tenant\'s row the same way', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $id = $fixture->scripts['globex'][0];
     $globex = $orm->acrossTenants(static fn () => $orm->find(Script::class, $id))
@@ -90,7 +92,7 @@ it('words a missing row and another tenant\'s row the same way', function () {
 
 it('no longer counts a deleted model as persisted, so saving it inserts the row again', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 0);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     $rack = $orm->find(Rack::class, $fixture->ids['racks'][0]) ?? throw new \LogicException('no rack');
 
     $orm->delete($rack);

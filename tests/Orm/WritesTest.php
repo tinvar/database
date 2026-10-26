@@ -10,15 +10,17 @@ use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\Site;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 function writeOrm(Fixture $fixture): Orm
 {
-    return new Orm($fixture->connection, new IdentityMap('test'));
+    return new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
 }
 
 function newRack(Orm $orm, Site $site, string $name): Rack
@@ -45,7 +47,7 @@ describe('insert', function () {
             ->and($rack->isDirty())->toBeFalse();
 
         // Readable back through a fresh map, so it really is in the database.
-        $reread = (new Orm($fixture->connection, new IdentityMap('fresh')))
+        $reread = (new Orm($fixture->connection, new IdentityMap('fresh'), tenants: Tenancy::flat()))
             ->find(Rack::class, $rack->primaryKey());
 
         expect($reread->name)->toBe('R-NEW')->and($reread->heightU)->toBe(42);
@@ -58,7 +60,7 @@ describe('insert', function () {
 
         $rack = $orm->save(newRack($orm, $site, 'R-LINKED'));
 
-        $reread = (new Orm($fixture->connection, new IdentityMap('fresh')))
+        $reread = (new Orm($fixture->connection, new IdentityMap('fresh'), tenants: Tenancy::flat()))
             ->find(Rack::class, $rack->primaryKey());
 
         expect($reread->site->primaryKey())->toBe($site->primaryKey());
@@ -141,7 +143,7 @@ it('deletes a row and drops it from the identity map', function () {
     $orm->delete($rack);
 
     expect($orm->identityMap()->has(Rack::class, $rack->primaryKey()))->toBeFalse()
-        ->and((new Orm($fixture->connection, new IdentityMap('fresh')))
+        ->and((new Orm($fixture->connection, new IdentityMap('fresh'), tenants: Tenancy::flat()))
             ->find(Rack::class, $rack->primaryKey()))->toBeNull();
 });
 
@@ -153,7 +155,7 @@ describe('transactions', function () {
 
         $rack = $orm->transaction(fn (): Rack => $orm->save(newRack($orm, $site, 'R-TX')));
 
-        expect((new Orm($fixture->connection, new IdentityMap('fresh')))
+        expect((new Orm($fixture->connection, new IdentityMap('fresh'), tenants: Tenancy::flat()))
             ->find(Rack::class, $rack->primaryKey()))->not->toBeNull();
     });
 
@@ -173,7 +175,7 @@ describe('transactions', function () {
             // expected
         }
 
-        expect((new Orm($fixture->connection, new IdentityMap('fresh')))
+        expect((new Orm($fixture->connection, new IdentityMap('fresh'), tenants: Tenancy::flat()))
             ->find(Rack::class, $id))->toBeNull();
     });
 
@@ -195,7 +197,7 @@ describe('transactions', function () {
 describe('writes are tenant-scoped', function () {
     it('stamps the tenant rather than taking it from the model', function () {
         $fixture = new TenantFixture();
-        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
 
         $script = $orm->actAs('acme', function () use ($orm): Script {
             $new = (new ReflectionClass(Script::class))->newInstanceWithoutConstructor();
@@ -211,7 +213,7 @@ describe('writes are tenant-scoped', function () {
 
     it('refuses to insert a tenant-scoped row with no tenant', function () {
         $fixture = new TenantFixture();
-        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
         $new = (new ReflectionClass(Script::class))->newInstanceWithoutConstructor();
         Script::meta()->set($new, 'name', 'orphan');
 
@@ -220,7 +222,7 @@ describe('writes are tenant-scoped', function () {
 
     it('puts the tenant predicate on an update', function () {
         $fixture = new TenantFixture();
-        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
 
         $orm->actAs('acme', function () use ($orm, $fixture): void {
             $script = $orm->find(Script::class, $fixture->scripts['acme'][0]);
@@ -237,7 +239,7 @@ describe('writes are tenant-scoped', function () {
 // 500 -- and inside a transaction it would abort the transaction.
 it('finds nothing for a key that is not a UUID, without asking the database', function (string $id) {
     $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     $fixture->connection->resetStatementCount();
 
     expect($orm->find(Rack::class, $id))->toBeNull()
@@ -248,7 +250,7 @@ it('finds nothing for a key that is not a UUID, without asking the database', fu
 // could never be read back.
 it('refuses to insert under a preset key that is not a UUID', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 1, sites: 1);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     $rack = new Rack('R-x');
     $rack->site = $orm->find(Site::class, $fixture->ids['sites'][0]);
     (new ReflectionProperty(Rack::class, 'id'))->setValue($rack, 'rack-1');

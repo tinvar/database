@@ -124,19 +124,30 @@ final class Orm
     private ?array $reads = null;
 
     /**
-     * @param TenantHierarchy|null $tenants the application's tenant tree: what
-     *        withinSubtree() reads across, and what lets a host's tenant bound a
-     *        session's (ResolveTenant). Null for tenants with no hierarchy.
-     *        The final class, not an interface, so its limits -- a walk
-     *        that loops or runs too deep says "not under", a subtree too
-     *        large to read throws -- hold for every Orm by its type, with
-     *        this package alone as with the framework (ADR 0055).
+     * Whether tenancy was registered with this Orm: without it, no
+     * #[TenantScoped] model is read or written at all.
+     */
+    private readonly bool $tenancy;
+
+    /** The registered tree, checked; null with no tenancy, or tenants side by side. */
+    private readonly ?TenantBounds $tenants;
+
+    /**
+     * @param TenantSubtrees|null $tenants the tenancy registered with this Orm: the
+     *        application's tenant tree, as tinvar/tenancy hands it over. Null for
+     *        none, and then every read or write of a #[TenantScoped] model throws
+     *        NoTenantContext, whatever tenant is in force. Its answers are read
+     *        through TenantBounds, so the limits of a walk -- a loop or more than
+     *        32 levels says "not under", a subtree of more than 1,000 tenants
+     *        throws -- hold whatever an implementation returns (ADR 0056).
      */
     public function __construct(
         private readonly Connection $connection,
         private readonly IdentityMap $identityMap = new IdentityMap(),
-        private readonly ?TenantHierarchy $tenants = null,
+        ?TenantSubtrees $tenants = null,
     ) {
+        $this->tenancy = $tenants !== null;
+        $this->tenants = $tenants !== null && $tenants->hierarchical() ? new TenantBounds($tenants) : null;
         $this->unscopedByFiber = new \WeakMap();
         $this->readOnlyByFiber = new \WeakMap();
         $this->subtreeByFiber = new \WeakMap();
@@ -147,9 +158,13 @@ final class Orm
         // running it is in -- the same per-fiber answer the ORM's own filter
         // reads, so the two layers can never disagree about whose rows a
         // statement may see. One Orm per connection: a second one built over
-        // it takes the connection over.
+        // it takes the connection over. With no tenancy registered it is told
+        // no tenant, never lifted, whatever the Orm's context says: raw SQL
+        // around an Orm that reads no tenant's rows reads none either.
         if ($connection instanceof TenantSetting) {
-            $connection->followTenant(fn (): array => [$this->identityMap->tenant(), $this->isUnscoped(), $this->subtreeInForce() ?? []]);
+            $connection->followTenant(fn (): array => $this->tenancy
+                ? [$this->identityMap->tenant(), $this->isUnscoped(), $this->subtreeInForce() ?? []]
+                : ['', false, []]);
         }
     }
 
@@ -194,10 +209,21 @@ final class Orm
         return $this->reads ?? [];
     }
 
-    /** The application's tenant tree, or null when its tenants have none. */
-    public function tenants(): ?TenantHierarchy
+    /**
+     * The registered tenant tree, read within its limits: what withinSubtree()
+     * reads across, and what the code above the Orm bounds a session's
+     * tenant by. Null with no tenancy registered, and for tenants that have
+     * no hierarchy.
+     */
+    public function tenants(): ?TenantBounds
     {
         return $this->tenants;
+    }
+
+    /** Whether tenancy was registered with this Orm, so a #[TenantScoped] model can be read. */
+    public function hasTenancy(): bool
+    {
+        return $this->tenancy;
     }
 
     public function scheduler(): ?BatchScheduler
@@ -297,6 +323,12 @@ final class Orm
      */
     public function switchTenant(string $tenant): void
     {
+        // A tenant's name is printable text: what a Postgres setting can
+        // carry, and never the claim a token minted with no tenancy carries,
+        // which is spelled with a control character (TenantBounds::isName()).
+        if ($tenant !== '' && !TenantBounds::isName($tenant)) {
+            throw new \InvalidArgumentException('A tenant\'s name has no control character in it.');
+        }
         if ($tenant === $this->identityMap->tenant()) {
             return;
         }
@@ -470,6 +502,7 @@ final class Orm
      * @param \Closure(): T $work
      * @return T
      * @throws \LogicException where no membership granted it, with no tenant tree, or no tenant
+     * @throws \LengthException for a subtree larger than TenantBounds::MAX_SUBTREE
      */
     public function withinSubtree(\Closure $work): mixed
     {
@@ -821,7 +854,15 @@ final class Orm
      */
     private function tenantScope(ModelMeta $meta): array
     {
-        if ($meta->tenantColumn === null || $this->unscopedDepth() > 0) {
+        if ($meta->tenantColumn === null) {
+            return ['', []];
+        }
+        // Before acrossTenants() is asked: with no tenancy registered it
+        // lifts nothing, since no tenant's rows are anyone's to read.
+        if (!$this->tenancy) {
+            throw NoTenantContext::noTenancy($meta->class);
+        }
+        if ($this->unscopedDepth() > 0) {
             return ['', []];
         }
 
@@ -1275,6 +1316,9 @@ final class Orm
         $values = $meta->writeValues($model);
 
         if ($meta->tenantColumn !== null) {
+            if (!$this->tenancy) {
+                throw NoTenantContext::noTenancy($meta->class);
+            }
             $tenant = $this->identityMap->tenant();
             if ($tenant === '') {
                 throw new NoTenantContext($meta->class);

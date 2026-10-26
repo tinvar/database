@@ -16,6 +16,9 @@ use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
+
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 #[Table('ghost_projects'), TenantScoped]
 final class Project extends Model
@@ -56,7 +59,7 @@ function ghostOrm(): Orm
     $pdo->exec("INSERT INTO ghost_tasks VALUES ('" . STRAY_TASK . "', 'stray', '" . GLOBEX_PROJECT . "', 'acme'), ('" . GOOD_TASK . "', 'good', '" . ACME_PROJECT . "', 'acme')");
     $pdo->exec("INSERT INTO ghost_tasks VALUES ('" . PLANTED_TASK . "', 'globex secrets', '" . ACME_PROJECT . "', 'globex')");
 
-    return new Orm(new PdoConnection($pdo), new IdentityMap('test'));
+    return new Orm(new PdoConnection($pdo), new IdentityMap('test'), tenants: Tenancy::flat());
 }
 
 // Touched first inside acrossTenants(), the ghost read its row unscoped --

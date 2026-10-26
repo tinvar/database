@@ -27,8 +27,10 @@ use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\Schema\SqliteDialect;
 use Tinvar\Tests\Orm\Fixtures\MigrationFiles;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 
 require_once __DIR__ . '/Fixtures/migrations.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 #[Table('gen_sites')]
 final class Site extends Model
@@ -169,7 +171,7 @@ it('writes a migration the ORM can then read and write through', function () {
     [$files, $connection, $generator] = setUp();
     file_put_contents("{$files->directory}/2026_10_24_000001_create_gen.php", (string) $generator->generate(MODELS, '2026-10-24'));
     new Migrator($connection, $files->directory)->migrate();
-    $orm = new Orm($connection, new IdentityMap('gen'));
+    $orm = new Orm($connection, new IdentityMap('gen'), tenants: Tenancy::flat());
 
     $site = new Site();
     $site->code = 'LAX';

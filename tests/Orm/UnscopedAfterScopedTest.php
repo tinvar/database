@@ -27,11 +27,13 @@ use Tinvar\Support\Uuid;
 use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Script;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 #[Table('owners'), TenantScoped]
 final class Owner extends Model
@@ -59,7 +61,7 @@ function petOfAnotherTenant(): array
     $pdo->prepare('INSERT INTO owners VALUES (?, ?, ?)')->execute([$owner, 'globex-owner', 'globex']);
     $pdo->prepare('INSERT INTO pets VALUES (?, ?)')->execute([$pet, $owner]);
 
-    $orm = new Orm(new PdoConnection($pdo), new IdentityMap('test'));
+    $orm = new Orm(new PdoConnection($pdo), new IdentityMap('test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
 
     return [$orm, $pet];
@@ -67,7 +69,7 @@ function petOfAnotherTenant(): array
 
 it('reads a hasMany inside acrossTenants that a scoped read already loaded', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $id = $fixture->scripts['acme'][0];
 
@@ -80,7 +82,7 @@ it('reads a hasMany inside acrossTenants that a scoped read already loaded', fun
 
 it('reads a belongsTo inside acrossTenants that a scoped read already loaded', function () {
     $fixture = new Fixture(racks: 1, unitsPerRack: 0);
-    $orm = new Orm($fixture->connection, new IdentityMap('test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
     $id = $fixture->ids['racks'][0];
 
     expect($orm->find(Rack::class, $id)?->site->code)->toBe('LAX0');

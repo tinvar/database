@@ -27,6 +27,7 @@ use Tinvar\Orm\TenantTree;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\Databases;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 
 use function Tinvar\Tests\Orm\Fixtures\withPolicies;
 
@@ -34,6 +35,7 @@ require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/tenant.php';
 require_once __DIR__ . '/Fixtures/databases.php';
 require_once __DIR__ . '/Fixtures/policies.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 describe('the policy', function () {
     it('is enabled, forced on the table owner, and matches the tenant setting -- or nothing', function () {
@@ -75,7 +77,7 @@ describe('the policy', function () {
     // SQLite has no policies to read a setting: nothing is sent to it.
     it('sets nothing on a connection other than Postgres', function () {
         $connection = new PdoConnection(new \PDO('sqlite::memory:'));
-        $orm = new Orm($connection, new IdentityMap('test'));
+        $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
         $orm->actAs('acme', static fn (): array => $connection->select('SELECT 1'));
 
@@ -106,7 +108,7 @@ function rawNames(PdoConnection $connection): array
 describe('on Postgres', function () {
     it('lets a query that forgot the tenant predicate read only the tenant in force', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
             expect($orm->actAs('acme', static fn (): array => rawNames($connection)))->toBe(['acme-script-1', 'acme-script-2'])
                 ->and($orm->actAs('globex', static fn (): array => rawNames($connection)))->toBe(['globex-script-1', 'globex-script-2']);
@@ -115,7 +117,7 @@ describe('on Postgres', function () {
 
     it('lets it read nothing with no tenant, where the ORM itself fails closed', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
             expect(rawNames($connection))->toBe([])
                 ->and(fn () => $orm->all(Script::class))->toThrow(NoTenantContext::class);
@@ -124,7 +126,7 @@ describe('on Postgres', function () {
 
     it('lifts the policy inside acrossTenants(), as the ORM lifts its filter, and puts it back after', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
             expect($orm->acrossTenants(static fn (): array => rawNames($connection)))->toHaveCount(4)
                 ->and(rawNames($connection))->toBe([]);
@@ -168,7 +170,7 @@ describe('on Postgres', function () {
     // it back at once, not at the next statement.
     it('holds a raw PDO handle to it while the tenant is in force, and to nothing after the reset', function () {
         withPolicies(function (PdoConnection $connection, \PDO $pdo): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
             $raw = static fn (): int => \count($pdo->query('SELECT name FROM scripts')->fetchAll());
 
             $inside = $orm->actAs('acme', static function () use ($connection, $raw): int {
@@ -186,7 +188,7 @@ describe('on Postgres', function () {
     // the setting follows whichever fiber runs the statement.
     it('follows the fiber running each statement, not the last one to switch', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
             /** @var \ArrayObject<string, list<string>> $seen */
             $seen = new \ArrayObject();
 
@@ -213,7 +215,7 @@ describe('on Postgres', function () {
 
     it('holds inside the read-only transaction loaders run in', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
             $names = $orm->actAs('globex', static fn (): array => $orm->readOnly(static fn (): array => rawNames($connection)));
 
@@ -226,7 +228,7 @@ describe('on Postgres', function () {
     // connection would not tell it again, and the policy would read none.
     it('tells the session again after a rollback took the setting back', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
             $names = $orm->actAs('acme', static function () use ($connection): array {
                 try {
@@ -252,7 +254,7 @@ describe('on Postgres', function () {
     // globex's rows, for a job that went on as acme after the failure.
     it('tells the session again after a refused commit took the setting back', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
             $orm->actAs('globex', static fn (): array => rawNames($connection));
 
             $names = $orm->actAs('acme', static function () use ($orm, $connection): array {
@@ -273,7 +275,7 @@ describe('on Postgres', function () {
     // rolled back while PDO reported it committed: the setting went with it.
     it('tells the session again after a failed statement aborted the transaction', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
             $orm->actAs('globex', static fn (): array => rawNames($connection));
 
             $names = $orm->actAs('acme', static function () use ($orm, $connection): array {
@@ -298,7 +300,7 @@ describe('on Postgres', function () {
 
     it('refuses a raw write of another tenant\'s row', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'));
+            $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
 
             expect(fn () => $orm->actAs('acme', static fn (): int => $connection->execute(
                 'INSERT INTO scripts VALUES (?, ?, ?)',

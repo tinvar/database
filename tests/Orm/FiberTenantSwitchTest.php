@@ -18,13 +18,15 @@ namespace Tinvar\Tests\Orm\FiberTenantSwitch;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\Orm;
 use Tinvar\Tests\Orm\Fixtures\Script;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
 require_once __DIR__ . '/Fixtures/tenant.php';
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 it('keeps the main tenant\'s rows through a flush that loads for another tenant', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $acme = $fixture->scripts['acme'][0];
     $globex = $fixture->scripts['globex'][0];
@@ -49,7 +51,7 @@ it('keeps the main tenant\'s rows through a flush that loads for another tenant'
 
 it('keeps the main tenant\'s rows when an actAs() inside a fiber exits', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $acme = $fixture->scripts['acme'][0];
     $globex = $fixture->scripts['globex'][0];
@@ -74,7 +76,7 @@ it('keeps the main tenant\'s rows when an actAs() inside a fiber exits', functio
 
 it('still resets the entered tenant on a switch the main context makes', function () {
     $fixture = new TenantFixture();
-    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'));
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
     $orm->switchTenant('acme');
     $id = $fixture->scripts['acme'][0];
     $before = $orm->find(Script::class, $id);

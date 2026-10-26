@@ -14,6 +14,8 @@ use Tinvar\Orm\Model;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Support\Uuid;
 
+require_once __DIR__ . '/tenancy.php';
+
 #[Table('scripts'), TenantScoped]
 final class Script extends Model
 {

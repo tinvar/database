@@ -10,6 +10,7 @@ use Tinvar\Orm\PdoConnection;
 use Tinvar\Support\Uuid;
 use Tinvar\Orm\TenantHierarchy;
 use Tinvar\Orm\TenantTree;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
 
 require_once __DIR__ . '/tenant.php';
 
@@ -88,6 +89,6 @@ final class Tenants
 
     public function orm(?Tree $tree = new Tree()): Orm
     {
-        return new Orm($this->connection, new IdentityMap('hierarchy-test'), $tree === null ? null : new TenantHierarchy($tree));
+        return new Orm($this->connection, new IdentityMap('hierarchy-test'), $tree === null ? Tenancy::flat() : new TenantHierarchy($tree));
     }
 }
