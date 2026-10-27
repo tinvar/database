@@ -1774,14 +1774,15 @@ final readonly class Query
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
 
-        // Postgres locks the model's own rows alone: a joined table's would
-        // be refused on the side of an outer join that may be NULL. SQLite
-        // has no row locks, and needs none: its write transaction began
-        // IMMEDIATE, holding the database.
+        // The model's own rows are locked alone. Postgres would refuse a
+        // joined table's on the side of an outer join that may be NULL;
+        // MySQL would lock every joined row it looked at -- another
+        // tenant's aisle a shelf of this tenant's names, whose own writes
+        // would then wait on this one. SQLite has no row locks, and needs
+        // none: its write transaction began IMMEDIATE, holding the database.
         $connection = $this->orm->statements();
         $lock = match ($connection instanceof PdoConnection ? $connection->driver() : '') {
-            'pgsql' => ' FOR UPDATE OF ' . Identifiers::quote($scope->alias),
-            'mysql' => ' FOR UPDATE',
+            'pgsql', 'mysql' => ' FOR UPDATE OF ' . Identifiers::quote($scope->alias),
             default => '',
         };
 
