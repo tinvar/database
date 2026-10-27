@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
+use Tinvar\Orm\Builder\Assignment;
 use Tinvar\Orm\Builder\ColumnRef;
 use Tinvar\Orm\Builder\Compiler;
 use Tinvar\Orm\Builder\Condition;
@@ -1160,8 +1161,11 @@ final readonly class Query
      *
      * Refused, like save(), inside a loader or query body. Refused, too, on
      * a model with #[BeforeSave] methods: they keep what a model must be
-     * when it is saved, and a statement makes no model to run them on, so
-     * update() would write past them. Save such rows one at a time.
+     * when it is saved, and a statement reads no row to run them on -- a
+     * model made of the fields set would show them a row that is not the
+     * one stored, and `$this->shippedAt ??= now()` would overwrite a date
+     * the row holds -- so update() would write past them. Save such rows
+     * one at a time (ADR 0073).
      *
      * Two statements, in one transaction: the matching keys, locked where
      * the database can (FOR UPDATE on Postgres and MySQL; SQLite's write
@@ -1170,12 +1174,13 @@ final readonly class Query
      * read again and takes what was stored; loaded relations follow, as
      * after save() (Orm::followStatementWrite()).
      *
-     * A field's value may be an Increment -- `['stock' => Increment::by(-1)]`,
-     * or increment() and decrement() -- which adds to what the row holds
-     * when it is written, `stock = stock + ?`, rather than what a read of it
-     * held before: the one expression a write sets, a value and never text
-     * (ADR 0064). Its rows are read again afterwards, every one, so the ORM
-     * follows what was stored.
+     * A field's value may be a Change -- `['stock' => Change::add(-1)->atLeast(0)]`,
+     * a multiple, a copy of another of the row's columns; an Increment, or
+     * increment() and decrement(), is an addition -- which works out what the
+     * row holds when it is written, `stock = stock + ?`, rather than from
+     * what a read of it held before: a closed set of expressions, each a
+     * value and never text (ADR 0064, ADR 0073). Its rows are read again
+     * afterwards, every one, so the ORM follows what was stored.
      *
      * @param array<string, mixed> $values field => value: a property, a column, or a #[BelongsTo] (a model)
      */
@@ -1201,9 +1206,10 @@ final readonly class Query
             $values = [];
             foreach ($set as $column => $value) {
                 $quoted = Identifiers::quote($column);
-                if ($value instanceof Increment) {
-                    $assignments[] = "{$quoted} = {$quoted} + " . $compiler->placeholder($value->amount);
-                    $values[] = $value->amount;
+                if ($value instanceof Assignment) {
+                    [$sql, $bindings] = $value->sql($column, $compiler);
+                    $assignments[] = "{$quoted} = {$sql}";
+                    array_push($values, ...$bindings);
                 } else {
                     $assignments[] = "{$quoted} = ?";
                     $values[] = $value;
@@ -1306,6 +1312,14 @@ final readonly class Query
      * Called on the query a model starts, unnarrowed: an INSERT reads
      * nothing, and a condition on one would be one it ignored.
      *
+     * A model's #[BeforeSave] methods run on each row, as save() runs them
+     * on a new model: on a model made from the row's fields, its relations
+     * the models given, before the key is minted; what the model holds
+     * after them -- a column a hook derived or changed -- is what is
+     * inserted, and the tenant is stamped after them whatever a hook did.
+     * A hook that reads a field the row does not set throws, as it would
+     * on a model missing it, and nothing is written (ADR 0073).
+     *
      * @param list<array<string, mixed>> $rows each naming the same fields
      */
     public function insert(array $rows): int
@@ -1362,7 +1376,12 @@ final readonly class Query
     private function writeRows(string $what, array $rows, ?array $uniqueBy, ?array $update): int
     {
         $this->orm->refuseWriteOf($what);
-        $this->refuseHooks($what);
+        // insert() runs a model's #[BeforeSave] methods on each new row, a
+        // whole row as save() would see it; upsert() refuses them, since a
+        // row it updates is one it never read (ADR 0073).
+        if ($uniqueBy !== null) {
+            $this->refuseHooks($what);
+        }
         if ($this->conditions !== [] || $this->orders !== [] || $this->limit !== null || $this->offset !== null || $this->with !== []
             || $this->groups !== [] || $this->havings !== [] || $this->distinct || $this->measures !== [] || $this->unionAll !== null) {
             throw new \LogicException("{$what} reads nothing: call it on the query a model starts, not on one narrowed.");
@@ -1381,7 +1400,7 @@ final readonly class Query
             if (!\is_array($row)) {
                 throw new \InvalidArgumentException("{$what} takes rows, each a map of field => value.");
             }
-            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant);
+            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant, hooks: $uniqueBy === null && $this->meta->hasBeforeSave());
             $one[$this->meta->idColumn] ??= Uuid::v7();
 
             $names = array_keys($one);
@@ -1736,7 +1755,7 @@ final readonly class Query
         if ($this->meta->hasBeforeSave()) {
             throw new \LogicException(
                 "{$this->class} has #[BeforeSave] methods, which keep what a model must be when it is saved; {$what} "
-                . 'makes no model to run them on, and would write past them. Save each row instead.',
+                . 'writes rows it never read, whole, to run them on, and would write past them. Save each row, or insert() new ones.',
             );
         }
     }
@@ -1800,16 +1819,16 @@ final readonly class Query
      * After update(): each written row followed, a held model's read again
      * so it takes what was stored.
      *
-     * Every row, where an Increment was written: what it added to is known
+     * Every row, where a Change was written: what it worked out is known
      * only to the database, and a relation's cached row must not be patched
-     * with the Increment itself.
+     * with the Change itself.
      *
      * @param list<string> $ids
      * @param array<string, mixed> $set column => value as written
      */
     private function followUpdate(array $ids, array $set): void
     {
-        $added = array_filter($set, static fn (mixed $value): bool => $value instanceof Increment) !== [];
+        $added = array_filter($set, static fn (mixed $value): bool => $value instanceof Assignment) !== [];
         $read = $added ? $ids : array_values(array_filter($ids, fn (string $id): bool => $this->orm->holdsModel($this->class, $id)));
         $rows = [];
         foreach (array_chunk($read, self::MAX_VALUES) as $chunk) {

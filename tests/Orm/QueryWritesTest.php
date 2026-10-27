@@ -297,7 +297,7 @@ describe('insert() and upsert()', function () {
         expect(fn () => $orm->query(Brand::class)->where('rank', 1)->insert([['name' => 'Omega', 'rank' => 9]]))->toThrow(\LogicException::class, 'reads nothing')
             ->and(fn () => $orm->query(Brand::class)->insert([['name' => 'Omega', 'rank' => 9], ['name' => 'Psi']]))->toThrow(\InvalidArgumentException::class, 'same fields')
             ->and(fn () => $orm->query(Brand::class)->insert([['name' => 'Omega', 'rank' => 9, 'id' => 'not-a-uuid']]))->toThrow(MappingException::class, 'UUID')
-            ->and(fn () => $orm->query(TrimmedBrand::class)->insert([['name' => ' Omega ', 'rank' => 9]]))->toThrow(\LogicException::class, '#[BeforeSave]')
+            ->and(fn () => $orm->query(TrimmedBrand::class)->upsert([['name' => ' Omega ', 'rank' => 9]], 'name'))->toThrow(\LogicException::class, '#[BeforeSave]')
             ->and($orm->query(Brand::class)->insert([]))->toBe(0)
             ->and(fn () => $orm->readOnly(static fn (): int => $orm->query(Brand::class)->insert([['name' => 'Omega', 'rank' => 9]])))
             ->toThrow(ReadOnlyViolation::class, 'insert()');
