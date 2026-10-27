@@ -31,9 +31,9 @@ namespace Tinvar\Orm;
  * - **It fails loudly.** A tree it cannot read throws, and the read that
  *   asked fails with it, rather than answering with part of a tree.
  *
- * tinvar/tenancy's TenantHierarchy implements it over the application's
- * own tree, and tinvar/testing's TenantTreeConformance holds any
- * implementation to the contract.
+ * tinvar/tenancy implements it over the tree an application writes, and
+ * tinvar/testing ships a conformance kit that holds any implementation to
+ * this contract.
  */
 interface TenantSubtrees
 {
