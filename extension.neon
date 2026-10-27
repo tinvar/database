@@ -1,8 +1,35 @@
-# The query builder's PHPStan rule: column and relation names in a call on a
-# Query<T> are checked against T's compiled metadata (ADR 0057). Include it
-# from an application's phpstan.neon:
+# The ORM's PHPStan rules (ADR 0057): column and relation names in a call on
+# a Query<T> are checked against T's compiled metadata, and raw SQL sent
+# through a Connection that names a tenant table is flagged. Include it
+# from an application's phpstan.neon, and list the models whose tables the
+# raw SQL check reads -- each #[TenantScoped] one's table is a tenant's --
+# and any tenant table no model maps:
 #
 #   includes:
 #       - vendor/tinvar/database/extension.neon
+#   parameters:
+#       tinvar:
+#           models: [App\Models\Rack]
+#           tenantTables: []
+parameters:
+    tinvar:
+        models: []
+        tenantTables: []
+
+parametersSchema:
+    tinvar: structure([
+        models: listOf(string())
+        tenantTables: listOf(string())
+    ])
+
 rules:
     - Tinvar\Orm\PHPStan\QueryIdentifierRule
+
+services:
+    -
+        class: Tinvar\Orm\PHPStan\RawTenantSqlRule
+        arguments:
+            models: %tinvar.models%
+            tenantTables: %tinvar.tenantTables%
+        tags:
+            - phpstan.rules.rule

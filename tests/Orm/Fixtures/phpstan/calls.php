@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Tests\Orm\PHPStanFixture;
 
 use Tinvar\Orm\Orm;
+use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\Query;
 
 /*
@@ -44,4 +45,20 @@ function calls(Orm $orm, string $fromRuntime): void
 
     // A query over no one model PHPStan can name is not read.
     $any = static fn (Query $q): Query => $q->where('anything', 1);
+}
+
+/*
+ * Raw SQL through a Connection: flagged where it names a tenant table --
+ * Crate's, which is #[TenantScoped], or crate_events, listed as one.
+ */
+function raw(Orm $orm, PdoConnection $pdo, string $fromRuntime): void
+{
+    $_ = $orm->connection()->select('SELECT id FROM crates WHERE label = ?', ['x']); // refused
+    $_ = $orm->connection()->select('SELECT id FROM pallets');
+    $_ = $orm->connection()->execute('UPDATE "public"."CRATES" SET label = ?', ['x']); // refused
+    $_ = $pdo->execute('DELETE FROM crate_events'); // refused
+    $_ = $orm->statements()->select('SELECT c.id FROM pallets p JOIN crates c ON c.pallet_id = p.id'); // refused
+    $_ = $orm->connection()->select("SELECT 'crates' AS word -- crates");
+    $_ = $orm->connection()->select('SELECT id FROM ' . ($fromRuntime === 'a' ? 'pallets' : 'crates')); // refused
+    $_ = $orm->connection()->select($fromRuntime); // refused
 }

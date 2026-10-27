@@ -30,6 +30,9 @@ function analyse(): array
         '    bootstrapFiles:',
         "        - {$fixtures}/models.php",
         "    tmpDir: {$scratch}/cache",
+        '    tinvar:',
+        '        models: [Tinvar\Tests\Orm\PHPStanFixture\Crate, Tinvar\Tests\Orm\PHPStanFixture\Pallet]',
+        '        tenantTables: [crate_events]',
         '',
     ]));
 
@@ -73,5 +76,8 @@ it('reports every misspelt column, relation and raw condition, and nothing else'
 
     expect($lines)->toBe($refused, $said)
         ->and($messages[0])->toContain('Query<Tinvar\Tests\Orm\PHPStanFixture\Crate>::where()')
-        ->and($messages[0])->toContain("has no column 'lable'");
+        ->and($messages[0])->toContain("has no column 'lable'")
+        ->and(implode("\n", $messages))->toContain('Connection::select() sends raw SQL on the tenant table crates: nothing adds the tenant predicate')
+        ->and(implode("\n", $messages))->toContain('Connection::execute() sends raw SQL on the tenant table crate_events')
+        ->and(implode("\n", $messages))->toContain('Connection::select() is sent SQL PHPStan cannot read');
 });

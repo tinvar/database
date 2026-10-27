@@ -8,6 +8,7 @@ use Tinvar\Orm\Attributes\BelongsTo;
 use Tinvar\Orm\Attributes\Column;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
+use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Orm\Model;
 
 /*
@@ -22,7 +23,7 @@ final class Pallet extends Model
     #[Column] public string $code;
 }
 
-#[Table('crates')]
+#[Table('crates'), TenantScoped]
 final class Crate extends Model
 {
     #[Id] public private(set) string $id;
