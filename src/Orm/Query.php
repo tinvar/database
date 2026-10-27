@@ -1267,9 +1267,11 @@ final readonly class Query
      *
      * MySQL has no conflict target: ON DUPLICATE KEY UPDATE answers to any
      * unique index the table has. The target is still checked against the
-     * metadata; and on a #[TenantScoped] model upsert() is refused there,
-     * since a collision on an index the tenant column does not lead would
-     * update another tenant's row.
+     * metadata; and on a #[TenantScoped] model it is not used at all, since
+     * a collision on an index the tenant column does not lead would update
+     * another tenant's row: the tenant's rows with the keys are read and
+     * locked, updated by their primary keys, and the rest inserted
+     * (upsertLocked(), ADR 0073).
      *
      * @param list<array<string, mixed>> $rows each naming the same fields
      * @param string|list<string> $uniqueBy the key's fields
@@ -1326,6 +1328,10 @@ final readonly class Query
         [$target, $set] = $uniqueBy === null ? [null, []] : $this->conflict($what, $stored, $columns, $uniqueBy, $update);
 
         return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $tenant): int {
+            if ($target !== null && $tenant !== null && $this->onMySql()) {
+                return $this->upsertLocked($stored, $columns, $target, $set, $tenant);
+            }
+
             $table = Identifiers::quote($this->meta->table);
             $list = implode(', ', array_map(Identifiers::quote(...), $columns));
             $tuple = '(' . Compiler::placeholders(\count($columns)) . ')';
@@ -1383,18 +1389,6 @@ final readonly class Query
      */
     private function conflict(string $what, array $stored, array $columns, array $uniqueBy, ?array $update): array
     {
-        // MySQL's ON DUPLICATE KEY UPDATE answers to whichever unique index
-        // a row collides with, whatever the statement names: one a tenant's
-        // key is not led by -- an email unique across every tenant -- would
-        // have it update another tenant's row. Refused, not guarded.
-        $connection = $this->orm->statements();
-        if ($this->meta->tenantColumn !== null && $connection instanceof PdoConnection && $connection->driver() === 'mysql') {
-            throw new \LogicException(
-                "{$what} on a #[TenantScoped] model is refused on MySQL, which cannot hold a conflict to the tenant's key: "
-                . 'a row colliding with another tenant\'s on any unique index would update it.',
-            );
-        }
-
         $key = array_map(fn (string $name): string => $this->ownColumn($name), $uniqueBy);
         $target = $this->meta->conflictTarget($key) ?? throw new MappingException(
             "{$this->class} declares no #[Unique] key over (" . implode(', ', $key) . "), so {$what} has nothing to conflict on. "
@@ -1468,6 +1462,131 @@ final readonly class Query
         return $set === []
             ? $clause . ' DO NOTHING'
             : $clause . ' DO UPDATE SET ' . implode(', ', array_map(static fn (string $c): string => Identifiers::quote($c) . ' = excluded.' . Identifiers::quote($c), $set));
+    }
+
+    private function onMySql(): bool
+    {
+        $connection = $this->orm->statements();
+
+        return $connection instanceof PdoConnection && $connection->driver() === 'mysql';
+    }
+
+    /**
+     * upsert() on a #[TenantScoped] model on MySQL, with no ON DUPLICATE KEY
+     * UPDATE (ADR 0073).
+     *
+     * MySQL's ON DUPLICATE KEY UPDATE answers to whichever unique index a
+     * row collides with, whatever the statement names: the primary key a
+     * row brings, or an index the tenant column does not lead -- an email
+     * unique across every tenant -- would have it update another tenant's
+     * row. So the conflict is found, not left to the database: three
+     * statements, each of which can reach the tenant's rows alone.
+     *
+     * - The rows there already, read by the target -- the tenant column and
+     *   the key, compared by the database against a derived table of the
+     *   new rows, so its collation decides what is one key as its unique
+     *   index does -- and locked FOR UPDATE. A key not there is held by the
+     *   index's gap lock; were it inserted between, the INSERT below fails.
+     * - Those rows updated by their primary keys, read just now, AND the
+     *   tenant column, from the new rows joined by key: a row of another
+     *   tenant is named by neither.
+     * - The rest inserted with a plain INSERT, which updates nothing: a row
+     *   colliding with any row on any unique index is an error, as it is on
+     *   Postgres for an index the conflict target does not name.
+     *
+     * @param list<array<string, mixed>> $stored
+     * @param list<string> $columns
+     * @param non-empty-list<string> $target
+     * @param list<string> $set
+     */
+    private function upsertLocked(array $stored, array $columns, array $target, array $set, string $tenant): int
+    {
+        $tenantColumn = $this->meta->tenantColumn ?? throw new \LogicException("{$this->class} has no tenant column.");
+        $table = Identifiers::quote($this->meta->table);
+        $id = Identifiers::quote($this->meta->idColumn);
+        $key = array_values(array_diff($target, [$tenantColumn]));
+
+        // Each new row's position, by the existing row's key it found.
+        $existing = [];
+        foreach (array_chunk($stored, max(1, intdiv(self::MAX_BINDINGS, \count($key) + 1)), true) as $chunk) {
+            $rows = [];
+            foreach ($chunk as $n => $row) {
+                $rows[] = [$n, ...array_map(static fn (string $column): mixed => $row[$column], $key)];
+            }
+            [$derived, $bindings] = self::derivedTable(['n', ...$key], $rows);
+            $on = implode(' AND ', array_map(static fn (string $c): string => 't.' . Identifiers::quote($c) . ' = v.' . Identifiers::quote($c), $key));
+            $found = $this->orm->statements()->select(
+                "SELECT v.\"n\" AS \"n\", t.{$id} AS \"id\" FROM {$derived} AS v JOIN {$table} AS t "
+                . 'ON t.' . Identifiers::quote($tenantColumn) . " = ? AND {$on} FOR UPDATE OF t",
+                [...$bindings, $tenant],
+            );
+            foreach ($found as $row) {
+                $existing[(int) $row['n']] = (string) $row['id'];
+            }
+        }
+        // Two new rows the collation takes for one key ('abc' and 'ABC'):
+        // refused, as two rows with one key are, and as Postgres refuses to
+        // update one row twice.
+        if (\count(array_unique($existing)) !== \count($existing)) {
+            throw new \InvalidArgumentException('Two rows upsert() writes share a key as the database compares it; write each once.');
+        }
+
+        if ($set !== [] && $existing !== []) {
+            $assign = implode(', ', array_map(static fn (string $c): string => 't.' . Identifiers::quote($c) . ' = v.' . Identifiers::quote($c), $set));
+            foreach (array_chunk($existing, max(1, intdiv(self::MAX_BINDINGS, \count($set) + 1)), true) as $chunk) {
+                $rows = [];
+                foreach ($chunk as $n => $existingId) {
+                    $rows[] = [$existingId, ...array_map(static fn (string $column): mixed => $stored[$n][$column], $set)];
+                }
+                [$derived, $bindings] = self::derivedTable([$this->meta->idColumn, ...$set], $rows);
+                $this->orm->statements()->execute(
+                    "UPDATE {$table} AS t JOIN {$derived} AS v ON t.{$id} = v.{$id} SET {$assign} WHERE t." . Identifiers::quote($tenantColumn) . ' = ?',
+                    [...$bindings, $tenant],
+                );
+            }
+        }
+
+        $new = array_values(array_diff_key($stored, $existing));
+        if ($new !== []) {
+            $list = implode(', ', array_map(Identifiers::quote(...), $columns));
+            $tuple = '(' . Compiler::placeholders(\count($columns)) . ')';
+            foreach (array_chunk($new, max(1, intdiv(self::MAX_BINDINGS, \count($columns)))) as $chunk) {
+                $bindings = [];
+                foreach ($chunk as $row) {
+                    foreach ($columns as $column) {
+                        $bindings[] = $row[$column];
+                    }
+                }
+                $this->orm->statements()->execute(
+                    "INSERT INTO {$table} ({$list}) VALUES " . implode(', ', array_fill(0, \count($chunk), $tuple)),
+                    $bindings,
+                );
+            }
+        }
+
+        return $this->followUpserted($stored, $columns, $target, $set, $tenant);
+    }
+
+    /**
+     * `(SELECT ? AS "a", ? AS "b" UNION ALL SELECT ?, ? ...)`: rows as a
+     * table a statement can join, every value bound.
+     *
+     * @param non-empty-list<string> $names
+     * @param non-empty-list<list<mixed>> $rows
+     * @return array{string, list<mixed>}
+     */
+    private static function derivedTable(array $names, array $rows): array
+    {
+        $first = 'SELECT ' . implode(', ', array_map(static fn (string $name): string => '? AS ' . Identifiers::quote($name), $names));
+        $rest = 'SELECT ' . Compiler::placeholders(\count($names));
+        $bindings = [];
+        foreach ($rows as $row) {
+            foreach ($row as $value) {
+                $bindings[] = $value;
+            }
+        }
+
+        return ['(' . $first . str_repeat(' UNION ALL ' . $rest, \count($rows) - 1) . ')', $bindings];
     }
 
     /**

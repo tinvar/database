@@ -358,14 +358,14 @@ describe('insert() and upsert()', function () {
 });
 
 describe('on MySQL', function () {
-    it('writes as SQLite does, and refuses an upsert it cannot hold to the tenant', function () {
+    it('writes as SQLite does, and upserts within the tenant', function () {
         Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
             $orm = $fixture->orm(connection: $connection);
 
             $orm->actAs('acme', static function () use ($orm): void {
                 expect($orm->query(Shelf::class)->where('aisle.code', 'A1')->update(['note' => 'my']))->toBe(2)
                     ->and($orm->query(Item::class)->where('priceCents', '<', 200)->delete())->toBe(2)
-                    ->and(fn () => $orm->query(Aisle::class)->upsert([['code' => 'A1']], 'code'))->toThrow(\LogicException::class, 'refused on MySQL');
+                    ->and($orm->query(Aisle::class)->upsert([['code' => 'A1'], ['code' => 'A7']], 'code'))->toBe(1);
             });
 
             expect($orm->query(Brand::class)->upsert([['name' => 'Xi', 'rank' => 30], ['name' => 'Omega', 'rank' => 40]], 'name'))->toBe(1)

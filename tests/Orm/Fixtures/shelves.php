@@ -208,11 +208,15 @@ final class Shelves
      * superuser -- a superuser bypasses every policy there is.
      *
      * @param \Closure(self, PdoConnection): void $test
+     * @param (\Closure(\PDO): void)|null $prepare run as the tables' owner, before the role is taken: an index a test adds
      */
-    public static function onPostgres(\Closure $test): void
+    public static function onPostgres(\Closure $test, ?\Closure $prepare = null): void
     {
-        Databases::inScratchSchema('pgsql', static function (\PDO $pdo, string $schema) use ($test): void {
+        Databases::inScratchSchema('pgsql', static function (\PDO $pdo, string $schema) use ($test, $prepare): void {
             $shelves = new self($pdo);
+            if ($prepare !== null) {
+                $prepare($pdo);
+            }
             foreach ([Aisle::class, Shelf::class, Item::class] as $model) {
                 foreach (RowLevelSecurity::forModel($model) as $sql) {
                     $pdo->exec($sql);
@@ -244,12 +248,16 @@ final class Shelves
      * quotes identifiers as standard SQL does.
      *
      * @param \Closure(self, PdoConnection): void $test
+     * @param (\Closure(\PDO): void)|null $prepare an index a test adds
      */
-    public static function onMySql(\Closure $test): void
+    public static function onMySql(\Closure $test, ?\Closure $prepare = null): void
     {
-        Databases::inScratchSchema('mysql', static function (\PDO $pdo) use ($test): void {
+        Databases::inScratchSchema('mysql', static function (\PDO $pdo) use ($test, $prepare): void {
             $pdo->exec("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')");
             $shelves = new self($pdo);
+            if ($prepare !== null) {
+                $prepare($pdo);
+            }
             $test($shelves, $shelves->connection('mysql'));
         });
     }
