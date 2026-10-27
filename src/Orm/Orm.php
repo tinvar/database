@@ -50,6 +50,9 @@ final class Orm
      */
     private array $afterCommit = [];
 
+    /** What connection() hands out while raw statements are flagged; null while they are not. */
+    private ?RawStatements $rawStatements = null;
+
     /**
      * Depth of acrossTenants() calls outside any fiber.
      *
@@ -168,9 +171,50 @@ final class Orm
         }
     }
 
+    /**
+     * The connection, for raw SQL: what the application sends here carries
+     * no tenant predicate of the ORM's. While flagRawStatements() is on, it
+     * is handed out through RawStatements, which reports each statement
+     * that names a tenant table.
+     */
     public function connection(): Connection
     {
+        return $this->rawStatements ?? $this->connection;
+    }
+
+    /**
+     * The connection itself, never flagged: for the ORM's own statements
+     * and the query builder's, which carry the tenant predicate, and for
+     * asking whether something writes on this very connection. Raw SQL
+     * goes through connection(); the static check reads it on either.
+     */
+    public function statements(): Connection
+    {
         return $this->connection;
+    }
+
+    /**
+     * Reports each statement sent through connection() that names the
+     * table of a #[TenantScoped] model this worker has compiled -- raw SQL
+     * on a tenant table, which tinvar-spec.md, "Tenancy", has flagged in
+     * the dev toolbar -- to $flag, before it runs. Null stops it.
+     *
+     * For dev: it reads every raw statement's text, and finds where it was
+     * sent from for each one it reports.
+     *
+     * @param (\Closure(RawStatement): void)|null $flag
+     */
+    public function flagRawStatements(?\Closure $flag): void
+    {
+        $this->rawStatements = $flag === null ? null : new RawStatements(
+            $this->connection,
+            function (string $sql, \Closure $site) use ($flag): void {
+                $tables = RawSql::tenantTablesIn($sql, Metadata::tenantTables());
+                if ($tables !== []) {
+                    $flag(new RawStatement(RawSql::redacted($sql), $tables, $site(), $this->identityMap->tenant(), $this->isUnscoped()));
+                }
+            },
+        );
     }
 
     public function identityMap(): IdentityMap

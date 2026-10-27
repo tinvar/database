@@ -332,7 +332,7 @@ final readonly class Query
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders);
         [$sql, $bindings] = $this->select($scope, limit: $this->limit, offset: $this->offset);
 
-        return $this->hydrate($this->orm->connection()->select($sql, $bindings));
+        return $this->hydrate($this->orm->statements()->select($sql, $bindings));
     }
 
     /**
@@ -353,7 +353,7 @@ final readonly class Query
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, []);
         [$body, $bindings] = $scope->body();
 
-        return (int) ($this->orm->connection()->select('SELECT COUNT(*) AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? 0);
+        return (int) ($this->orm->statements()->select('SELECT COUNT(*) AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? 0);
     }
 
     /** Whether any row matches. */
@@ -363,7 +363,7 @@ final readonly class Query
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, []);
         [$body, $bindings] = $scope->body();
 
-        return $this->orm->connection()->select('SELECT 1 AS "found"' . $body . ' LIMIT ?', [...$bindings, 1]) !== [];
+        return $this->orm->statements()->select('SELECT 1 AS "found"' . $body . ' LIMIT ?', [...$bindings, 1]) !== [];
     }
 
     /**
@@ -382,7 +382,7 @@ final readonly class Query
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
 
-        $rows = $this->orm->connection()->select(
+        $rows = $this->orm->statements()->select(
             'SELECT ' . $scope->expression($ref) . ' AS "value"' . $body . $scope->orderBy() . $tail,
             [...$bindings, ...$tailBindings],
         );
@@ -502,7 +502,7 @@ final readonly class Query
         }
 
         [$sql, $selectBindings] = $this->select($scope, $keyset, $keysetBindings, reversed: !$after, limit: $perPage + 1);
-        $models = $this->hydrate($this->orm->connection()->select($sql, $selectBindings));
+        $models = $this->hydrate($this->orm->statements()->select($sql, $selectBindings));
 
         $more = \count($models) > $perPage;
         $models = \array_slice($models, 0, $perPage);
@@ -587,7 +587,7 @@ final readonly class Query
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
-                $count += $this->orm->connection()->execute(
+                $count += $this->orm->statements()->execute(
                     'UPDATE ' . Identifiers::quote($this->meta->table) . " SET {$assignments} WHERE {$where}",
                     [...array_values($set), ...$bindings],
                 );
@@ -620,7 +620,7 @@ final readonly class Query
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
-                $count += $this->orm->connection()->execute('DELETE FROM ' . Identifiers::quote($this->meta->table) . " WHERE {$where}", $bindings);
+                $count += $this->orm->statements()->execute('DELETE FROM ' . Identifiers::quote($this->meta->table) . " WHERE {$where}", $bindings);
             }
 
             foreach ($ids as $id) {
@@ -739,7 +739,7 @@ final readonly class Query
                         $bindings[] = $row[$column];
                     }
                 }
-                $this->orm->connection()->execute(
+                $this->orm->statements()->execute(
                     "INSERT INTO {$table} ({$list}) VALUES " . implode(', ', array_fill(0, \count($chunk), $tuple)) . $conflict,
                     $bindings,
                 );
@@ -843,7 +843,7 @@ final readonly class Query
      */
     private function onConflict(array $target, array $set): string
     {
-        $connection = $this->orm->connection();
+        $connection = $this->orm->statements();
         if ($connection instanceof PdoConnection && $connection->driver() === 'mysql') {
             $id = Identifiers::quote($this->meta->idColumn);
 
@@ -918,7 +918,7 @@ final readonly class Query
                 $bindings[] = $tenant;
             }
 
-            foreach ($this->orm->connection()->select("SELECT {$select} FROM {$table} WHERE {$where}", $bindings) as $found) {
+            foreach ($this->orm->statements()->select("SELECT {$select} FROM {$table} WHERE {$where}", $bindings) as $found) {
                 $id = (string) $found[$this->meta->idColumn];
                 if (isset($byId[$id])) {
                     $inserted++;
@@ -961,7 +961,7 @@ final readonly class Query
         // be refused on the side of an outer join that may be NULL. SQLite
         // has no row locks, and needs none: its write transaction began
         // IMMEDIATE, holding the database.
-        $connection = $this->orm->connection();
+        $connection = $this->orm->statements();
         $lock = match ($connection instanceof PdoConnection ? $connection->driver() : '') {
             'pgsql' => ' FOR UPDATE OF ' . Identifiers::quote($scope->alias),
             'mysql' => ' FOR UPDATE',
@@ -1035,7 +1035,7 @@ final readonly class Query
             $this->meta->selectColumns(),
         ));
 
-        return $this->orm->connection()->select("SELECT {$columns} FROM {$table} WHERE {$where}", $bindings);
+        return $this->orm->statements()->select("SELECT {$columns} FROM {$table} WHERE {$where}", $bindings);
     }
 
     /** @return static */
@@ -1288,7 +1288,7 @@ final readonly class Query
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref]);
         [$body, $bindings] = $scope->body();
 
-        return $this->orm->connection()->select("SELECT {$function}(" . $scope->expression($ref) . ') AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? null;
+        return $this->orm->statements()->select("SELECT {$function}(" . $scope->expression($ref) . ') AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? null;
     }
 
     /**
@@ -1343,7 +1343,7 @@ final readonly class Query
             $select[] = "{$expression} AS \"k{$i}\"";
         }
 
-        $row = $this->orm->connection()->select('SELECT ' . implode(', ', $select) . $body, $bindings)[0] ?? null;
+        $row = $this->orm->statements()->select('SELECT ' . implode(', ', $select) . $body, $bindings)[0] ?? null;
         if ($row === null) {
             throw InvalidCursor::anchorGone();
         }

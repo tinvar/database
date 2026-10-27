@@ -42,6 +42,26 @@ final class Metadata
     }
 
     /**
+     * The tables of the #[TenantScoped] models compiled so far: what the
+     * dev toolbar flags raw SQL on (RawSql). A model this worker has not
+     * compiled yet is not in it -- the static check, given the models,
+     * covers those.
+     *
+     * @return list<string>
+     */
+    public static function tenantTables(): array
+    {
+        $tables = [];
+        foreach (self::$compiled as $meta) {
+            if ($meta->tenantColumn !== null) {
+                $tables[$meta->table] = true;
+            }
+        }
+
+        return array_keys($tables);
+    }
+
+    /**
      * Every compiled relation whose target is $class: the relations a write
      * to one of its rows can change. Only compiled models are searched, which
      * is enough -- a relation of a model never compiled has loaded nothing.
