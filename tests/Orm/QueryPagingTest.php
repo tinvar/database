@@ -137,7 +137,11 @@ describe('cursorPaginate', function () {
         expect($payload)->toContain($fixture->ids['Bravo'])
             ->and($payload)->not->toContain('s-a')
             ->and($payload)->not->toContain('Bravo')
-            ->and($payload)->not->toContain('session-a');
+            ->and($payload)->not->toContain('session-a')
+            // Nor the binding or the query as a hash a log could match a
+            // session's cursors by: the MAC covers them, the cursor does not
+            // carry them.
+            ->and(array_keys((array) json_decode($payload, true)))->toBe(['a', 'f', 'e']);
     });
 
     it('refuses a cursor sealed for another reader, another query or another tenant', function () {

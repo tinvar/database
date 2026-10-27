@@ -177,6 +177,8 @@ describe('identifiers', function () {
         'qualified' => 'shelves.name',
         'aliased' => 't0.name',
         'through a collection' => 'items.name',
+        // items' column, which a #[HasMany] on Shelf names as its key.
+        'a child\'s foreign key' => 'shelf_id',
         'through nothing' => 'aisle.',
         'too deep' => 'aisle.aisle.aisle.aisle.code',
         'empty' => '',
@@ -284,7 +286,32 @@ describe('reading', function () {
         $orm = Shelves::sqlite()->orm();
 
         expect(fn () => $orm->actAs('acme', static fn (): array => $orm->query(Shelf::class)->offset(2)->fetch()))
+            ->toThrow(\LogicException::class)
+            ->and(fn () => $orm->actAs('acme', static fn (): array => $orm->query(Shelf::class)->offset(2)->pluck('name')))
             ->toThrow(\LogicException::class);
+    });
+
+    // PHP's == takes '01', '1' and '1e0' for one value; a list keeps each.
+    it('keeps every value of a list that PHP would call equal', function () {
+        $fixture = Shelves::sqlite();
+        foreach (['01', '1', '1e0'] as $name) {
+            $fixture->pdo->exec("INSERT INTO brands VALUES ('" . \Tinvar\Support\Uuid::v7() . "', '{$name}', 9)");
+        }
+        $orm = $fixture->orm();
+
+        expect($orm->query(Brand::class)->whereIn('name', ['01', '1', '1e0'])->count())->toBe(3)
+            ->and($orm->query(Brand::class)->whereNotIn('name', ['01', '1'])->where('rank', 9)->pluck('name'))->toBe(['1e0']);
+    });
+
+    // `<>` an id that is no id is every row with a key, as `<>` a real one
+    // is: a NULL foreign key is unequal to neither.
+    it('reads a key unequal to an id that is no id as one that is set', function () {
+        $orm = Shelves::sqlite()->orm();
+
+        expect($orm->actAs('acme', static fn (): string => $orm->query(Item::class)->where('shelf', '!=', 'nope')->toSql()[0]))
+            ->toContain('"t0"."shelf_id" IS NOT NULL')
+            ->and($orm->actAs('acme', static fn (): string => $orm->query(Item::class)->whereNotIn('shelf', ['nope'])->toSql()[0]))
+            ->toContain('"t0"."shelf_id" IS NOT NULL');
     });
 
     it('reads a model not tenant-scoped with no tenant at all', function () {

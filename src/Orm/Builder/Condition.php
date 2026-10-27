@@ -23,7 +23,6 @@ final readonly class Condition
     public const string RAW = 'raw';
     public const string HAS = 'has';
     public const string NEVER = 'never';
-    public const string ALWAYS = 'always';
 
     /**
      * @param self::* $kind
@@ -90,12 +89,6 @@ final readonly class Condition
     public static function never(bool $or): self
     {
         return new self(self::NEVER, $or);
-    }
-
-    /** A condition every row meets: a NOT IN over nothing, or `<>` an id that is no id. */
-    public static function always(bool $or): self
-    {
-        return new self(self::ALWAYS, $or);
     }
 
     /**

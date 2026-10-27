@@ -290,7 +290,7 @@ final class PdoConnection implements Connection, TenantSetting
         $rows = $this->run(function () use ($sql, $bindings): array {
             $this->applyTenantSetting();
             $statement = $this->pdo->prepare($sql);
-            self::bind($statement, $bindings);
+            $this->bind($statement, $bindings);
             $statement->execute();
 
             return $statement->fetchAll();
@@ -306,7 +306,7 @@ final class PdoConnection implements Connection, TenantSetting
         $statement = fn (): int => $this->run(function () use ($sql, $bindings): int {
             $this->applyTenantSetting();
             $statement = $this->pdo->prepare($sql);
-            self::bind($statement, $bindings);
+            $this->bind($statement, $bindings);
             $statement->execute();
 
             return $statement->rowCount();
@@ -880,22 +880,26 @@ final class PdoConnection implements Connection, TenantSetting
     }
 
     /**
-     * Binds each value by position: an integer as an integer, anything else
-     * as execute() would have, text.
+     * Binds each value by position: on SQLite an integer as an integer,
+     * anything else -- and everything on another driver -- as execute()
+     * would have, text.
      *
      * Text for everything let SQLite compare a number with a string where
      * neither side has a column's affinity to convert it -- `position * ? > ?`
      * bound 30 against '25', and a number sorts before every string, so the
-     * condition was false for every row. MySQL, preparing natively, reads a
-     * text LIMIT as an error. Postgres sends integers as text either way.
+     * condition was false for every row. Postgres sends an integer as an
+     * untyped literal either way. MySQL is left as it was: preparing
+     * natively, it compares a text column with an integer numerically, and
+     * `'abc' = 0` holds -- a key or a code compared with an integer would
+     * match rows it does not name.
      *
      * @param list<mixed> $bindings
      */
-    private static function bind(\PDOStatement $statement, array $bindings): void
+    private function bind(\PDOStatement $statement, array $bindings): void
     {
         foreach ($bindings as $i => $value) {
             $statement->bindValue($i + 1, $value, match (true) {
-                \is_int($value) => \PDO::PARAM_INT,
+                \is_int($value) && $this->driver === 'sqlite' => \PDO::PARAM_INT,
                 $value === null => \PDO::PARAM_NULL,
                 default => \PDO::PARAM_STR,
             });

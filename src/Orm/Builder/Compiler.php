@@ -223,9 +223,6 @@ final class Compiler
             case Condition::NEVER:
                 return ['1 = 0', []];
 
-            case Condition::ALWAYS:
-                return ['1 = 1', []];
-
             case Condition::HAS:
                 return $this->has($meta, $alias, $condition);
 

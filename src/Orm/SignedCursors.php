@@ -11,9 +11,9 @@ use Tinvar\Support\Uuid;
  * Cursors signed with a key of their own and bound to a string the caller
  * names: what a cursor handed to one reader opens for, and no other.
  *
- * A cursor carries the key of the row it starts from, which way it reads,
- * a keyed hash of the query it was made for, a keyed hash of the binding,
- * and an expiry -- all under a MAC. Never a row's values: a page sorted by
+ * A cursor carries the key of the row it starts from, which way it reads
+ * and an expiry, under a MAC that covers the query it was made for and the
+ * binding as well, neither of which it carries. Never a row's values: a page sorted by
  * a column it does not show would hand that column to the client, a value
  * at a time (ADR 0057). The server reads the anchor's values again, under
  * the reader's own scope, when the cursor comes back.
@@ -62,14 +62,12 @@ final readonly class SignedCursors implements Cursors
     public function seal(string $query, string $anchor, bool $after): string
     {
         $payload = json_encode([
-            'q' => $this->hash('query', $query),
             'a' => $anchor,
             'f' => $after ? 1 : 0,
-            'b' => $this->binding,
             'e' => $this->now() + $this->ttl,
         ], JSON_THROW_ON_ERROR);
 
-        return Signer::encode($payload) . '.' . Signer::encode($this->signer->sign('cursor:' . $payload));
+        return Signer::encode($payload) . '.' . Signer::encode($this->signer->sign($this->signed($query, $payload)));
     }
 
     public function open(string $query, string $cursor): ?array
@@ -85,7 +83,7 @@ final readonly class SignedCursors implements Cursors
 
         $payload = Signer::decode($parts[0]);
         $mac = Signer::decode($parts[1]);
-        if ($payload === null || $mac === null || !$this->signer->verify('cursor:' . $payload, $mac)) {
+        if ($payload === null || $mac === null || !$this->signer->verify($this->signed($query, $payload), $mac)) {
             return null;
         }
 
@@ -94,22 +92,30 @@ final readonly class SignedCursors implements Cursors
         } catch (\JsonException) {
             return null;
         }
-        if (!\is_array($claims)
-            || !\is_string($claims['q'] ?? null) || !\is_string($claims['a'] ?? null) || !\is_string($claims['b'] ?? null)
+        if (!\is_array($claims) || !\is_string($claims['a'] ?? null)
             || !\in_array($claims['f'] ?? null, [0, 1], true) || !\is_int($claims['e'] ?? null)) {
             return null;
         }
 
         $now = $this->now();
-        if (!hash_equals($this->binding, $claims['b'])
-            || !hash_equals($this->hash('query', $query), $claims['q'])
-            || $claims['e'] <= $now
+        if ($claims['e'] <= $now
             || $claims['e'] - $now > $this->ttl + self::CLOCK_SKEW
             || !Uuid::isValid($claims['a'])) {
             return null;
         }
 
         return [$claims['a'], $claims['f'] === 1];
+    }
+
+    /**
+     * What the MAC is over: the payload, with the binding and the query
+     * beside it rather than in it -- so a cursor opens only for both, and
+     * carries neither, not even as a hash a log or a Referer could match
+     * one session's cursors by.
+     */
+    private function signed(string $query, string $payload): string
+    {
+        return 'cursor:' . $this->binding . ':' . $this->hash('query', $query) . ':' . $payload;
     }
 
     /** A keyed hash: neither the binding nor the query can be read back out, or matched without the key. */

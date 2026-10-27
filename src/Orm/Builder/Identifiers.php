@@ -147,7 +147,7 @@ final class Identifiers
      */
     public static function names(ModelMeta $meta): array
     {
-        $names = [...$meta->knownIdentifiers(), ...array_keys($meta->columns)];
+        $names = [...self::ownColumns($meta), ...array_keys($meta->columns)];
         foreach ($meta->relations as $property => $relation) {
             if ($relation->kind === RelationKind::BelongsTo) {
                 $names[] = $property;
@@ -186,7 +186,7 @@ final class Identifiers
         if ($relation !== null && $relation->kind === RelationKind::BelongsTo) {
             $found[] = $relation->foreignKey;
         }
-        if (\in_array($name, $meta->knownIdentifiers(), true)) {
+        if (\in_array($name, self::ownColumns($meta), true)) {
             $found[] = $name;
         }
 
@@ -206,6 +206,24 @@ final class Identifiers
         }
 
         return $found[0];
+    }
+
+    /**
+     * The columns of $meta's own table: what it maps, the foreign keys its
+     * #[BelongsTo] relations read, and its tenant column. Not
+     * knownIdentifiers(), which also holds a #[HasMany]'s foreign key --
+     * a column of the child's table, which this one has not got.
+     *
+     * @return list<string>
+     */
+    private static function ownColumns(ModelMeta $meta): array
+    {
+        $columns = $meta->selectColumns();
+        if ($meta->tenantColumn !== null && !\in_array($meta->tenantColumn, $columns, true)) {
+            $columns[] = $meta->tenantColumn;
+        }
+
+        return $columns;
     }
 
     private static function text(string|\BackedEnum $name): string

@@ -315,9 +315,7 @@ final readonly class Query
     #[\NoDiscard]
     public function fetch(): array
     {
-        if ($this->offset !== null && $this->limit === null) {
-            throw new \LogicException('An offset needs a limit: offset() reads past rows, limit() says how many after them.');
-        }
+        $this->assertOffsetLimited();
 
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders);
         [$sql, $bindings] = $this->select($scope, limit: $this->limit, offset: $this->offset);
@@ -367,6 +365,7 @@ final readonly class Query
     public function pluck(string|\BackedEnum $column): array
     {
         $ref = Identifiers::column($this->meta, $column);
+        $this->assertOffsetLimited();
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, [$ref]);
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
@@ -567,9 +566,11 @@ final readonly class Query
 
         // A key is a UUID the ORM minted, so anything else names no row --
         // answered without asking the database, which on Postgres refuses
-        // a malformed uuid with an error rather than a miss (find()).
+        // a malformed uuid with an error rather than a miss (find()). `<>`
+        // one is every row with a key, as `<>` a real one would be: a NULL
+        // foreign key is no more unequal to it than to any other.
         if (\in_array($sql, ['=', '<>'], true) && $this->isKey($ref) && !(\is_string($bound) && Uuid::isValid($bound))) {
-            return $this->adding($sql === '=' ? Condition::never($or) : Condition::always($or));
+            return $this->adding($sql === '=' ? Condition::never($or) : Condition::null($or, $ref, true));
         }
 
         return $this->adding(Condition::compare($or, $ref, $sql, $bound));
@@ -598,10 +599,17 @@ final readonly class Query
                 throw new \LengthException('An IN list binds at most ' . self::MAX_VALUES . ' values.');
             }
         }
-        $bound = array_values(array_unique($bound, \SORT_REGULAR));
+        // Each value once, by its type and its exact value: PHP's loose ==
+        // would take '01', '1' and '1e0' for one, and bind the first alone,
+        // so a NOT IN listing all three kept two of them.
+        $unique = [];
+        foreach ($bound as $one) {
+            $unique[get_debug_type($one) . "\0" . $one] = $one;
+        }
+        $bound = array_values($unique);
 
         if ($bound === []) {
-            return $this->adding($not ? Condition::always($or) : Condition::never($or));
+            return $this->adding($not ? Condition::null($or, $ref, true) : Condition::never($or));
         }
 
         return $this->adding(Condition::in($or, $ref, $bound, $not));
@@ -662,6 +670,13 @@ final readonly class Query
         }
 
         return $query;
+    }
+
+    private function assertOffsetLimited(): void
+    {
+        if ($this->offset !== null && $this->limit === null) {
+            throw new \LogicException('An offset needs a limit: offset() reads past rows, limit() says how many after them.');
+        }
     }
 
     private function assertUnlimited(string $method): void
