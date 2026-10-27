@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Orm\Builder;
 
 use Tinvar\Orm\Direction;
+use Tinvar\Orm\Nulls;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\Orm;
@@ -43,7 +44,7 @@ final class Compiler
 
     /**
      * @param list<Condition> $conditions
-     * @param list<array{ColumnRef, Direction}> $orders
+     * @param list<array{ColumnRef, Direction, Nulls|null}> $orders
      * @param list<ColumnRef> $also further columns the statement reads, which need their joins
      */
     public function scope(ModelMeta $meta, array $conditions, array $orders, array $also = []): Scope
@@ -77,7 +78,7 @@ final class Compiler
             $fromBindings,
             $scope->where,
             $whereBindings,
-            array_map(static fn (array $order): array => [$scope->expression($order[0]), $order[1]], $orders),
+            array_map(static fn (array $order): array => [$scope->expression($order[0]), $order[1], $order[2]], $orders),
             $aliases,
         );
     }

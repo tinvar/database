@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Orm\Builder;
 
 use Tinvar\Orm\Direction;
+use Tinvar\Orm\Nulls;
 
 /**
  * One query, compiled as far as every statement made from it shares: its
@@ -23,7 +24,8 @@ final readonly class Scope
      * @param list<mixed> $fromBindings  what the joins' tenant predicates bind
      * @param string      $where         the WHERE clause's body, or '' for none
      * @param list<mixed> $whereBindings
-     * @param list<array{string, Direction}> $orders each ORDER BY expression, quoted, with its direction
+     * @param list<array{string, Direction, Nulls|null}> $orders each ORDER BY expression, quoted, with its
+     *        direction and -- for a column that may be NULL -- where its NULLs go
      * @param array<string, string> $aliases by path key ('' for the model read), the alias it is read as
      */
     public function __construct(
@@ -64,16 +66,28 @@ final readonly class Scope
         return [$sql, [...$this->fromBindings, ...$this->whereBindings, ...$extraBindings]];
     }
 
-    /** ORDER BY for the query's orders, or with every direction turned round. */
+    /**
+     * ORDER BY for the query's orders, or with every direction -- and every
+     * NULLs placement -- turned round.
+     *
+     * A column that may be NULL sorts by `(x IS NULL)` first, which is
+     * false for a value and true for a NULL on every database, so its NULLs
+     * go where the query said on SQLite, Postgres and MySQL alike (Nulls).
+     */
     public function orderBy(bool $reversed = false): string
     {
         if ($this->orders === []) {
             return '';
         }
 
-        return ' ORDER BY ' . implode(', ', array_map(
-            static fn (array $order): string => $order[0] . ' ' . (($order[1] === Direction::Asc) !== $reversed ? 'ASC' : 'DESC'),
-            $this->orders,
-        ));
+        $terms = [];
+        foreach ($this->orders as [$expression, $direction, $nulls]) {
+            if ($nulls !== null) {
+                $terms[] = "({$expression} IS NULL) " . (($nulls === Nulls::Last) !== $reversed ? 'ASC' : 'DESC');
+            }
+            $terms[] = $expression . ' ' . (($direction === Direction::Asc) !== $reversed ? 'ASC' : 'DESC');
+        }
+
+        return ' ORDER BY ' . implode(', ', $terms);
     }
 }

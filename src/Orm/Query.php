@@ -68,7 +68,7 @@ final readonly class Query
     /**
      * @param class-string<T> $class
      * @param list<Condition> $conditions
-     * @param list<array{ColumnRef, Direction}> $orders
+     * @param list<array{ColumnRef, Direction, Nulls|null}> $orders
      * @param list<string> $with relation paths to load with the rows
      */
     private function __construct(
@@ -258,12 +258,20 @@ final readonly class Query
      * Sorts by $column, after any sort already added. A column reached
      * through a #[BelongsTo] ('site.code') joins its table.
      *
+     * A column that may be NULL -- by its property's type, or because it is
+     * reached through a join, which finds no row for some -- puts its NULLs
+     * last, either way it sorts, unless $nulls says first: the same order on
+     * every database, where each would otherwise choose its own (Nulls).
+     *
      * @return static
      */
     #[\NoDiscard]
-    public function orderBy(string|\BackedEnum $column, Direction|string $direction = Direction::Asc): self
+    public function orderBy(string|\BackedEnum $column, Direction|string $direction = Direction::Asc, ?Nulls $nulls = null): self
     {
-        return clone($this, ['orders' => [...$this->orders, [Identifiers::column($this->meta, $column), Direction::of($direction)]]]);
+        $ref = Identifiers::column($this->meta, $column);
+        $placed = $ref->path !== [] || $this->nullable($ref->column) ? ($nulls ?? Nulls::Last) : null;
+
+        return clone($this, ['orders' => [...$this->orders, [$ref, Direction::of($direction), $placed]]]);
     }
 
     /** @return static */
@@ -474,7 +482,7 @@ final readonly class Query
         }
         if (!$hasKey) {
             $last = $orders === [] ? Direction::Asc : $orders[\count($orders) - 1][1];
-            $orders[] = [new ColumnRef([], $this->meta->idColumn), $last];
+            $orders[] = [new ColumnRef([], $this->meta->idColumn), $last, null];
         }
 
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $orders);
@@ -817,7 +825,7 @@ final readonly class Query
      * tenant predicate, not the query's conditions -- a row that has since
      * left the filter still marks a place in the order.
      *
-     * @param list<array{ColumnRef, Direction}> $orders
+     * @param list<array{ColumnRef, Direction, Nulls|null}> $orders
      * @return list<mixed>
      */
     private function anchorValues(array $orders, string $anchor): array

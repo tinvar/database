@@ -18,6 +18,7 @@ namespace Tinvar\Tests\Orm\QueryDatabases;
 
 use Tinvar\Orm\CursorPage;
 use Tinvar\Orm\NoTenantContext;
+use Tinvar\Orm\Nulls;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\Query;
@@ -61,6 +62,20 @@ function readsAlike(Orm $orm): void
         ->and($orm->acrossTenants(static fn (): int => $orm->query(Shelf::class)->count()))->toBe(6)
         ->and(fn () => $orm->query(Shelf::class)->count())->toThrow(NoTenantContext::class)
         ->and(names($orm->query(Brand::class)->orderBy('rank', 'desc')->fetch()))->toBe(['Xi', 'Ypsilon', 'Zeta']);
+
+    // NULLs where the query says, not where each database would put them:
+    // Postgres sorts one as larger than every value, SQLite and MySQL as
+    // smaller.
+    $byNote = static fn (string $direction, ?Nulls $nulls = null): array => $acme(
+        static fn (): array => names($orm->query(Shelf::class)->orderBy('note', $direction, $nulls)->orderBy('name')->fetch()),
+    );
+    expect($byNote('asc'))->toBe(['Charlie', 'Alpha', 'Bravo', 'Foxtrot'])
+        ->and($byNote('desc'))->toBe(['Alpha', 'Charlie', 'Bravo', 'Foxtrot'])
+        ->and($byNote('asc', Nulls::First))->toBe(['Bravo', 'Foxtrot', 'Charlie', 'Alpha'])
+        ->and($byNote('desc', Nulls::First))->toBe(['Bravo', 'Foxtrot', 'Alpha', 'Charlie'])
+        // A joined column is NULL where the join finds no row the tenant's.
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->orderBy('aisle.code', 'desc')->orderBy('name')->fetch())))
+        ->toBe(['Bravo', 'Alpha', 'Charlie', 'Foxtrot']);
 
     $cursors = new SignedCursors(new Signer('test-key', SignedCursors::PURPOSE), 'session');
     $query = $orm->query(Shelf::class)->orderBy('position', 'desc');
