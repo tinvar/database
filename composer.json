@@ -9,11 +9,13 @@
     "tinvar/support": "0.4.*"
   },
   "require-dev": {
-    "pestphp/pest": "^4.0"
+    "pestphp/pest": "^4.0",
+    "phpstan/phpstan": "^2.1"
   },
   "suggest": {
     "ext-pdo": "Every connection the ORM makes is a PDO connection.",
-    "ext-pdo_pgsql": "PostgreSQL driver, with the row-level security that holds a tenant's rows to it."
+    "ext-pdo_pgsql": "PostgreSQL driver, with the row-level security that holds a tenant's rows to it.",
+    "phpstan/phpstan": "Checks the column and relation names in query builder calls against the models (extension.neon)."
   },
   "autoload": {
     "psr-4": {

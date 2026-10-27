@@ -1,0 +1,8 @@
+# The query builder's PHPStan rule: column and relation names in a call on a
+# Query<T> are checked against T's compiled metadata (ADR 0057). Include it
+# from an application's phpstan.neon:
+#
+#   includes:
+#       - vendor/tinvar/database/extension.neon
+rules:
+    - Tinvar\Orm\PHPStan\QueryIdentifierRule
