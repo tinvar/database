@@ -482,10 +482,10 @@ describe('unionAll', function () {
 
         expect(fn () => $both->where('name', 'x'))->toThrow(\LogicException::class)
             ->and(fn () => $acme(static fn (): array => $both->orderBy('aisle.code')->fetch()))->toThrow(\LogicException::class)
-            ->and(fn () => $acme(static fn (): array => $both->pluck('name')))->toThrow(\LogicException::class)
-            ->and(fn () => $acme(static fn (): int|float => $both->sum('position')))->toThrow(\LogicException::class)
-            ->and(fn () => $acme(static fn (): int => $both->update(['name' => 'x'])))->toThrow(\LogicException::class)
-            ->and(fn () => $acme(static fn (): int => $both->delete()))->toThrow(\LogicException::class)
+            ->and(fn () => $acme(static fn (): array => $both->pluck('aisle.code')))->toThrow(\LogicException::class)
+            ->and(fn () => $acme(static fn (): int|float => $both->sum('aisle.code')))->toThrow(\LogicException::class)
+            ->and(fn () => $acme(static fn (): int => $both->limit(2)->update(['name' => 'x'])))->toThrow(\LogicException::class)
+            ->and(fn () => $acme(static fn (): int => $both->offset(1)->limit(2)->delete()))->toThrow(\LogicException::class)
             ->and(fn () => $acme(static fn (): mixed => $both->withCount('items')->fetchAggregated()))->toThrow(\LogicException::class)
             ->and(fn () => $both->union($orm->query(Shelf::class)))->toThrow(\LogicException::class);
     });

@@ -955,10 +955,11 @@ final readonly class Query
     public function pluck(string|\BackedEnum $column): array
     {
         $this->assertModelsRead('pluck()', aggregates: true);
-        $this->assertOwnTable('pluck()');
         $ref = Identifiers::column($this->meta, $column);
         $this->assertOffsetLimited();
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, [$ref]);
+        $scope = $this->unionAll === null
+            ? new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, [$ref])
+            : $this->readScope(new Compiler($this->orm), also: [$ref]);
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
 
@@ -1067,7 +1068,12 @@ final readonly class Query
         self::assertPerPage($perPage);
         $this->assertUnlimited('cursorPaginate()');
         $this->assertModelsRead('cursorPaginate()');
-        $this->assertOwnTable('cursorPaginate()');
+        // A cursor names its row by key, and a unionAll() may read one row
+        // twice: the anchor would be two places in the order at once, and
+        // a page after it would skip or repeat the other (ADR 0073).
+        if ($this->unionAll !== null) {
+            throw new \LogicException('cursorPaginate() names a row by its key, and a unionAll() may read a row twice: page it by number with paginate(), or cursor-page a union().');
+        }
 
         $orders = [];
         $hasKey = false;
@@ -1175,6 +1181,9 @@ final readonly class Query
      */
     public function update(array $values): int
     {
+        if ($this->unionAll !== null) {
+            return $this->rowsToWrite('update()')->update($values);
+        }
         $this->orm->refuseWriteOf('update()');
         $this->refuseHooks('update()');
         $this->assertRowsWritten('update()');
@@ -1229,6 +1238,9 @@ final readonly class Query
      */
     public function delete(): int
     {
+        if ($this->unionAll !== null) {
+            return $this->rowsToWrite('delete()')->delete();
+        }
         $this->orm->refuseWriteOf('delete()');
         $this->assertRowsWritten('delete()');
         $this->assertOffsetLimited();
@@ -2012,11 +2024,20 @@ final readonly class Query
      * WHERE -- or, after unionAll(), its arms' rows, read as one table:
      * each arm a SELECT of the model's columns under its own tenant
      * predicate, UNION ALL'd, sorted by the model's own columns alone.
+     *
+     * @param list<ColumnRef> $also further columns the statement reads
      */
-    private function readScope(Compiler $compiler, bool $orders = true): Scope
+    private function readScope(Compiler $compiler, bool $orders = true, array $also = []): Scope
     {
         if ($this->unionAll === null) {
-            return $compiler->scope($this->meta, $this->conditions, $orders ? $this->orders : []);
+            return $compiler->scope($this->meta, $this->conditions, $orders ? $this->orders : [], $also);
+        }
+        // What is read of a unionAll() is its arms' rows: the model's own
+        // columns, which hold no join (ADR 0073).
+        foreach ($also as $ref) {
+            if ($ref->path !== [] || !\in_array($ref->column, $this->meta->selectColumns(), true)) {
+                throw new \LogicException("A unionAll() reads its arms' rows, which hold {$this->class}'s own columns -- not '{$ref->column}' through a join.");
+            }
         }
 
         $arms = [];
@@ -2092,6 +2113,29 @@ final readonly class Query
     {
         $this->assertModelsRead($what);
         $this->assertOwnTable($what);
+    }
+
+    /**
+     * A unionAll(), as the rows it writes: a row its arms both read is one
+     * row to write, so a write through one is a write through the union()
+     * of its arms -- the key IN a UNION of each arm's keys, each under the
+     * tenant predicate, and the rows locked and written by key with the
+     * predicate again, as any write is (ADR 0073). With a limit or an
+     * offset, which count a row read twice twice, the rows are no longer
+     * the same ones, and it is refused.
+     *
+     * @return static
+     */
+    private function rowsToWrite(string $what): self
+    {
+        if ($this->unionAll === null) {
+            return $this;
+        }
+        if ($this->limit !== null || $this->offset !== null) {
+            throw new \LogicException("{$what} through a unionAll() writes each row once, and its limit counts a row read twice twice: write through union().");
+        }
+
+        return clone($this, ['conditions' => [Condition::union(false, $this->unionAll)], 'unionAll' => null]);
     }
 
     /**
@@ -2375,9 +2419,10 @@ final readonly class Query
     private function aggregate(string $function, string|\BackedEnum $column): mixed
     {
         $this->assertModelsRead(strtolower($function) . '()', aggregates: true);
-        $this->assertOwnTable(strtolower($function) . '()');
         $ref = Identifiers::column($this->meta, $column);
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref]);
+        $scope = $this->unionAll === null
+            ? new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref])
+            : $this->readScope(new Compiler($this->orm), orders: false, also: [$ref]);
         [$body, $bindings] = $scope->body();
 
         $value = $this->orm->statements()->select("SELECT {$function}(" . $scope->expression($ref) . ') AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? null;
