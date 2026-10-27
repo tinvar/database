@@ -6,7 +6,8 @@ namespace Tinvar\Orm;
 
 /**
  * One lazy relation load the ORM ran -- one statement -- and whether it ran
- * in a batch, for the testing layer's assertNoLazyLoadsOutsideBatch().
+ * in a batch, for the testing layer's assertNoLazyLoadsOutsideBatch() and
+ * the dev toolbar.
  *
  * Decided in Orm::loadRelationRows(), from the parents it was handed:
  *
@@ -33,11 +34,15 @@ final readonly class LazyLoad
      * @param string $relation the relation, as Owner::property
      * @param int $parents how many parents the statement was for
      * @param self::RENDER|self::RESULT_SET|self::ALONE $batch
+     * @param string $site where the relation was touched, as file:line -- the
+     *        first frame outside the ORM -- when the dev toolbar asked
+     *        (Orm::flagLazyLoads()); '' otherwise
      */
     public function __construct(
         public string $relation,
         public int $parents,
         public string $batch,
+        public string $site = '',
     ) {}
 
     public function inBatch(): bool

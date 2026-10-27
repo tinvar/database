@@ -30,6 +30,19 @@ final class Orm
     private ?LazyLoads $lazyLoads = null;
 
     /**
+     * What each lazy relation load and each acrossTenants() call is told to,
+     * with where it was made: the dev toolbar's, under `tinvar dev`
+     * (flagLazyLoads(), flagAcrossTenants()). Null otherwise, so a request
+     * pays a null check and no backtrace.
+     *
+     * @var (\Closure(LazyLoad): void)|null
+     */
+    private ?\Closure $lazyLoadFlag = null;
+
+    /** @var (\Closure(string): void)|null given the call's site, as file:line */
+    private ?\Closure $acrossTenantsFlag = null;
+
+    /**
      * What a rollback has to put back: one frame per open transaction(),
      * each a list of undo steps recorded before a write replaced what they
      * restore -- a model's snapshot, a loaded relation's items. A nested
@@ -336,6 +349,47 @@ final class Orm
     }
 
     /**
+     * Tells $flag of every lazy relation load from now on, with the site
+     * that touched the relation (LazyLoad::$site) -- tinvar-spec.md,
+     * "Observability (dev toolbar)": "Every lazy relation load with its
+     * trigger site". Null stops it. For dev: it takes a backtrace per load.
+     *
+     * @param (\Closure(LazyLoad): void)|null $flag
+     */
+    public function flagLazyLoads(?\Closure $flag): void
+    {
+        $this->lazyLoadFlag = $flag;
+    }
+
+    /**
+     * Tells $flag of every acrossTenants() call from now on, with where it
+     * was made, before its work runs: "`acrossTenants()` calls flagged"
+     * (tinvar-spec.md, "Observability (dev toolbar)"). Null stops it.
+     *
+     * @param (\Closure(string): void)|null $flag given the call's site, as file:line
+     */
+    public function flagAcrossTenants(?\Closure $flag): void
+    {
+        $this->acrossTenantsFlag = $flag;
+    }
+
+    /**
+     * Where the code that called into the ORM is: the first frame of the
+     * stack outside this package's ORM, as file:line; '' when there is none.
+     */
+    private static function callSite(): string
+    {
+        foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 32) as $frame) {
+            $file = $frame['file'] ?? null;
+            if ($file !== null && !str_starts_with($file, __DIR__ . \DIRECTORY_SEPARATOR) && isset($frame['line'])) {
+                return "{$file}:{$frame['line']}";
+            }
+        }
+
+        return '';
+    }
+
+    /**
      * Where lazy relation loads are being recorded, or null when they are not.
      *
      * @internal for the testing layer (tinvar/testing), released with this
@@ -565,6 +619,9 @@ final class Orm
      */
     public function acrossTenants(\Closure $work): mixed
     {
+        if ($this->acrossTenantsFlag !== null) {
+            ($this->acrossTenantsFlag)(self::callSite());
+        }
         $this->setUnscopedDepth($this->unscopedDepth() + 1);
 
         try {
@@ -2311,8 +2368,17 @@ final class Orm
 
         // A statement is about to run: told to a test recording lazy loads,
         // with whether it ran in a batch. Never evaluated otherwise.
-        if ($lazy) {
-            $this->lazyLoads?->record(new LazyLoad($relation->key(), \count($parents), $batch ?? self::batchOf($parents)));
+        if ($lazy && ($this->lazyLoads !== null || $this->lazyLoadFlag !== null)) {
+            $load = new LazyLoad(
+                $relation->key(),
+                \count($parents),
+                $batch ?? self::batchOf($parents),
+                $this->lazyLoadFlag === null ? '' : self::callSite(),
+            );
+            $this->lazyLoads?->record($load);
+            if ($this->lazyLoadFlag !== null) {
+                ($this->lazyLoadFlag)($load);
+            }
         }
 
         $ids = array_keys($groupKeys);
