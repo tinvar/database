@@ -104,6 +104,20 @@ final class UnscopedShelf extends Model
 {
     #[Id] public private(set) string $id;
     #[Column] public string $name;
+    #[Column] public int $position;
+
+    /** @var Collection<UnscopedItem> */
+    #[HasMany(UnscopedItem::class, foreignKey: 'shelf_id')]
+    public Collection $items;
+}
+
+/** The items table read as a model that forgot #[TenantScoped], beside UnscopedShelf. */
+#[Table('items')]
+final class UnscopedItem extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $name;
+    #[Column] public int $priceCents;
 }
 
 /** The rows, made on any of the three databases. */

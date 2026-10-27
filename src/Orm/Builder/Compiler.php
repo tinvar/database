@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm\Builder;
 
+use Tinvar\Orm\Aggregate;
 use Tinvar\Orm\Direction;
 use Tinvar\Orm\Nulls;
 use Tinvar\Orm\Metadata;
@@ -26,7 +27,11 @@ use Tinvar\Orm\RelationKind;
  *   - each table a column's #[BelongsTo] path joins, in the join's ON, so a
  *     row whose related row is another tenant's joins nothing and sorts and
  *     filters as if it had none;
- *   - each subquery whereHas() makes, inside it.
+ *   - each subquery whereHas() makes, inside it -- and a filter on a
+ *     #[HasMany]'s column is one;
+ *   - each subquery an aggregate over a row's related rows makes
+ *     (withCount(), orderByRelation()), inside it;
+ *   - each arm of a union, a statement of its own.
  *
  * Nothing a caller wrote is interpolated: identifiers are the metadata's,
  * quoted by Identifiers::quote(); aliases are made here from them and a
@@ -45,13 +50,21 @@ final class Compiler
 
     /**
      * @param list<Condition> $conditions
-     * @param list<array{ColumnRef, Direction, Nulls|null}> $orders
+     * @param list<array{ColumnRef|Measure|RelationMeasure, Direction, Nulls|null}> $orders by a column, by an
+     *        aggregate over the rows (a report's), or by one over each row's related rows
      * @param list<ColumnRef> $also further columns the statement reads, which need their joins
      */
     public function scope(ModelMeta $meta, array $conditions, array $orders, array $also = []): Scope
     {
         $alias = $this->alias();
-        $columns = [...$also, ...array_map(static fn (array $order): ColumnRef => $order[0], $orders)];
+        $columns = $also;
+        foreach ($orders as [$by]) {
+            if ($by instanceof ColumnRef) {
+                $columns[] = $by;
+            } elseif ($by instanceof Measure && $by->column !== null) {
+                $columns[] = $by->column;
+            }
+        }
         foreach ($conditions as $condition) {
             array_push($columns, ...$condition->columns());
         }
@@ -73,15 +86,67 @@ final class Compiler
 
         $scope = new Scope($alias, $from, $fromBindings, implode(' AND ', $where), $whereBindings, [], $aliases);
 
-        return new Scope(
-            $alias,
-            $from,
-            $fromBindings,
-            $scope->where,
-            $whereBindings,
-            array_map(static fn (array $order): array => [$scope->expression($order[0]), $order[1], $order[2]], $orders),
-            $aliases,
-        );
+        $resolved = [];
+        foreach ($orders as [$by, $direction, $nulls]) {
+            [$expression, $bindings] = match (true) {
+                $by instanceof ColumnRef => [$scope->expression($by), []],
+                $by instanceof Measure => [$this->measure($scope, $by), []],
+                default => $this->relationMeasure($meta, $alias, $by),
+            };
+            $resolved[] = [$expression, $direction, $nulls, $bindings];
+        }
+
+        return new Scope($alias, $from, $fromBindings, $scope->where, $whereBindings, $resolved, $aliases);
+    }
+
+    /**
+     * An aggregate over the rows $scope reads, as SQL: the function is
+     * Aggregate's own word, the column the scope's quoted expression. A
+     * sum is 0 where it has nothing to add -- a group whose column is NULL
+     * throughout -- as it is answered, so a HAVING or a sort reads the
+     * value the report shows.
+     */
+    public function measure(Scope $scope, Measure $measure): string
+    {
+        $sql = $measure->function->sql($measure->column === null ? null : $scope->expression($measure->column));
+
+        return $measure->function === Aggregate::Sum ? "COALESCE({$sql}, 0)" : $sql;
+    }
+
+    /**
+     * An aggregate over one row's related rows, as a correlated subquery:
+     * the related model's table, its joins and its WHERE -- tenant
+     * predicate first, then the measure's own conditions -- with the link
+     * to the row ANDed after them. So a related row of another tenant's,
+     * which a row may well have (a child is stamped with its own tenant,
+     * not its parent's), is never counted, summed or compared.
+     *
+     * A subquery rather than a join with GROUP BY: it reads one row's
+     * children and answers one value, so the row is never repeated, and
+     * two aggregates over two relations never multiply each other's rows.
+     * A sum over no row is 0, as Aggregate::read() answers it.
+     *
+     * @return array{string, list<mixed>}
+     */
+    public function relationMeasure(ModelMeta $meta, string $alias, RelationMeasure $measure): array
+    {
+        $relation = $measure->relation;
+        if ($relation->kind !== RelationKind::HasMany) {
+            throw new \LogicException("{$relation->key()} is no #[HasMany]: an aggregate reads a row's collection.");
+        }
+        $target = Metadata::for($relation->target);
+        $inner = $this->scope($target, $measure->conditions, [], $measure->column === null ? [] : [$measure->column]);
+
+        $link = Identifiers::quote($inner->alias) . '.' . Identifiers::quote($relation->foreignKey)
+            . ' = ' . Identifiers::quote($alias) . '.' . Identifiers::quote($meta->idColumn);
+        [$body, $bindings] = $inner->body($link);
+
+        $expression = $measure->function->sql($measure->column === null ? null : $inner->expression($measure->column));
+        if ($measure->function === Aggregate::Sum) {
+            $expression = "COALESCE({$expression}, 0)";
+        }
+
+        return ["(SELECT {$expression}{$body})", $bindings];
     }
 
     /**
@@ -245,6 +310,9 @@ final class Compiler
             case Condition::HAS:
                 return $this->has($meta, $alias, $condition);
 
+            case Condition::UNION:
+                return $this->union($meta, $alias, $condition);
+
             default:
                 throw new \LogicException("No such condition: {$condition->kind}.");
         }
@@ -275,6 +343,38 @@ final class Compiler
         return [($condition->not ? 'NOT EXISTS (SELECT 1' : 'EXISTS (SELECT 1') . $body . ')', $bindings];
     }
 
+    /**
+     * The rows any arm matches: the key IN a UNION of each arm's keys.
+     * Each arm is a statement over the model's table of its own, compiled
+     * as any read is -- its own joins, each with its tenant predicate in the
+     * ON, and its WHERE with the model's tenant predicate first -- so no arm
+     * reads a row the query itself could not, whatever its conditions.
+     *
+     * Over keys rather than whole rows, so the rows come back once each --
+     * UNION's own de-duplication, on a column every database can compare,
+     * where a whole row may hold a JSON column Postgres has no equality for
+     * -- and the query around it reads them as any query does: sorted,
+     * joined, paged, counted, written.
+     *
+     * @return array{string, list<mixed>}
+     */
+    private function union(ModelMeta $meta, string $alias, Condition $condition): array
+    {
+        $arms = [];
+        $bindings = [];
+        foreach ($condition->arms as $arm) {
+            $inner = $this->scope($meta, $arm, []);
+            [$body, $armBindings] = $inner->body();
+            $arms[] = 'SELECT ' . $inner->expression(new ColumnRef([], $meta->idColumn)) . $body;
+            array_push($bindings, ...$armBindings);
+        }
+
+        return [
+            Identifiers::quote($alias) . '.' . Identifiers::quote($meta->idColumn) . ' IN (' . implode(' UNION ', $arms) . ')',
+            $bindings,
+        ];
+    }
+
     private function alias(): string
     {
         return 't' . $this->aliases++;
@@ -289,7 +389,7 @@ final class Compiler
      * text it compares with a number, and has no CAST(... AS DOUBLE
      * PRECISION) before 8.0.17.
      */
-    private function placeholder(mixed $value): string
+    public function placeholder(mixed $value): string
     {
         if (!\is_float($value)) {
             return '?';

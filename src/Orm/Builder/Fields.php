@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Orm\Builder;
 
 use Tinvar\Orm\ForeignTenantRow;
+use Tinvar\Orm\Increment;
 use Tinvar\Orm\MappingException;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\ModelMeta;
@@ -63,6 +64,9 @@ final class Fields
             if (!\is_string($name)) {
                 throw new \InvalidArgumentException('A write names each field it sets: a list of values says nothing of where they go.');
             }
+            if ($value instanceof Increment && $inserting) {
+                throw new \InvalidArgumentException("'{$name}' is a new row's: there is nothing there to add to.");
+            }
             $ref = Identifiers::column($meta, $name);
             if ($ref->path !== []) {
                 throw new MappingException("'{$name}' is a column of another table; a write sets {$meta->class}'s own.");
@@ -97,6 +101,11 @@ final class Fields
             $property = array_search($column, $meta->columns, true);
             if (\is_string($property)) {
                 self::assertSettable($meta, $property);
+                if ($value instanceof Increment) {
+                    self::assertIncrementable($meta, $property, $value);
+                    $stored[$column] = $value;   // written as `column = column + ?` (Query::update())
+                    continue;
+                }
                 try {
                     $meta->set($scratch, $property, $value);
                 } catch (\TypeError $e) {
@@ -110,6 +119,9 @@ final class Fields
                 continue;
             }
 
+            if ($value instanceof Increment) {
+                throw new \InvalidArgumentException("'{$name}' is a #[BelongsTo]'s key: a key is not a number to add to.");
+            }
             $stored[$column] = self::relationKey($meta, $column, $value);
         }
 
@@ -137,6 +149,27 @@ final class Fields
             throw new \InvalidArgumentException(
                 "{$meta->class}::\${$property} is set by the model alone, so a write from outside it does not set it either.",
             );
+        }
+    }
+
+    /**
+     * Refuses an increment of anything but a number that is never NULL: a
+     * property typed int or float -- a float's increment on an int column
+     * would be stored as whatever the database rounds it to -- and not
+     * nullable, since NULL plus anything is NULL. A value object's column
+     * is typed by its class, so never one.
+     */
+    private static function assertIncrementable(ModelMeta $meta, string $property, Increment $increment): void
+    {
+        $type = (new \ReflectionProperty($meta->class, $property))->getType();
+        $name = $type instanceof \ReflectionNamedType && $type->isBuiltin() && !$type->allowsNull() ? $type->getName() : null;
+        if ($name !== 'int' && $name !== 'float') {
+            throw new \InvalidArgumentException(
+                "{$meta->class}::\${$property} is no number that is never NULL, so nothing is added to it.",
+            );
+        }
+        if ($name === 'int' && \is_float($increment->amount)) {
+            throw new \InvalidArgumentException("{$meta->class}::\${$property} is an int: add a whole number to it.");
         }
     }
 

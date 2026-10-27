@@ -24,8 +24,9 @@ final readonly class Scope
      * @param list<mixed> $fromBindings  what the joins' tenant predicates bind
      * @param string      $where         the WHERE clause's body, or '' for none
      * @param list<mixed> $whereBindings
-     * @param list<array{string, Direction, Nulls|null}> $orders each ORDER BY expression, quoted, with its
-     *        direction and -- for a column that may be NULL -- where its NULLs go
+     * @param list<array{string, Direction, Nulls|null, list<mixed>}> $orders each ORDER BY expression, quoted, with
+     *        its direction, where its NULLs go -- for one that may be NULL -- and what it binds: a sort by a
+     *        relation's aggregate is a subquery, with the related model's tenant predicate inside
      * @param array<string, string> $aliases by path key ('' for the model read), the alias it is read as
      */
     public function __construct(
@@ -89,5 +90,25 @@ final readonly class Scope
         }
 
         return ' ORDER BY ' . implode(', ', $terms);
+    }
+
+    /**
+     * What orderBy() binds, in its order: each term's own -- twice for one
+     * that sorts its NULLs first, which names its expression twice. The same
+     * either way round, since turning the order round turns no term.
+     *
+     * @return list<mixed>
+     */
+    public function orderBindings(): array
+    {
+        $bindings = [];
+        foreach ($this->orders as [, , $nulls, $values]) {
+            if ($nulls !== null) {
+                array_push($bindings, ...$values);
+            }
+            array_push($bindings, ...$values);
+        }
+
+        return $bindings;
     }
 }

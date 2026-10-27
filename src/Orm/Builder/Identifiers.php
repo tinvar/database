@@ -71,9 +71,10 @@ final class Identifiers
             $relation = self::relation($target, $property);
             if ($relation->kind !== RelationKind::BelongsTo) {
                 throw new MappingException(
-                    "{$target->class}::\${$property} is a #[HasMany]: a column is reached only through #[BelongsTo] "
-                    . 'relations, each one row, so a join never repeats the rows it is on. Filter by a collection '
-                    . 'with whereHas().',
+                    "{$target->class}::\${$property} is a #[HasMany]: a column is joined only through #[BelongsTo] "
+                    . 'relations, each one row, so a join never repeats the rows it is on. Filter by a collection\'s '
+                    . 'column with where() or whereHas(), and sort by or read an aggregate of it with '
+                    . 'orderByRelation() or withCount(), withSum() and the rest.',
                 );
             }
             $path[] = $property;
@@ -81,6 +82,42 @@ final class Identifiers
         }
 
         return new ColumnRef($path, self::own($target, $column));
+    }
+
+    /**
+     * A column at the end of a path that walks a #[HasMany] -- 'items.name',
+     * 'lines.product.sku' -- for a filter, which reads it as an EXISTS over
+     * the related rows (Query::where()): the relation path, the model it
+     * ends at, and the column's name there, each checked against the
+     * metadata. Null for a path through #[BelongsTo] relations alone, or
+     * none, which column() resolves.
+     *
+     * @return array{string, ModelMeta, string}|null
+     */
+    public static function collectionColumn(ModelMeta $meta, string|\BackedEnum $name): ?array
+    {
+        if ($name instanceof \BackedEnum && !\is_string($name->value)) {
+            return null;    // column() refuses it, saying why
+        }
+        $parts = explode('.', self::text($name));
+        $column = array_pop($parts);
+        if ($parts === []) {
+            return null;
+        }
+
+        $relations = self::relationPath($meta, implode('.', $parts));
+        $collection = false;
+        foreach ($relations as $relation) {
+            $collection = $collection || $relation->kind === RelationKind::HasMany;
+        }
+        if (!$collection) {
+            return null;
+        }
+
+        $target = Metadata::for($relations[\count($relations) - 1]->target);
+        self::column($target, $column);
+
+        return [implode('.', $parts), $target, $column];
     }
 
     /**

@@ -10,6 +10,9 @@ use Tinvar\Orm\Builder\Condition;
 use Tinvar\Orm\Builder\Expression;
 use Tinvar\Orm\Builder\Fields;
 use Tinvar\Orm\Builder\Identifiers;
+use Tinvar\Orm\Builder\Measure;
+use Tinvar\Orm\Builder\RelationMeasure;
+use Tinvar\Orm\Builder\Report;
 use Tinvar\Orm\Builder\Scope;
 use Tinvar\Support\Uuid;
 
@@ -42,8 +45,9 @@ use Tinvar\Support\Uuid;
  *
  * **Tenancy** is the Orm's, applied when the statement is compiled -- by a
  * terminal method, not when the query is built -- to the model's table,
- * every table a column joins, and every subquery whereHas() makes: the
- * predicate find() and all() use, failing closed with NoTenantContext where
+ * every table a column joins, every subquery whereHas(), a filter on a
+ * collection's column or an aggregate over a row's related rows makes, and
+ * every arm of a union: the predicate find() and all() use, failing closed with NoTenantContext where
  * they do, lifted only inside acrossTenants(), widened only inside
  * withinSubtree(). A query built in one scope and run in another reads the
  * scope it runs in; nothing about it is fixed when it is built, and it
@@ -63,6 +67,12 @@ final readonly class Query
     /** The most values one INSERT binds: below what SQLite, Postgres and MySQL each take in one statement. */
     private const int MAX_BINDINGS = 30_000;
 
+    /** What a unionAll()'s arms are read as, together. */
+    private const string UNION = 'u';
+
+    /** What fetchAggregated() names each aggregate in its select list, with its position: never a name a caller gave. */
+    private const string MEASURE = 'tinvar_aggregate_';
+
     /** Comparison operators, as a caller may spell them, and as they are written. */
     private const array OPERATORS = [
         '=' => '=', '!=' => '<>', '<>' => '<>', '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=',
@@ -72,8 +82,13 @@ final readonly class Query
     /**
      * @param class-string<T> $class
      * @param list<Condition> $conditions
-     * @param list<array{ColumnRef, Direction, Nulls|null}> $orders
+     * @param list<array{ColumnRef|Measure|RelationMeasure, Direction, Nulls|null}> $orders by a column, by an
+     *        aggregate over the rows (a report's), or by one over each row's related rows
      * @param list<string> $with relation paths to load with the rows
+     * @param list<ColumnRef> $groups what a report groups by
+     * @param list<array{Measure, string, int|float|string}> $havings a report's conditions on its groups
+     * @param list<RelationMeasure> $measures the aggregates over related rows fetchAggregated() reads
+     * @param list<list<Condition>>|null $unionAll each arm's conditions, once unionAll() joined them
      */
     private function __construct(
         private Orm $orm,
@@ -84,6 +99,11 @@ final readonly class Query
         private ?int $limit = null,
         private ?int $offset = null,
         private array $with = [],
+        private array $groups = [],
+        private array $havings = [],
+        private bool $distinct = false,
+        private array $measures = [],
+        private ?array $unionAll = null,
     ) {}
 
     /**
@@ -117,13 +137,26 @@ final readonly class Query
      * a saved model (its key). Null is refused: `= NULL` matches nothing in
      * SQL, and whereNull() says what is meant.
      *
+     * A column reached through a #[HasMany] -- `where('items.priceCents',
+     * '>', 200)` -- is rows with at least one related row it holds for:
+     * whereHas('items', fn ($q) => $q->where('priceCents', '>', 200)), an
+     * EXISTS under the related model's tenant predicate, never a join, so a
+     * row is never repeated for each child that matches (ADR 0064). So too
+     * whereIn(), whereNotIn(), whereNull() and whereNotNull(): "some child
+     * has", never "every child has" -- whereDoesntHave() says "none has".
+     *
      * @param string|\BackedEnum|(\Closure(self<T>): self<T>) $column
      * @return static
      */
     #[\NoDiscard]
     public function where(string|\BackedEnum|\Closure $column, mixed $operator = null, mixed $value = null): self
     {
-        return $this->compare(false, $column, $operator, $value, \func_num_args());
+        $arguments = \func_num_args();
+
+        return $this->throughCollection(false, $column, static fn (self $q, string $c): self => $arguments === 2
+            ? $q->where($c, $operator)
+            : $q->where($c, $operator, $value))
+            ?? $this->compare(false, $column, $operator, $value, $arguments);
     }
 
     /**
@@ -137,7 +170,12 @@ final readonly class Query
     #[\NoDiscard]
     public function orWhere(string|\BackedEnum|\Closure $column, mixed $operator = null, mixed $value = null): self
     {
-        return $this->compare(true, $column, $operator, $value, \func_num_args());
+        $arguments = \func_num_args();
+
+        return $this->throughCollection(true, $column, static fn (self $q, string $c): self => $arguments === 2
+            ? $q->where($c, $operator)
+            : $q->where($c, $operator, $value))
+            ?? $this->compare(true, $column, $operator, $value, $arguments);
     }
 
     /**
@@ -147,7 +185,8 @@ final readonly class Query
     #[\NoDiscard]
     public function whereIn(string|\BackedEnum $column, iterable $values): self
     {
-        return $this->in(false, $column, $values, false);
+        return $this->throughCollection(false, $column, static fn (self $q, string $c): self => $q->whereIn($c, $values))
+            ?? $this->in(false, $column, $values, false);
     }
 
     /**
@@ -157,7 +196,8 @@ final readonly class Query
     #[\NoDiscard]
     public function orWhereIn(string|\BackedEnum $column, iterable $values): self
     {
-        return $this->in(true, $column, $values, false);
+        return $this->throughCollection(true, $column, static fn (self $q, string $c): self => $q->whereIn($c, $values))
+            ?? $this->in(true, $column, $values, false);
     }
 
     /**
@@ -167,28 +207,32 @@ final readonly class Query
     #[\NoDiscard]
     public function whereNotIn(string|\BackedEnum $column, iterable $values): self
     {
-        return $this->in(false, $column, $values, true);
+        return $this->throughCollection(false, $column, static fn (self $q, string $c): self => $q->whereNotIn($c, $values))
+            ?? $this->in(false, $column, $values, true);
     }
 
     /** @return static */
     #[\NoDiscard]
     public function whereNull(string|\BackedEnum $column): self
     {
-        return $this->adding(Condition::null(false, Identifiers::column($this->meta, $column), false));
+        return $this->throughCollection(false, $column, static fn (self $q, string $c): self => $q->whereNull($c))
+            ?? $this->adding(Condition::null(false, Identifiers::column($this->meta, $column), false));
     }
 
     /** @return static */
     #[\NoDiscard]
     public function orWhereNull(string|\BackedEnum $column): self
     {
-        return $this->adding(Condition::null(true, Identifiers::column($this->meta, $column), false));
+        return $this->throughCollection(true, $column, static fn (self $q, string $c): self => $q->whereNull($c))
+            ?? $this->adding(Condition::null(true, Identifiers::column($this->meta, $column), false));
     }
 
     /** @return static */
     #[\NoDiscard]
     public function whereNotNull(string|\BackedEnum $column): self
     {
-        return $this->adding(Condition::null(false, Identifiers::column($this->meta, $column), true));
+        return $this->throughCollection(false, $column, static fn (self $q, string $c): self => $q->whereNotNull($c))
+            ?? $this->adding(Condition::null(false, Identifiers::column($this->meta, $column), true));
     }
 
     /**
@@ -317,6 +361,263 @@ final readonly class Query
         return clone($this, ['with' => array_values(array_unique([...$this->with, ...$relations]))]);
     }
 
+    /**
+     * Each value once: pluck() answers each distinct value, and a report
+     * of columns each distinct row of them. Written as a GROUP BY of what
+     * is read rather than SELECT DISTINCT, which means the same and lets a
+     * sort put NULLs where the query says on every database -- Postgres
+     * refuses DISTINCT's ORDER BY any term it does not select (ADR 0064).
+     *
+     * fetch() reads each row once already: every join is to one row, and a
+     * collection is filtered with EXISTS, so no row is repeated to remove.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function distinct(): self
+    {
+        return clone($this, ['distinct' => true]);
+    }
+
+    /**
+     * Groups the rows a report() reads by these columns -- a model's own,
+     * or reached through #[BelongsTo] relations ('aisle.code'), whose joins
+     * are held to the tenant like any other.
+     *
+     * A grouped query reads a report, not models: fetch() and the rest
+     * refuse it. Models stay whole -- a model is a row, and a group is not one.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function groupBy(string|\BackedEnum ...$columns): self
+    {
+        if ($columns === []) {
+            throw new \InvalidArgumentException('groupBy() names a column at least.');
+        }
+        $groups = $this->groups;
+        foreach ($columns as $column) {
+            $ref = Identifiers::column($this->meta, $column);
+            if (!self::among($ref, $groups)) {
+                $groups[] = $ref;
+            }
+        }
+
+        return clone($this, ['groups' => $groups]);
+    }
+
+    /**
+     * Keeps the groups whose aggregate compares with $value:
+     * `having(Aggregate::Count, null, '>', 1)`, `having(Aggregate::Sum,
+     * 'stock', '>=', 10)`. The function is a case, the column the
+     * metadata's, the value bound.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function having(Aggregate $function, string|\BackedEnum|null $column, string $operator, mixed $value): self
+    {
+        $sql = self::OPERATORS[strtolower($operator)] ?? null;
+        if ($sql === null || str_contains($sql, 'LIKE')) {
+            throw new \InvalidArgumentException('An aggregate compares with =, <>, <, <=, > or >=.');
+        }
+        if ($value === null) {
+            throw new \InvalidArgumentException('An aggregate compared with NULL matches no group; compare with a value.');
+        }
+
+        return clone($this, ['havings' => [...$this->havings, [$this->measure($function, $column), $sql, self::value($value)]]]);
+    }
+
+    /**
+     * Sorts a report by an aggregate over each group:
+     * `orderByAggregate(Aggregate::Count, direction: 'desc')`. One that may
+     * be NULL -- a MIN, a MAX, an AVG over NULLs alone -- puts its NULLs
+     * last unless $nulls says first, as orderBy() does.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function orderByAggregate(
+        Aggregate $function,
+        string|\BackedEnum|null $column = null,
+        Direction|string $direction = Direction::Asc,
+        ?Nulls $nulls = null,
+    ): self {
+        $measure = $this->measure($function, $column);
+        $placed = $function->mayBeNull() ? ($nulls ?? Nulls::Last) : null;
+
+        return clone($this, ['orders' => [...$this->orders, [$measure, Direction::of($direction), $placed]]]);
+    }
+
+    /**
+     * Sorts the rows by an aggregate over each one's related rows:
+     * `orderByRelation('items', Aggregate::Max, 'priceCents', 'desc')` --
+     * a #[HasMany] has many values of a column, so a sort by one names
+     * which: the largest, the smallest, the sum, the count. A correlated
+     * subquery under the related model's tenant predicate, so another
+     * tenant's child is never what a row sorts by, and no row is repeated.
+     * A row with no related row sorts by a count or a sum of 0, and by a
+     * MIN, MAX or AVG of NULL, last unless $nulls says first.
+     *
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint narrows the related rows read
+     * @return static
+     */
+    #[\NoDiscard]
+    public function orderByRelation(
+        string $relation,
+        Aggregate $function,
+        string|\BackedEnum|null $column = null,
+        Direction|string $direction = Direction::Asc,
+        ?Nulls $nulls = null,
+        ?\Closure $constraint = null,
+    ): self {
+        $measure = $this->relationMeasure('', $relation, $function, $column, $constraint, 'An orderByRelation() constraint');
+        $placed = $function->mayBeNull() ? ($nulls ?? Nulls::Last) : null;
+
+        return clone($this, ['orders' => [...$this->orders, [$measure, Direction::of($direction), $placed]]]);
+    }
+
+    /**
+     * Reads, beside each row, how many related rows it has -- that
+     * $constraint holds for, if given -- answered under $as, by default
+     * '{relation}Count', by fetchAggregated(). The related rows are counted
+     * under their own model's tenant predicate, in the statement that reads
+     * the rows: one statement, however many aggregates.
+     *
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withCount(string $relation, ?\Closure $constraint = null, ?string $as = null): self
+    {
+        return $this->withAggregate($relation, Aggregate::Count, null, $constraint, $as);
+    }
+
+    /**
+     * withCount()'s sum of a related column: 0 for a row with none.
+     *
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withSum(string $relation, string|\BackedEnum $column, ?\Closure $constraint = null, ?string $as = null): self
+    {
+        return $this->withAggregate($relation, Aggregate::Sum, $column, $constraint, $as);
+    }
+
+    /**
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withMin(string $relation, string|\BackedEnum $column, ?\Closure $constraint = null, ?string $as = null): self
+    {
+        return $this->withAggregate($relation, Aggregate::Min, $column, $constraint, $as);
+    }
+
+    /**
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withMax(string $relation, string|\BackedEnum $column, ?\Closure $constraint = null, ?string $as = null): self
+    {
+        return $this->withAggregate($relation, Aggregate::Max, $column, $constraint, $as);
+    }
+
+    /**
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withAvg(string $relation, string|\BackedEnum $column, ?\Closure $constraint = null, ?string $as = null): self
+    {
+        return $this->withAggregate($relation, Aggregate::Avg, $column, $constraint, $as);
+    }
+
+    /**
+     * Any aggregate over each row's related rows, read by fetchAggregated()
+     * under $as -- by default the relation, the function and the column run
+     * together ('itemsSumPriceCents'). The name is PHP's alone: the SQL
+     * names each aggregate by its position.
+     *
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withAggregate(
+        string $relation,
+        Aggregate $function,
+        string|\BackedEnum|null $column = null,
+        ?\Closure $constraint = null,
+        ?string $as = null,
+    ): self {
+        $name = $as ?? $relation . ucfirst($function->value)
+            . ($column === null ? '' : ucfirst(str_replace('.', '', ucwords($column instanceof \BackedEnum ? (string) $column->value : $column, '.'))));
+        foreach ($this->measures as $measure) {
+            if ($measure->name === $name) {
+                throw new \InvalidArgumentException("An aggregate is read under '{$name}' already; name this one with \$as.");
+            }
+        }
+
+        $measure = $this->relationMeasure($name, $relation, $function, $column, $constraint, "A with{$function->name}() constraint");
+
+        return clone($this, ['measures' => [...$this->measures, $measure]]);
+    }
+
+    /**
+     * The rows this query reads and the rows $other reads, each once: a
+     * UNION of the two queries' keys, each arm a statement of its own read
+     * under the model's tenant predicate, and the rows read by key from it
+     * under the predicate again. So the union is a query like any other --
+     * sorted, narrowed further, joined, paged, counted, written -- and
+     * reads nothing either arm could not (ADR 0064).
+     *
+     * $other is a query over the same model, narrowed by conditions alone:
+     * its order, limit and eager loads would be the union's, which are this
+     * query's.
+     *
+     * @param self<T> $other
+     * @return static
+     */
+    #[\NoDiscard]
+    public function union(self $other): self
+    {
+        $arm = $this->arm($other, 'union()');
+        if ($this->unionAll !== null) {
+            throw new \LogicException('union() takes in a query, and this one is a unionAll() already; join each arm the one way.');
+        }
+
+        // Another arm of the union this query is already, rather than a
+        // union of a union.
+        $conditions = \count($this->conditions) === 1 && $this->conditions[0]->kind === Condition::UNION && !$this->conditions[0]->or
+            ? [Condition::union(false, [...$this->conditions[0]->arms, $arm])]
+            : [Condition::union(false, [$this->conditions, $arm])];
+
+        return clone($this, ['conditions' => $conditions]);
+    }
+
+    /**
+     * The rows this query reads, then the rows $other reads, a row both
+     * read twice: UNION ALL of whole rows, read from as one table. Each arm
+     * is a statement of its own under the model's tenant predicate.
+     *
+     * Read by fetch(), first(), count(), exists() and paginate(); sorted by
+     * the model's own columns alone, since what is sorted is the arms'
+     * result. A condition added after it would be no arm's, so it is
+     * refused: narrow each arm before joining them.
+     *
+     * @param self<T> $other
+     * @return static
+     */
+    #[\NoDiscard]
+    public function unionAll(self $other): self
+    {
+        $arm = $this->arm($other, 'unionAll()');
+
+        return clone($this, ['unionAll' => [...($this->unionAll ?? [$this->conditions]), $arm], 'conditions' => []]);
+    }
+
     // ------------------------------------------------------------- reading
 
     /**
@@ -327,12 +628,229 @@ final readonly class Query
     #[\NoDiscard]
     public function fetch(): array
     {
+        $this->assertModelsRead('fetch()');
         $this->assertOffsetLimited();
 
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders);
-        [$sql, $bindings] = $this->select($scope, limit: $this->limit, offset: $this->offset);
+        [$sql, $bindings] = $this->select($this->readScope(new Compiler($this->orm)), limit: $this->limit, offset: $this->offset);
 
         return $this->hydrate($this->orm->statements()->select($sql, $bindings));
+    }
+
+    /**
+     * The rows, as models, each with the aggregates over its related rows
+     * that withCount(), withSum() and the rest asked for, by name: one
+     * statement, each aggregate a subquery in it under the related model's
+     * tenant predicate. The models are whole and the identity map's, as
+     * fetch() returns them; the aggregates are beside them (ADR 0064).
+     *
+     * @return list<Aggregated<T>>
+     */
+    #[\NoDiscard]
+    public function fetchAggregated(): array
+    {
+        $this->assertModelsRead('fetchAggregated()', aggregates: true);
+        if ($this->unionAll !== null) {
+            throw new \LogicException('fetchAggregated() reads rows of the model\'s table, and a unionAll() reads its arms\' rows.');
+        }
+        $this->assertOffsetLimited();
+
+        $compiler = new Compiler($this->orm);
+        $scope = $compiler->scope($this->meta, $this->conditions, $this->orders);
+        $list = '';
+        $listBindings = [];
+        foreach ($this->measures as $i => $measure) {
+            [$sql, $bindings] = $compiler->relationMeasure($this->meta, $scope->alias, $measure);
+            $list .= ", {$sql} AS " . Identifiers::quote(self::MEASURE . $i);
+            array_push($listBindings, ...$bindings);
+        }
+
+        [$sql, $bindings] = $this->select($scope, limit: $this->limit, offset: $this->offset, list: $list, listBindings: $listBindings);
+        $rows = $this->orm->statements()->select($sql, $bindings);
+
+        $values = [];
+        foreach ($rows as $r => $row) {
+            $values[$r] = [];
+            foreach ($this->measures as $i => $measure) {
+                $values[$r][$measure->name] = $measure->function->read($row[self::MEASURE . $i] ?? null);
+                unset($rows[$r][self::MEASURE . $i]);
+            }
+        }
+
+        // MIN() and MAX() answer one of the related column's own values,
+        // which the model-leak check looks for as pluck()'s are.
+        foreach ($this->measures as $measure) {
+            $column = $measure->column;
+            if ($column !== null && ($measure->function === Aggregate::Min || $measure->function === Aggregate::Max)) {
+                $this->orm->recordColumnRead(
+                    self::ownerIn(Metadata::for($measure->relation->target), $column),
+                    $column->column,
+                    array_column($values, $measure->name),
+                );
+            }
+        }
+
+        $out = [];
+        foreach ($this->hydrate($rows) as $r => $model) {
+            $out[] = new Aggregated($model, $values[$r] ?? []);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Reads the groups -- or, with no groupBy(), the one row of aggregates,
+     * or each row of some columns -- into $class, one object per row: each
+     * key of $columns is a parameter of its constructor, and each value
+     * what fills it -- a column the report groups by ('category',
+     * 'aisle.code'), Aggregate::Count for the rows in the group, or an
+     * aggregate of a column (`[Aggregate::Sum, 'stock']`).
+     *
+     *     Product::query($orm)
+     *         ->groupBy('category')
+     *         ->orderBy('category')
+     *         ->report(CategoryCount::class, [
+     *             'category' => 'category',
+     *             'products' => Aggregate::Count,
+     *         ]);
+     *
+     * Into a class of the caller's, never a model: a model is a whole row,
+     * the identity map's, and saved as one, and a group is no row. Typed,
+     * where a list of arrays would leave every caller to read each
+     * driver's spelling of a number: each value is read as its parameter's
+     * type -- int, float, string, bool, a backed enum, or mixed for what
+     * the database answered -- and one that is not that type is an
+     * UnexpectedValueException, not a wrong number (ADR 0064).
+     *
+     * Every column is the metadata's, every value bound, and the tenant
+     * predicate on every table the report reads, as for any read.
+     *
+     * @template R of object
+     * @param class-string<R> $class
+     * @param array<string, string|\BackedEnum|Aggregate|array{Aggregate, string|\BackedEnum}> $columns
+     * @return list<R>
+     */
+    #[\NoDiscard]
+    public function report(string $class, array $columns): array
+    {
+        if ($this->measures !== []) {
+            throw new \LogicException('report() reads groups or columns, not rows: withCount() and the rest are read by fetchAggregated().');
+        }
+        if ($this->unionAll !== null) {
+            throw new \LogicException('report() reads the model\'s table, and a unionAll() reads its arms\' rows.');
+        }
+        $this->assertOffsetLimited();
+
+        /** @var array<string, ColumnRef|Measure> $selected */
+        $selected = [];
+        foreach ($columns as $name => $spec) {
+            // A list's keys name no parameter: Report::plan() refuses them.
+            $selected[$name] = match (true) {
+                $spec instanceof Aggregate => $this->measure($spec, null),
+                \is_array($spec) => $this->measureOf($spec),
+                default => Identifiers::column($this->meta, $spec),
+            };
+        }
+        if ($selected === []) {
+            throw new \InvalidArgumentException('A report reads a column at least.');
+        }
+
+        $plain = array_filter($selected, static fn (ColumnRef|Measure $what): bool => $what instanceof ColumnRef);
+        $measures = array_filter($selected, static fn (ColumnRef|Measure $what): bool => $what instanceof Measure);
+        $grouped = $this->groups !== [];
+        if (!$grouped && $plain !== [] && $measures !== []) {
+            throw new \LogicException('A report that reads columns beside aggregates groups by those columns: call groupBy().');
+        }
+        if ($this->havings !== [] && !$grouped) {
+            throw new \LogicException('having() keeps groups: call groupBy().');
+        }
+        /** @var list<ColumnRef> $plainRefs */
+        $plainRefs = array_values($plain);
+        $groups = $grouped ? $this->groups : ($this->distinct ? $plainRefs : []);
+        foreach ($plain as $name => $ref) {
+            if ($grouped && !self::among($ref, $groups)) {
+                throw new \LogicException("A report reads '{$name}', which it does not group by: a group holds many of its values.");
+            }
+        }
+
+        // Each row a group's, or the one row of aggregates: what it sorts by
+        // is one value for it.
+        $oneValueEach = $groups !== [] || $plain === [];
+        foreach ($this->orders as [$by]) {
+            if ($by instanceof RelationMeasure) {
+                throw new \LogicException('report() sorts by its columns and aggregates; orderByRelation() sorts rows by their related rows.');
+            }
+            if ($by instanceof Measure && !$oneValueEach) {
+                throw new \LogicException('orderByAggregate() sorts groups: call groupBy().');
+            }
+            if ($by instanceof ColumnRef && $oneValueEach && !self::among($by, $groups)) {
+                throw new \LogicException("A report of groups sorts by what it groups by, or by an aggregate -- not by '{$by->column}', which a group holds many of.");
+            }
+        }
+
+        $plan = Report::plan($class, array_keys($selected));
+
+        $compiler = new Compiler($this->orm);
+        $also = [...$groups, ...$plainRefs];
+        foreach ([...$measures, ...array_column($this->havings, 0)] as $measure) {
+            if ($measure->column !== null) {
+                $also[] = $measure->column;
+            }
+        }
+        $scope = $compiler->scope($this->meta, $this->conditions, $this->orders, $also);
+
+        $list = [];
+        $aliases = [];
+        foreach (array_keys($selected) as $i => $name) {
+            $what = $selected[$name];
+            $aliases[$name] = "c{$i}";
+            $list[] = ($what instanceof ColumnRef ? $scope->expression($what) : $compiler->measure($scope, $what))
+                . ' AS ' . Identifiers::quote("c{$i}");
+        }
+
+        [$body, $bindings] = $scope->body();
+        $sql = 'SELECT ' . implode(', ', $list) . $body;
+        if ($groups !== []) {
+            $sql .= ' GROUP BY ' . implode(', ', array_map($scope->expression(...), $groups));
+        }
+        $havingBindings = [];
+        if ($this->havings !== []) {
+            $terms = [];
+            foreach ($this->havings as [$measure, $operator, $value]) {
+                $terms[] = $compiler->measure($scope, $measure) . " {$operator} " . $compiler->placeholder($value);
+                $havingBindings[] = $value;
+            }
+            $sql .= ' HAVING ' . implode(' AND ', $terms);
+        }
+        [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
+
+        $rows = $this->orm->statements()->select(
+            $sql . $scope->orderBy() . $tail,
+            [...$bindings, ...$havingBindings, ...$scope->orderBindings(), ...$tailBindings],
+        );
+
+        // What a column read without a model answered, for the model-leak
+        // check, as pluck() records it: each column read, and each MIN or
+        // MAX, which answers one of its column's own values.
+        foreach ($selected as $name => $what) {
+            $ref = $what instanceof ColumnRef
+                ? $what
+                : ($what->function === Aggregate::Min || $what->function === Aggregate::Max ? $what->column : null);
+            if ($ref !== null) {
+                $this->orm->recordColumnRead($this->ownerOf($ref), $ref->column, array_column($rows, $aliases[$name]));
+            }
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $values = [];
+            foreach ($selected as $name => $what) {
+                $raw = $row[$aliases[$name]] ?? null;
+                $values[$name] = $what instanceof Measure ? $what->function->read($raw) : $raw;
+            }
+            $out[] = $plan->make($values);
+        }
+
+        return $out;
     }
 
     /**
@@ -350,8 +868,8 @@ final readonly class Query
     #[\NoDiscard]
     public function count(): int
     {
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, []);
-        [$body, $bindings] = $scope->body();
+        $this->assertModelsRead('count()', aggregates: true);
+        [$body, $bindings] = $this->readScope(new Compiler($this->orm), orders: false)->body();
 
         return (int) ($this->orm->statements()->select('SELECT COUNT(*) AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? 0);
     }
@@ -360,8 +878,8 @@ final readonly class Query
     #[\NoDiscard]
     public function exists(): bool
     {
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, []);
-        [$body, $bindings] = $scope->body();
+        $this->assertModelsRead('exists()', aggregates: true);
+        [$body, $bindings] = $this->readScope(new Compiler($this->orm), orders: false)->body();
 
         return $this->orm->statements()->select('SELECT 1 AS "found"' . $body . ' LIMIT ?', [...$bindings, 1]) !== [];
     }
@@ -371,20 +889,37 @@ final readonly class Query
      * order and within its limit. No model is made, so none is recorded or
      * cached: what comes back is the column, not a row.
      *
+     * After distinct(), each value once -- NULL too, once -- sorted only by
+     * the column itself, if at all: a value stands for many rows, which
+     * have no one order between them.
+     *
      * @return list<mixed>
      */
     #[\NoDiscard]
     public function pluck(string|\BackedEnum $column): array
     {
+        $this->assertModelsRead('pluck()', aggregates: true);
+        $this->assertOwnTable('pluck()');
         $ref = Identifiers::column($this->meta, $column);
         $this->assertOffsetLimited();
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, [$ref]);
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
 
+        $expression = $scope->expression($ref);
+        $group = '';
+        if ($this->distinct) {
+            foreach ($this->orders as [$by]) {
+                if (!$by instanceof ColumnRef || !self::among($by, [$ref])) {
+                    throw new \LogicException('A distinct pluck() sorts by the column it reads alone: each value stands for rows with no one order between them.');
+                }
+            }
+            $group = " GROUP BY {$expression}";
+        }
+
         $rows = $this->orm->statements()->select(
-            'SELECT ' . $scope->expression($ref) . ' AS "value"' . $body . $scope->orderBy() . $tail,
-            [...$bindings, ...$tailBindings],
+            "SELECT {$expression} AS \"value\"" . $body . $group . $scope->orderBy() . $tail,
+            [...$bindings, ...$scope->orderBindings(), ...$tailBindings],
         );
 
         $values = array_column($rows, 'value');
@@ -475,10 +1010,16 @@ final readonly class Query
     {
         self::assertPerPage($perPage);
         $this->assertUnlimited('cursorPaginate()');
+        $this->assertModelsRead('cursorPaginate()');
+        $this->assertOwnTable('cursorPaginate()');
 
-        $orders = $this->orders;
+        $orders = [];
         $hasKey = false;
-        foreach ($orders as [$column]) {
+        foreach ($this->orders as [$column, $direction, $nulls]) {
+            if (!$column instanceof ColumnRef) {
+                throw new \LogicException('cursorPaginate() sorts by the model\'s own columns: an aggregate is a value no row holds to find its place by.');
+            }
+            $orders[] = [$column, $direction, $nulls];
             if ($column->path !== []) {
                 throw new \LogicException('cursorPaginate() sorts by the model\'s own columns: a joined column is NULL where nothing joins.');
             }
@@ -534,9 +1075,9 @@ final readonly class Query
     #[\NoDiscard]
     public function toSql(): array
     {
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders);
+        $this->assertModelsRead('toSql()', aggregates: true);
 
-        return $this->select($scope, limit: $this->limit, offset: $this->offset);
+        return $this->select($this->readScope(new Compiler($this->orm)), limit: $this->limit, offset: $this->offset);
     }
 
     // ------------------------------------------------------------- writing
@@ -567,12 +1108,20 @@ final readonly class Query
      * read again and takes what was stored; loaded relations follow, as
      * after save() (Orm::followStatementWrite()).
      *
+     * A field's value may be an Increment -- `['stock' => Increment::by(-1)]`,
+     * or increment() and decrement() -- which adds to what the row holds
+     * when it is written, `stock = stock + ?`, rather than what a read of it
+     * held before: the one expression a write sets, a value and never text
+     * (ADR 0064). Its rows are read again afterwards, every one, so the ORM
+     * follows what was stored.
+     *
      * @param array<string, mixed> $values field => value: a property, a column, or a #[BelongsTo] (a model)
      */
     public function update(array $values): int
     {
         $this->orm->refuseWriteOf('update()');
         $this->refuseHooks('update()');
+        $this->assertRowsWritten('update()');
         $this->assertOffsetLimited();
 
         $set = Fields::row($this->meta, $values, inserting: false);
@@ -582,17 +1131,27 @@ final readonly class Query
 
         return $this->orm->transaction(function () use ($set): int {
             $ids = $this->idsToWrite();
-            $assignments = implode(', ', array_map(
-                static fn (string $column): string => Identifiers::quote($column) . ' = ?',
-                array_keys($set),
-            ));
+            $compiler = new Compiler($this->orm);
+            $assignments = [];
+            $values = [];
+            foreach ($set as $column => $value) {
+                $quoted = Identifiers::quote($column);
+                if ($value instanceof Increment) {
+                    $assignments[] = "{$quoted} = {$quoted} + " . $compiler->placeholder($value->amount);
+                    $values[] = $value->amount;
+                } else {
+                    $assignments[] = "{$quoted} = ?";
+                    $values[] = $value;
+                }
+            }
+            $assignments = implode(', ', $assignments);
 
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
                 $count += $this->orm->statements()->execute(
                     'UPDATE ' . Identifiers::quote($this->meta->table) . " SET {$assignments} WHERE {$where}",
-                    [...array_values($set), ...$bindings],
+                    [...$values, ...$bindings],
                 );
             }
 
@@ -615,6 +1174,7 @@ final readonly class Query
     public function delete(): int
     {
         $this->orm->refuseWriteOf('delete()');
+        $this->assertRowsWritten('delete()');
         $this->assertOffsetLimited();
 
         return $this->orm->transaction(function (): int {
@@ -632,6 +1192,40 @@ final readonly class Query
 
             return $count;
         });
+    }
+
+    /**
+     * Adds $by to $column on every row the query matches, as the database
+     * holds it when the row is written -- `stock = stock + ?` -- and sets
+     * $also's fields beside it, as update() sets them; answers how many
+     * rows the database counted. Held to what update() is held to.
+     *
+     * @param array<string, mixed> $also further fields to set, as update() takes them
+     */
+    public function increment(string|\BackedEnum $column, int|float $by = 1, array $also = []): int
+    {
+        if ($by <= 0) {
+            throw new \InvalidArgumentException('increment() adds a number above zero; decrement() takes one away.');
+        }
+
+        return $this->update([...$also, self::fieldName($column) => Increment::by($by)]);
+    }
+
+    /**
+     * increment()'s converse: takes $by from $column on every row the
+     * query matches. Nothing stops a count going below zero but the
+     * query's own conditions -- `where('stock', '>=', $by)` -- or the
+     * table's CHECK.
+     *
+     * @param array<string, mixed> $also
+     */
+    public function decrement(string|\BackedEnum $column, int|float $by = 1, array $also = []): int
+    {
+        if ($by <= 0) {
+            throw new \InvalidArgumentException('decrement() takes away a number above zero; increment() adds one.');
+        }
+
+        return $this->update([...$also, self::fieldName($column) => Increment::by(-$by)]);
     }
 
     /**
@@ -699,7 +1293,8 @@ final readonly class Query
     {
         $this->orm->refuseWriteOf($what);
         $this->refuseHooks($what);
-        if ($this->conditions !== [] || $this->orders !== [] || $this->limit !== null || $this->offset !== null || $this->with !== []) {
+        if ($this->conditions !== [] || $this->orders !== [] || $this->limit !== null || $this->offset !== null || $this->with !== []
+            || $this->groups !== [] || $this->havings !== [] || $this->distinct || $this->measures !== [] || $this->unionAll !== null) {
             throw new \LogicException("{$what} reads nothing: call it on the query a model starts, not on one narrowed.");
         }
         if ($rows === []) {
@@ -984,7 +1579,10 @@ final readonly class Query
             default => '',
         };
 
-        $rows = $connection->select("SELECT {$id} AS \"id\"" . $body . $scope->orderBy() . $tail . $lock, [...$bindings, ...$tailBindings]);
+        $rows = $connection->select(
+            "SELECT {$id} AS \"id\"" . $body . $scope->orderBy() . $tail . $lock,
+            [...$bindings, ...$scope->orderBindings(), ...$tailBindings],
+        );
 
         return array_values(array_unique(array_map(static fn (array $row): string => (string) $row['id'], $rows)));
     }
@@ -1015,14 +1613,19 @@ final readonly class Query
      * After update(): each written row followed, a held model's read again
      * so it takes what was stored.
      *
+     * Every row, where an Increment was written: what it added to is known
+     * only to the database, and a relation's cached row must not be patched
+     * with the Increment itself.
+     *
      * @param list<string> $ids
      * @param array<string, mixed> $set column => value as written
      */
     private function followUpdate(array $ids, array $set): void
     {
-        $held = array_values(array_filter($ids, fn (string $id): bool => $this->orm->holdsModel($this->class, $id)));
+        $added = array_filter($set, static fn (mixed $value): bool => $value instanceof Increment) !== [];
+        $read = $added ? $ids : array_values(array_filter($ids, fn (string $id): bool => $this->orm->holdsModel($this->class, $id)));
         $rows = [];
-        foreach (array_chunk($held, self::MAX_VALUES) as $chunk) {
+        foreach (array_chunk($read, self::MAX_VALUES) as $chunk) {
             foreach ($this->rowsByKey($chunk) as $row) {
                 $rows[(string) $row[$this->meta->idColumn]] = $row;
             }
@@ -1057,7 +1660,221 @@ final readonly class Query
     /** @return static */
     private function adding(Condition $condition): self
     {
+        if ($this->unionAll !== null) {
+            throw new \LogicException('A condition after unionAll() would be no arm\'s: narrow each arm before joining them.');
+        }
+
         return clone($this, ['conditions' => [...$this->conditions, $condition]]);
+    }
+
+    /**
+     * A filter on a column reached through a #[HasMany] -- 'items.name' --
+     * as whereHas() over the relation path with $narrow's condition on the
+     * related model's column: an EXISTS, never a join, so no row is
+     * repeated for each child that matches, and the related rows are read
+     * under their own tenant predicate. Null for any other column, which
+     * the caller resolves as it always has.
+     *
+     * @param string|\BackedEnum|(\Closure(self<T>): self<T>) $column
+     * @param \Closure(self<Model>, string): self<Model> $narrow
+     * @return static|null
+     */
+    private function throughCollection(bool $or, string|\BackedEnum|\Closure $column, \Closure $narrow): ?self
+    {
+        if ($column instanceof \Closure) {
+            return null;
+        }
+        $found = Identifiers::collectionColumn($this->meta, $column);
+        if ($found === null) {
+            return null;
+        }
+        [$path, $target, $name] = $found;
+
+        return $this->adding($this->hasConditions($or, $path, $narrow(self::of($this->orm, $target->class), $name)->conditions, false));
+    }
+
+    /** An aggregate over this query's rows, its column resolved against the metadata. */
+    private function measure(Aggregate $function, string|\BackedEnum|null $column): Measure
+    {
+        return new Measure($function, $column === null ? null : Identifiers::column($this->meta, $column));
+    }
+
+    /**
+     * A report's `[Aggregate::Sum, 'stock']`.
+     *
+     * @param array<mixed> $spec
+     */
+    private function measureOf(array $spec): Measure
+    {
+        if (array_keys($spec) !== [0, 1] || !$spec[0] instanceof Aggregate || !(\is_string($spec[1]) || $spec[1] instanceof \BackedEnum)) {
+            throw new \InvalidArgumentException('A report\'s aggregate of a column is [Aggregate::Sum, \'column\'].');
+        }
+
+        return $this->measure($spec[0], $spec[1]);
+    }
+
+    /**
+     * An aggregate over each row's related rows: a #[HasMany] of this
+     * model's, the related model's column, and the conditions its rows are
+     * narrowed by -- each resolved against the metadata now.
+     *
+     * @param (\Closure(self<Model>): self<Model>)|null $constraint
+     */
+    private function relationMeasure(
+        string $name,
+        string $relation,
+        Aggregate $function,
+        string|\BackedEnum|null $column,
+        ?\Closure $constraint,
+        string $what,
+    ): RelationMeasure {
+        $meta = Identifiers::relation($this->meta, $relation);
+        if ($meta->kind !== RelationKind::HasMany) {
+            throw new MappingException(
+                "{$this->class}::\${$relation} is a #[BelongsTo], one row: read its column through a join ('{$relation}.column'), not an aggregate.",
+            );
+        }
+        $target = Metadata::for($meta->target);
+        $conditions = $constraint === null
+            ? []
+            : self::conditionsOf($constraint(self::of($this->orm, $meta->target)), $meta->target, $what)->conditions;
+
+        return new RelationMeasure($name, $meta, $function, $column === null ? null : Identifiers::column($target, $column), $conditions);
+    }
+
+    /**
+     * $other's conditions, as an arm of a union with this query: a query
+     * over the same model, read by the same Orm, narrowed by conditions
+     * alone -- its order, limit, eager loads and aggregates would be the
+     * union's, which are this query's.
+     *
+     * @param self<T> $other
+     * @return list<Condition>
+     */
+    private function arm(self $other, string $what): array
+    {
+        if ($other->orm !== $this->orm || $other->class !== $this->class) {
+            throw new \LogicException("{$what} joins queries over one model, read by one Orm.");
+        }
+        if ($other->orders !== [] || $other->limit !== null || $other->offset !== null || $other->with !== [] || $other->groups !== []
+            || $other->havings !== [] || $other->distinct || $other->measures !== [] || $other->unionAll !== null) {
+            throw new \LogicException("{$what} takes a query narrowed by conditions alone: its order, limit, eager loads and aggregates would be the union's.");
+        }
+
+        return $other->conditions;
+    }
+
+    /**
+     * What a statement reads from: the model's table with its joins and
+     * WHERE -- or, after unionAll(), its arms' rows, read as one table:
+     * each arm a SELECT of the model's columns under its own tenant
+     * predicate, UNION ALL'd, sorted by the model's own columns alone.
+     */
+    private function readScope(Compiler $compiler, bool $orders = true): Scope
+    {
+        if ($this->unionAll === null) {
+            return $compiler->scope($this->meta, $this->conditions, $orders ? $this->orders : []);
+        }
+
+        $arms = [];
+        $bindings = [];
+        foreach ($this->unionAll as $arm) {
+            $scope = $compiler->scope($this->meta, $arm, []);
+            [$body, $armBindings] = $scope->body();
+            $arms[] = 'SELECT ' . $this->columnList($scope->alias) . $body;
+            array_push($bindings, ...$armBindings);
+        }
+
+        $resolved = [];
+        foreach ($orders ? $this->orders : [] as [$by, $direction, $nulls]) {
+            if (!$by instanceof ColumnRef || $by->path !== [] || !\in_array($by->column, $this->meta->selectColumns(), true)) {
+                throw new \LogicException('A unionAll() sorts by the model\'s own columns: what it sorts is its arms\' rows, which hold no join and no aggregate.');
+            }
+            $resolved[] = [Identifiers::quote(self::UNION) . '.' . Identifiers::quote($by->column), $direction, $nulls, []];
+        }
+
+        return new Scope(
+            self::UNION,
+            '(' . implode(' UNION ALL ', $arms) . ') AS ' . Identifiers::quote(self::UNION),
+            $bindings,
+            '',
+            [],
+            $resolved,
+            ['' => self::UNION],
+        );
+    }
+
+    /** The model's columns, read from $alias under their own names. */
+    private function columnList(string $alias): string
+    {
+        $alias = Identifiers::quote($alias);
+
+        return implode(', ', array_map(
+            static fn (string $column): string => $alias . '.' . Identifiers::quote($column) . ' AS ' . Identifiers::quote($column),
+            $this->meta->selectColumns(),
+        ));
+    }
+
+    /**
+     * Refuses, for a read of models -- or of their count, a column of
+     * theirs, or a page -- what has no place in one: a group, which is no
+     * row; a sort by a group's aggregate; and, but where $aggregates says
+     * they are read, aggregates over related rows, which fetch() would drop.
+     */
+    private function assertModelsRead(string $what, bool $aggregates = false): void
+    {
+        if ($this->groups !== [] || $this->havings !== []) {
+            throw new \LogicException("{$what} reads rows, and a grouped query reads groups: call report().");
+        }
+        if (!$aggregates && $this->measures !== []) {
+            throw new \LogicException("{$what} reads models alone: read what withCount() and the rest ask for with fetchAggregated().");
+        }
+        foreach ($this->orders as [$by]) {
+            if ($by instanceof Measure) {
+                throw new \LogicException("{$what} reads rows: orderByAggregate() sorts a report's groups; orderByRelation() sorts rows by their related rows.");
+            }
+        }
+    }
+
+    /** Refuses a read of the model's own table on a unionAll(), which reads its arms' rows. */
+    private function assertOwnTable(string $what): void
+    {
+        if ($this->unionAll !== null) {
+            throw new \LogicException("{$what} reads the model's table, and a unionAll() reads its arms' rows: read each arm.");
+        }
+    }
+
+    /** Refuses a write through a query that reads anything but rows of the model's own table. */
+    private function assertRowsWritten(string $what): void
+    {
+        $this->assertModelsRead($what);
+        $this->assertOwnTable($what);
+    }
+
+    /**
+     * Whether $ref is one of $refs: the same column, reached the same way.
+     *
+     * @param list<ColumnRef> $refs
+     */
+    private static function among(ColumnRef $ref, array $refs): bool
+    {
+        foreach ($refs as $one) {
+            if ($one->column === $ref->column && $one->path === $ref->path) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** A field named by a string or a string-backed enum, as update() is keyed. */
+    private static function fieldName(string|\BackedEnum $column): string
+    {
+        if ($column instanceof \BackedEnum) {
+            return \is_string($column->value) ? $column->value : throw new MappingException($column::class . ' is backed by integers, and a column is named by a string.');
+        }
+
+        return $column;
     }
 
     /**
@@ -1172,6 +1989,19 @@ final readonly class Query
             $conditions = self::conditionsOf($constraint(self::of($this->orm, $target)), $target, 'A whereHas() constraint')->conditions;
         }
 
+        return $this->hasConditions($or, $path, $conditions, $not);
+    }
+
+    /**
+     * EXISTS over the related rows along $path that $conditions -- on the
+     * last model's rows -- hold for.
+     *
+     * @param list<Condition> $conditions
+     */
+    private function hasConditions(bool $or, string $path, array $conditions, bool $not): Condition
+    {
+        $relations = Identifiers::relationPath($this->meta, $path);
+
         // Innermost first: 'lines.product' is lines having a product.
         for ($i = \count($relations) - 1; $i > 0; $i--) {
             $conditions = [Condition::has(false, $relations[$i], $conditions, false)];
@@ -1193,8 +2023,9 @@ final readonly class Query
         if (!$query instanceof self || $query->class !== $class) {
             throw new \LogicException("{$what} returns the query over {$class} it was given, narrowed.");
         }
-        if ($query->orders !== [] || $query->limit !== null || $query->offset !== null || $query->with !== []) {
-            throw new \LogicException("{$what} only adds conditions: its orders, limit and eager loads would be lost.");
+        if ($query->orders !== [] || $query->limit !== null || $query->offset !== null || $query->with !== [] || $query->groups !== []
+            || $query->havings !== [] || $query->distinct || $query->measures !== [] || $query->unionAll !== null) {
+            throw new \LogicException("{$what} only adds conditions: its orders, limit, eager loads, groups and aggregates would be lost.");
         }
 
         return $query;
@@ -1300,6 +2131,8 @@ final readonly class Query
 
     private function aggregate(string $function, string|\BackedEnum $column): mixed
     {
+        $this->assertModelsRead(strtolower($function) . '()', aggregates: true);
+        $this->assertOwnTable(strtolower($function) . '()');
         $ref = Identifiers::column($this->meta, $column);
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref]);
         [$body, $bindings] = $scope->body();
@@ -1319,7 +2152,16 @@ final readonly class Query
      */
     private function ownerOf(ColumnRef $ref): string
     {
-        $meta = $this->meta;
+        return self::ownerIn($this->meta, $ref);
+    }
+
+    /**
+     * The model whose table $ref's column is on, from $meta's.
+     *
+     * @return class-string<Model>
+     */
+    private static function ownerIn(ModelMeta $meta, ColumnRef $ref): string
+    {
         foreach ($ref->path as $property) {
             $relation = $meta->relations[$property] ?? throw new \LogicException("No relation '{$property}' on {$meta->class}.");
             $meta = Metadata::for($relation->target);
@@ -1330,23 +2172,31 @@ final readonly class Query
 
     /**
      * SELECT the model's columns, as the table names them -- so a joined
-     * table's never shadow them -- with $extra ANDed to the WHERE.
+     * table's never shadow them -- and $list after them, with $extra ANDed
+     * to the WHERE.
      *
      * @param list<mixed> $extraBindings
+     * @param string $list further terms of the select list, each led by a comma: aggregates over related rows
+     * @param list<mixed> $listBindings
      * @return array{string, list<mixed>}
      */
-    private function select(Scope $scope, string $extra = '', array $extraBindings = [], bool $reversed = false, ?int $limit = null, ?int $offset = null): array
-    {
-        $alias = Identifiers::quote($scope->alias);
-        $columns = implode(', ', array_map(
-            static fn (string $column): string => $alias . '.' . Identifiers::quote($column) . ' AS ' . Identifiers::quote($column),
-            $this->meta->selectColumns(),
-        ));
-
+    private function select(
+        Scope $scope,
+        string $extra = '',
+        array $extraBindings = [],
+        bool $reversed = false,
+        ?int $limit = null,
+        ?int $offset = null,
+        string $list = '',
+        array $listBindings = [],
+    ): array {
         [$body, $bindings] = $scope->body($extra, $extraBindings);
         [$tail, $tailBindings] = $this->tail($limit, $offset);
 
-        return ["SELECT {$columns}{$body}" . $scope->orderBy($reversed) . $tail, [...$bindings, ...$tailBindings]];
+        return [
+            'SELECT ' . $this->columnList($scope->alias) . $list . $body . $scope->orderBy($reversed) . $tail,
+            [...$listBindings, ...$bindings, ...$scope->orderBindings(), ...$tailBindings],
+        ];
     }
 
     /** @return array{string, list<int>} */

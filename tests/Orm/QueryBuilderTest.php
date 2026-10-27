@@ -176,7 +176,8 @@ describe('identifiers', function () {
         'padded' => ' name',
         'qualified' => 'shelves.name',
         'aliased' => 't0.name',
-        'through a collection' => 'items.name',
+        'through a collection, misspelt' => 'items.nme',
+        'through a collection, another table\'s' => 'items.shelf_id.name',
         // items' column, which a #[HasMany] on Shelf names as its key.
         'a child\'s foreign key' => 'shelf_id',
         'through nothing' => 'aisle.',
@@ -184,6 +185,17 @@ describe('identifiers', function () {
         'empty' => '',
         'a NUL' => "name\0",
     ]);
+
+    // A filter reads a collection's column as an EXISTS (ADR 0064); a sort
+    // or a column read has many values to choose from, and names which.
+    it('refuses to sort by or read a collection\'s column, which has many values to a row', function () {
+        $orm = Shelves::sqlite()->orm();
+
+        expect(fn () => $orm->query(Shelf::class)->orderBy('items.name'))->toThrow(MappingException::class)
+            ->and(fn () => $orm->query(Shelf::class)->pluck('items.name'))->toThrow(MappingException::class)
+            ->and(fn () => $orm->query(Shelf::class)->whereRaw('items.name = ?', ['x']))->toThrow(MappingException::class)
+            ->and(fn () => $orm->query(Shelf::class)->groupBy('items.name'))->toThrow(MappingException::class);
+    });
 
     it('refuses an operator, a direction or a relation it does not know', function () {
         $orm = Shelves::sqlite()->orm();

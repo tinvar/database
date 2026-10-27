@@ -16,6 +16,8 @@ declare(strict_types=1);
 
 namespace Tinvar\Tests\Orm\QueryDatabases;
 
+use Tinvar\Orm\Aggregate;
+use Tinvar\Orm\Aggregated;
 use Tinvar\Orm\CursorPage;
 use Tinvar\Orm\NoTenantContext;
 use Tinvar\Orm\Nulls;
@@ -30,6 +32,7 @@ use Tinvar\Tests\Orm\Fixtures\Item;
 use Tinvar\Tests\Orm\Fixtures\Shelf;
 use Tinvar\Tests\Orm\Fixtures\Shelves;
 use Tinvar\Tests\Orm\Fixtures\Tenancy;
+use Tinvar\Tests\Orm\Fixtures\UnscopedItem;
 use Tinvar\Tests\Orm\Fixtures\UnscopedShelf;
 
 require_once __DIR__ . '/Fixtures/shelves.php';
@@ -38,6 +41,80 @@ require_once __DIR__ . '/Fixtures/shelves.php';
 function names(array $models): array
 {
     return array_map(static fn (Shelf|Item|Brand|UnscopedShelf $model): string => $model->name, $models);
+}
+
+/** A report's row, as each database's driver spells its numbers. */
+final readonly class Tally
+{
+    public function __construct(public ?string $key = null, public int $count = 0, public int $cents = 0, public ?float $average = null) {}
+}
+
+/**
+ * @param list<Aggregated<Shelf|UnscopedShelf>> $rows
+ * @return array<string, array<string, int|float|string|null>>
+ */
+function aggregatesByName(array $rows): array
+{
+    $out = [];
+    foreach ($rows as $row) {
+        $out[$row->model->name] = $row->values;
+    }
+
+    return $out;
+}
+
+/**
+ * What every database must read alike past ADR 0057 (ADR 0064): a
+ * collection's column, aggregates over related rows, reports, distinct
+ * values, unions and increments -- each held to the tenant, where any of
+ * the fixture's rows across the tenant line showing is a leak.
+ */
+function aggregatesAlike(Orm $orm): void
+{
+    $acme = static fn (\Closure $read): mixed => $orm->actAs('acme', $read);
+
+    expect($acme(static fn (): int => $orm->query(Shelf::class)->where('items.priceCents', '>', 900)->count()))->toBe(0)
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->where('items.priceCents', '>', 0)->orderBy('name')->fetch())))
+        ->toBe(['Alpha', 'Bravo', 'Foxtrot'])
+        ->and($acme(static fn (): array => aggregatesByName($orm->query(Shelf::class)->whereIn('name', ['Alpha', 'Charlie'])->orderBy('name')
+            ->withCount('items')->withSum('items', 'priceCents')->withAvg('items', 'priceCents')->withMax('items', 'priceCents')
+            ->fetchAggregated())))
+        ->toEqual([
+            'Alpha' => ['itemsCount' => 2, 'itemsSumPriceCents' => 350, 'itemsAvgPriceCents' => 175.0, 'itemsMaxPriceCents' => 250],
+            'Charlie' => ['itemsCount' => 0, 'itemsSumPriceCents' => 0, 'itemsAvgPriceCents' => null, 'itemsMaxPriceCents' => null],
+        ])
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->orderByRelation('items', Aggregate::Max, 'priceCents', 'desc')->fetch())))
+        ->toBe(['Foxtrot', 'Alpha', 'Bravo', 'Charlie'])
+        ->and($acme(static fn (): array => $orm->query(Item::class)->groupBy('shelf.aisle.code')->orderBy('shelf.aisle.code')
+            ->report(Tally::class, ['key' => 'shelf.aisle.code', 'count' => Aggregate::Count, 'cents' => [Aggregate::Sum, 'priceCents'], 'average' => [Aggregate::Avg, 'priceCents']])))
+        ->toEqual([new Tally('A1', 2, 350, 175.0), new Tally('A2', 1, 50, 50.0), new Tally(null, 1, 300, 300.0)])
+        ->and($acme(static fn (): array => $orm->query(Item::class)->groupBy('shelf.name')->having(Aggregate::Sum, 'priceCents', '>=', 100)
+            ->orderByAggregate(Aggregate::Count, direction: 'desc')->orderBy('shelf.name')
+            ->report(Tally::class, ['key' => 'shelf.name', 'count' => Aggregate::Count])))
+        ->toEqual([new Tally('Alpha', 2), new Tally('Foxtrot', 1)])
+        ->and($acme(static fn (): array => $orm->query(Item::class)->distinct()->orderBy('shelf.aisle.code')->pluck('shelf.aisle.code')))
+        ->toBe(['A1', 'A2', null])
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->where('name', 'Delta')
+            ->union($orm->query(Shelf::class)->where('position', '>=', 3))
+            ->union($orm->query(Shelf::class)->where('items.name', 'ghost'))
+            ->orderBy('name')->fetch())))
+        ->toBe(['Charlie', 'Foxtrot'])
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->where('name', 'Alpha')
+            ->unionAll($orm->query(Shelf::class)->where('position', '<=', 2))
+            ->unionAll($orm->query(Shelf::class)->where('name', 'Delta'))
+            ->orderBy('name', 'desc')->fetch())))
+        ->toBe(['Bravo', 'Alpha', 'Alpha'])
+        ->and($acme(static fn (): int => $orm->query(Shelf::class)->where('aisle.code', 'A1')->increment('position', 10)))->toBe(2)
+        // Through a union, its rows locked first where the database locks
+        // rows -- FOR UPDATE beside a UNION in a subquery, on Postgres.
+        ->and($acme(static fn (): int => $orm->query(Shelf::class)->where('name', 'Bravo')
+            ->union($orm->query(Shelf::class)->where('items.name', 'ghost'))
+            ->union($orm->query(Shelf::class)->where('name', 'Charlie'))
+            ->orderByRelation('items', Aggregate::Count, direction: 'desc')
+            ->limit(5)
+            ->decrement('position')))->toBe(2)
+        ->and($acme(static fn (): array => $orm->query(Shelf::class)->orderBy('name')->pluck('position')))->toEqual([11, 1, 12, 4])
+        ->and($orm->actAs('globex', static fn (): array => $orm->query(Shelf::class)->orderBy('name')->pluck('position')))->toEqual([1, 2]);
 }
 
 /**
@@ -97,6 +174,46 @@ describe('on Postgres, with row-level security', function () {
     it('reads as SQLite does, under the policy', function () {
         Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
             readsAlike($fixture->orm(connection: $connection));
+        });
+    });
+
+    it('groups, aggregates, unions and increments as SQLite does, under the policy', function () {
+        Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
+            aggregatesAlike($fixture->orm(connection: $connection));
+        });
+    });
+
+    it('holds a model that forgot #[TenantScoped] to the tenant through every way ADR 0064 reads and writes', function () {
+        Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
+            $orm = $fixture->orm(connection: $connection);
+            $acme = static fn (\Closure $read): mixed => $orm->actAs('acme', $read);
+            $dear = static fn (): int => $orm->query(UnscopedShelf::class)->where('items.priceCents', '>', 900)->count();
+            $alpha = static fn (): array => aggregatesByName($orm->query(UnscopedShelf::class)->where('name', 'Alpha')
+                ->withCount('items')->withMax('items', 'priceCents')->fetchAggregated());
+            $tally = static fn (): array => $orm->query(UnscopedItem::class)
+                ->report(Tally::class, ['count' => Aggregate::Count, 'cents' => [Aggregate::Sum, 'priceCents']]);
+
+            // ghost is globex's item on acme's Alpha: the builder adds no
+            // predicate to these, and the policy hides it inside every
+            // subquery, every arm and every group.
+            expect($acme($dear))->toBe(0)
+                ->and($orm->acrossTenants($dear))->toBe(1)
+                ->and($acme($alpha))->toBe(['Alpha' => ['itemsCount' => 2, 'itemsMaxPriceCents' => 250]])
+                ->and($acme(static fn (): array => names($orm->query(UnscopedShelf::class)
+                    ->orderByRelation('items', Aggregate::Max, 'priceCents', 'desc')->orderBy('name')->limit(1)->fetch())))
+                ->toBe(['Foxtrot'])
+                ->and($acme($tally))->toEqual([new Tally(null, 4, 700)])
+                ->and($tally())->toEqual([new Tally(null, 0, 0)])
+                ->and($acme(static fn (): array => $orm->query(UnscopedShelf::class)->distinct()->orderBy('position')->pluck('position')))
+                ->toEqual([1, 2, 3, 4])
+                ->and($acme(static fn (): int => $orm->query(UnscopedShelf::class)->where('name', 'Delta')
+                    ->union($orm->query(UnscopedShelf::class)->where('name', 'Echo'))->count()))->toBe(0)
+                ->and($acme(static fn (): int => $orm->query(UnscopedShelf::class)
+                    ->unionAll($orm->query(UnscopedShelf::class))->count()))->toBe(8)
+                // A write: the tenant's rows alone, and none with no tenant.
+                ->and($acme(static fn (): int => $orm->query(UnscopedItem::class)->increment('priceCents')))->toBe(4)
+                ->and($orm->query(UnscopedItem::class)->increment('priceCents'))->toBe(0)
+                ->and($orm->acrossTenants(static fn (): int => $orm->query(UnscopedItem::class)->sum('priceCents')))->toBe(700 + 4 + 1199);
         });
     });
 
@@ -169,10 +286,20 @@ describe('on MySQL', function () {
             readsAlike($fixture->orm(connection: $connection));
         });
     });
+
+    it('groups, aggregates, unions and increments as SQLite does', function () {
+        Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
+            aggregatesAlike($fixture->orm(connection: $connection));
+        });
+    });
 })->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
 
 describe('on SQLite', function () {
     it('reads alike', function () {
         readsAlike(Shelves::sqlite()->orm());
+    });
+
+    it('groups, aggregates, unions and increments alike', function () {
+        aggregatesAlike(Shelves::sqlite()->orm());
     });
 });

@@ -23,6 +23,7 @@ final readonly class Condition
     public const string RAW = 'raw';
     public const string HAS = 'has';
     public const string NEVER = 'never';
+    public const string UNION = 'union';
 
     /**
      * @param self::* $kind
@@ -30,6 +31,7 @@ final readonly class Condition
      * @param list<int|float|string> $values the bound values, in order
      * @param list<Condition> $conditions a group's, or the related rows' for HAS
      * @param list<array{string, string|ColumnRef}> $tokens a raw condition's (Expression)
+     * @param list<list<Condition>> $arms a union's, each arm's conditions on the model's own rows
      */
     private function __construct(
         public string $kind,
@@ -41,6 +43,7 @@ final readonly class Condition
         public array $conditions = [],
         public array $tokens = [],
         public ?RelationMeta $relation = null,
+        public array $arms = [],
     ) {}
 
     /** @param int|float|string $value */
@@ -82,6 +85,17 @@ final readonly class Condition
     }
 
     /**
+     * The rows any of $arms matches: the key IN a UNION of each arm's keys,
+     * every arm read under the model's tenant predicate (Query::union()).
+     *
+     * @param list<list<Condition>> $arms
+     */
+    public static function union(bool $or, array $arms): self
+    {
+        return new self(self::UNION, $or, arms: $arms);
+    }
+
+    /**
      * A condition no row meets: an IN over nothing, or an id that is no
      * id. Kept as a condition rather than short-circuited, so the statement
      * still runs -- and still fails closed on the tenant -- like any other.
@@ -93,7 +107,8 @@ final readonly class Condition
 
     /**
      * Every ColumnRef this condition reads at its own level -- not inside a
-     * HAS, whose related rows join for themselves.
+     * HAS, whose related rows join for themselves, nor a UNION's arms, each
+     * read by a statement of its own.
      *
      * @return list<ColumnRef>
      */
