@@ -1396,11 +1396,15 @@ final readonly class Query
         $tenant = $this->tenantForNewRows();
         $stored = [];
         $columns = null;
+        $preset = [];
         foreach ($rows as $row) {
             if (!\is_array($row)) {
                 throw new \InvalidArgumentException("{$what} takes rows, each a map of field => value.");
             }
             $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant, hooks: $uniqueBy === null && $this->meta->hasBeforeSave());
+            if (isset($one[$this->meta->idColumn])) {
+                $preset[] = (string) $one[$this->meta->idColumn];
+            }
             $one[$this->meta->idColumn] ??= Uuid::v7();
 
             $names = array_keys($one);
@@ -1414,9 +1418,13 @@ final readonly class Query
 
         [$target, $set] = $uniqueBy === null ? [null, []] : $this->conflict($what, $stored, $columns, $uniqueBy, $update);
 
-        return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $tenant): int {
+        return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $tenant, $preset): int {
+            // A row an upsert brings its key for may be the very row its
+            // unique key finds: updated, not inserted, though its key is
+            // one written. Which of them were there is asked first.
+            $existed = $target === null ? [] : array_flip(array_column($this->rowsByKey($preset), $this->meta->idColumn));
             if ($target !== null && $tenant !== null && $this->onMySql()) {
-                return $this->upsertLocked($stored, $columns, $target, $set, $tenant);
+                return $this->upsertLocked($stored, $columns, $target, $set, $tenant, $existed);
             }
 
             $table = Identifiers::quote($this->meta->table);
@@ -1439,7 +1447,7 @@ final readonly class Query
 
             return $target === null
                 ? $this->followInserted($stored, $columns)
-                : $this->followUpserted($stored, $columns, $target, $set, $tenant);
+                : $this->followUpserted($stored, $columns, $target, $set, $tenant, $existed);
         });
     }
 
@@ -1585,8 +1593,9 @@ final readonly class Query
      * @param list<string> $columns
      * @param non-empty-list<string> $target
      * @param list<string> $set
+     * @param array<array-key, int> $existed the keys rows brought that were there already
      */
-    private function upsertLocked(array $stored, array $columns, array $target, array $set, string $tenant): int
+    private function upsertLocked(array $stored, array $columns, array $target, array $set, string $tenant, array $existed): int
     {
         $tenantColumn = $this->meta->tenantColumn ?? throw new \LogicException("{$this->class} has no tenant column.");
         $table = Identifiers::quote($this->meta->table);
@@ -1651,7 +1660,7 @@ final readonly class Query
             }
         }
 
-        return $this->followUpserted($stored, $columns, $target, $set, $tenant);
+        return $this->followUpserted($stored, $columns, $target, $set, $tenant, $existed);
     }
 
     /**
@@ -1701,8 +1710,9 @@ final readonly class Query
      * @param list<string> $columns
      * @param non-empty-list<string> $target
      * @param list<string> $set
+     * @param array<array-key, int> $existed the keys rows brought that were there already: updated, never inserted
      */
-    private function followUpserted(array $stored, array $columns, array $target, array $set, ?string $tenant): int
+    private function followUpserted(array $stored, array $columns, array $target, array $set, ?string $tenant, array $existed): int
     {
         $byId = [];
         foreach ($stored as $row) {
@@ -1737,7 +1747,7 @@ final readonly class Query
 
             foreach ($this->orm->statements()->select("SELECT {$select} FROM {$table} WHERE {$where}", $bindings) as $found) {
                 $id = (string) $found[$this->meta->idColumn];
-                if (isset($byId[$id])) {
+                if (isset($byId[$id]) && !isset($existed[$id])) {
                     $inserted++;
                     $this->orm->followStatementWrite($this->meta, $id, $byId[$id], $columns);
                 } elseif ($set !== []) {
