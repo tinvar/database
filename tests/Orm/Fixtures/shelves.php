@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Tinvar\Tests\Orm\Fixtures;
 
+use Tinvar\Orm\Attributes\BeforeSave;
 use Tinvar\Orm\Attributes\BelongsTo;
 use Tinvar\Orm\Attributes\Column;
 use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
+use Tinvar\Orm\Attributes\Unique;
 use Tinvar\Orm\Collection;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\Model;
@@ -31,7 +33,7 @@ require_once __DIR__ . '/databases.php';
  * SQLite, Postgres and MySQL.
  */
 
-#[Table('aisles'), TenantScoped]
+#[Table('aisles'), TenantScoped, Unique('code')]
 final class Aisle extends Model
 {
     #[Id] public private(set) string $id;
@@ -67,12 +69,30 @@ final class Item extends Model
 }
 
 /** Not tenant-scoped: what an application with no tenancy reads. */
-#[Table('brands')]
+#[Table('brands'), Unique('name')]
 final class Brand extends Model
 {
     #[Id] public private(set) string $id;
     #[Column] public string $name;
     #[Column] public int $rank;
+}
+
+/**
+ * The brands table read as a model whose saves run a hook: what a write
+ * through a statement, which makes no model, must not write past.
+ */
+#[Table('brands')]
+final class TrimmedBrand extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $name;
+    #[Column] public int $rank;
+
+    #[BeforeSave]
+    private function trim(): void
+    {
+        $this->name = trim($this->name);
+    }
 }
 
 /**
@@ -102,6 +122,10 @@ final class Shelves
         // `rank` is a word MySQL keeps, so quoted -- as standard SQL, and
         // MySQL with ANSI_QUOTES, quote it.
         $pdo->exec('CREATE TABLE brands (id VARCHAR(64) PRIMARY KEY, name VARCHAR(64) NOT NULL, "rank" INTEGER NOT NULL)');
+        // The #[Unique] keys, the tenant column leading a tenant's: what an
+        // upsert conflicts on.
+        $pdo->exec('CREATE UNIQUE INDEX aisles_tenant_id_code_unique ON aisles (tenant_id, code)');
+        $pdo->exec('CREATE UNIQUE INDEX brands_name_unique ON brands (name)');
 
         foreach ([['A1', 'acme'], ['A2', 'acme'], ['G1', 'globex']] as [$code, $tenant]) {
             $this->insert('aisles', $code, [$code, $tenant]);

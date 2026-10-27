@@ -868,6 +868,12 @@ final class PdoConnection implements Connection, TenantSetting
         return $this->name;
     }
 
+    /** PDO's name for the driver: 'sqlite', 'pgsql' or 'mysql', for SQL one of them spells its own way. */
+    public function driver(): string
+    {
+        return $this->driver;
+    }
+
     /** Turned off in benchmarks so log-keeping does not colour the numbers. */
     public function logSql(bool $on): void
     {

@@ -1319,6 +1319,135 @@ final class Orm
     }
 
     /**
+     * Refuses a write through the query builder inside a loader or query
+     * body, as save() and delete() are refused there: before anything is
+     * read, so a GET that would write reads nothing for it either.
+     *
+     * @internal for the query builder's writes, inside this package
+     */
+    public function refuseWriteOf(string $what): void
+    {
+        $this->refuseWrite($what);
+    }
+
+    /**
+     * Whether the identity map holds a row of $class under $id: a model
+     * read, not a ghost standing for a key.
+     *
+     * @param class-string<Model> $class
+     *
+     * @internal for the query builder's writes, inside this package
+     */
+    public function holdsModel(string $class, string $id): bool
+    {
+        $model = $this->identityMap->get($class, $id);
+
+        return $model !== null && self::holdsRow($model);
+    }
+
+    /**
+     * Brings what this Orm holds up to date with a row a statement wrote --
+     * the query builder's update(), delete(), insert() or upsert() -- as
+     * save() and delete() bring it up to date with theirs: the model the
+     * identity map holds for the row, the relation-row cache, and every
+     * loaded relation the row is in. All of it undone if the transaction
+     * rolls back.
+     *
+     * A held model takes the written columns' values as $row has them --
+     * read back from the database for a model held, so what it shows is
+     * what was stored -- and its snapshot takes them too, so they read as
+     * saved; a change it had to any other column is still pending. A
+     * #[BelongsTo] whose key was written gets a ghost for the new key.
+     *
+     * @param array<string, mixed>|null $row the row's columns, at least those written; null once deleted
+     * @param list<string> $columns the columns the statement wrote
+     *
+     * @internal for the query builder's writes, inside this package
+     */
+    public function followStatementWrite(ModelMeta $meta, string $id, ?array $row, array $columns): void
+    {
+        $model = $this->identityMap->get($meta->class, $id);
+        $held = $model instanceof Model && self::holdsRow($model) ? $model : null;
+
+        if ($row === null) {
+            $this->identityMap->forget($meta->class, $id);
+            if ($held !== null) {
+                $this->journalSnapshot($held);
+                $held->markDeleted();
+            }
+            $this->followWrite($meta, $id, null);
+
+            return;
+        }
+
+        $written = array_intersect_key($row, array_flip($columns));
+        if ($held !== null) {
+            $this->refreshHeld($held, $meta, $written);
+        }
+        $this->followWrite($meta, $id, $written);
+    }
+
+    /**
+     * A held model given the columns a statement wrote, with what it was
+     * before noted for a rollback to put back.
+     *
+     * @param array<string, mixed> $written column => value, as read
+     */
+    private function refreshHeld(Model $model, ModelMeta $meta, array $written): void
+    {
+        $values = $meta->decode($written);
+
+        $relations = [];
+        foreach ($meta->relations as $property => $relation) {
+            if ($relation->kind === RelationKind::BelongsTo && \array_key_exists($relation->foreignKey, $written)) {
+                $relations[$property] = $relation;
+            }
+        }
+
+        // What it was, for a rollback: each property's value -- unset ones
+        // stay unset -- its relations' keys, and its snapshot.
+        $reflection = new \ReflectionClass($model);
+        $before = [];
+        foreach ([...array_keys($values), ...array_keys($relations)] as $property) {
+            if ($reflection->getProperty($property)->isInitialized($model)) {
+                $before[$property] = $meta->get($model, $property);
+            }
+        }
+        $keys = [];
+        foreach (array_keys($relations) as $property) {
+            $keys[$property] = [$model->foreignKey($property), $model->installedRelation($property)];
+        }
+        $snapshot = $model->snapshot();
+        $this->journal(static function () use ($model, $meta, $before, $keys, $snapshot): void {
+            $meta->fill($model, $before);
+            foreach ($keys as $property => [$key, $installed]) {
+                $model->rememberForeignKey($property, $key, $installed);
+            }
+            $model->restoreSnapshot($snapshot);
+        });
+
+        $meta->fill($model, $values);
+        foreach ($relations as $property => $relation) {
+            $key = $written[$relation->foreignKey];
+            if ($key === null) {
+                $model->rememberForeignKey($property, null);
+                $meta->set($model, $property, null);
+                continue;
+            }
+            if ((string) $key === (string) $model->foreignKey($property)) {
+                continue;
+            }
+            $ghost = $this->singleRelationGhost($relation, $model, (string) $key);
+            $model->rememberForeignKey($property, (string) $key, $ghost);
+            $meta->set($model, $property, $ghost);
+        }
+
+        // The written columns as the model writes them now, over what it
+        // was read with: they read as saved, and nothing else changes.
+        $model->markClean([...($snapshot ?? []), ...array_intersect_key($meta->writeValues($model), $written)]);
+    }
+
+    /**
      * Writes a model, inserting or updating as appropriate.
      *
      * "save() writes immediately, as in Laravel." Only the diff is written:

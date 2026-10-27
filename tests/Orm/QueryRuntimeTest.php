@@ -14,7 +14,6 @@ namespace Tinvar\Tests\Orm\QueryRuntime;
 use Tinvar\Orm\LazyLoad;
 use Tinvar\Orm\LazyLoads;
 use Tinvar\Orm\NoTenantContext;
-use Tinvar\Orm\Query;
 use Tinvar\Orm\ReadOnlyViolation;
 use Tinvar\Tests\Orm\Fixtures\Aisle;
 use Tinvar\Tests\Orm\Fixtures\Item;
@@ -256,9 +255,17 @@ describe('the read after a write', function () {
         expect($names)->toBe(['Bravo']);
     });
 
-    it('cannot be used to write', function () {
-        expect(method_exists(Query::class, 'update'))->toBeFalse()
-            ->and(method_exists(Query::class, 'delete'))->toBeFalse()
-            ->and(method_exists(Query::class, 'insert'))->toBeFalse();
+    it('reads what a write through a query stored, on the model it already handed out', function () {
+        $orm = Shelves::sqlite()->orm();
+
+        [$bravo, $again] = $orm->actAs('acme', static function () use ($orm): array {
+            $bravo = $orm->query(Shelf::class)->where('name', 'Bravo')->first();
+            $orm->query(Shelf::class)->where('name', 'Bravo')->update(['position' => 9]);
+
+            return [$bravo, $orm->query(Shelf::class)->orderBy('position', 'desc')->first()];
+        });
+
+        expect($again)->toBe($bravo)
+            ->and($bravo?->position)->toBe(9);
     });
 });

@@ -8,6 +8,7 @@ use Tinvar\Orm\Builder\ColumnRef;
 use Tinvar\Orm\Builder\Compiler;
 use Tinvar\Orm\Builder\Condition;
 use Tinvar\Orm\Builder\Expression;
+use Tinvar\Orm\Builder\Fields;
 use Tinvar\Orm\Builder\Identifiers;
 use Tinvar\Orm\Builder\Scope;
 use Tinvar\Support\Uuid;
@@ -58,6 +59,9 @@ final readonly class Query
 {
     /** The most values one IN list binds: a list, not a table. */
     public const int MAX_VALUES = 10_000;
+
+    /** The most values one INSERT binds: below what SQLite, Postgres and MySQL each take in one statement. */
+    private const int MAX_BINDINGS = 30_000;
 
     /** Comparison operators, as a caller may spell them, and as they are written. */
     private const array OPERATORS = [
@@ -532,7 +536,507 @@ final readonly class Query
         return $this->select($scope, limit: $this->limit, offset: $this->offset);
     }
 
+    // ------------------------------------------------------------- writing
+
+    /**
+     * Sets $values on every row the query matches -- within its order and
+     * limit, if it has them -- and answers how many rows the database
+     * counted.
+     *
+     * Held to what a read of the same query is held to: the rows are the
+     * ones fetch() would return, under the tenant predicate in force when
+     * it runs, failing closed with NoTenantContext where fetch() would; and
+     * the UPDATE names them by key with the predicate again, so nothing
+     * outside it is written whatever happens between. The fields are the
+     * model's own columns, resolved against its metadata and stored as
+     * save() stores them (Builder\Fields): never the key, the tenant column
+     * or a property the model alone sets.
+     *
+     * Refused, like save(), inside a loader or query body. Refused, too, on
+     * a model with #[BeforeSave] methods: they keep what a model must be
+     * when it is saved, and a statement makes no model to run them on, so
+     * update() would write past them. Save such rows one at a time.
+     *
+     * Two statements, in one transaction: the matching keys, locked where
+     * the database can (FOR UPDATE on Postgres and MySQL; SQLite's write
+     * transaction holds the whole database), then the UPDATE -- one per
+     * MAX_VALUES rows. A model the identity map holds for a written row is
+     * read again and takes what was stored; loaded relations follow, as
+     * after save() (Orm::followStatementWrite()).
+     *
+     * @param array<string, mixed> $values field => value: a property, a column, or a #[BelongsTo] (a model)
+     */
+    public function update(array $values): int
+    {
+        $this->orm->refuseWriteOf('update()');
+        $this->refuseHooks('update()');
+        $this->assertOffsetLimited();
+
+        $set = Fields::row($this->meta, $values, inserting: false);
+        if ($set === []) {
+            throw new \InvalidArgumentException('update() sets at least one field.');
+        }
+
+        return $this->orm->transaction(function () use ($set): int {
+            $ids = $this->idsToWrite();
+            $assignments = implode(', ', array_map(
+                static fn (string $column): string => Identifiers::quote($column) . ' = ?',
+                array_keys($set),
+            ));
+
+            $count = 0;
+            foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+                [$where, $bindings] = $this->byKeys($chunk);
+                $count += $this->orm->connection()->execute(
+                    'UPDATE ' . Identifiers::quote($this->meta->table) . " SET {$assignments} WHERE {$where}",
+                    [...array_values($set), ...$bindings],
+                );
+            }
+
+            $this->followUpdate($ids, $set);
+
+            return $count;
+        });
+    }
+
+    /**
+     * Deletes every row the query matches -- within its order and limit,
+     * if it has them -- and answers how many the database counted.
+     *
+     * Held as update() is: the rows fetch() would return, under the tenant
+     * predicate in force, the DELETE naming them by key with the predicate
+     * again; refused in a loader or query body. A model the identity map
+     * holds for one reads as unsaved afterwards, as after delete(), and
+     * leaves every loaded relation it was in.
+     */
+    public function delete(): int
+    {
+        $this->orm->refuseWriteOf('delete()');
+        $this->assertOffsetLimited();
+
+        return $this->orm->transaction(function (): int {
+            $ids = $this->idsToWrite();
+
+            $count = 0;
+            foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+                [$where, $bindings] = $this->byKeys($chunk);
+                $count += $this->orm->connection()->execute('DELETE FROM ' . Identifiers::quote($this->meta->table) . " WHERE {$where}", $bindings);
+            }
+
+            foreach ($ids as $id) {
+                $this->orm->followStatementWrite($this->meta, $id, null, []);
+            }
+
+            return $count;
+        });
+    }
+
+    /**
+     * Inserts $rows, each a map of field => value as update() takes, in as
+     * few statements as the database's binding limit allows; answers how
+     * many. Each is stamped with the tenant in force, as save() stamps one
+     * -- NoTenantContext with none -- and a row naming another tenant is
+     * refused (ForeignTenantRow). A row without a key is given a UUIDv7.
+     *
+     * Called on the query a model starts, unnarrowed: an INSERT reads
+     * nothing, and a condition on one would be one it ignored.
+     *
+     * @param list<array<string, mixed>> $rows each naming the same fields
+     */
+    public function insert(array $rows): int
+    {
+        return $this->writeRows('insert()', $rows, null, null);
+    }
+
+    /**
+     * Inserts $rows, and where one shares a #[Unique] key with a row there
+     * already, updates that row instead: its $update fields -- every field
+     * the rows set but the key's, by default; none to leave it as it was.
+     * Answers how many rows it inserted.
+     *
+     * The conflict target is the metadata's: $uniqueBy has to be the
+     * columns of a key the model declares with #[Unique], in any order --
+     * a key it does not declare is refused before anything is sent. On a
+     * #[TenantScoped] model the tenant column leads the target, so a row
+     * conflicts with its own tenant's rows alone and never updates
+     * another's; every row is stamped with the tenant in force, and one
+     * naming another is refused, as insert() refuses it.
+     *
+     * In one transaction: the INSERTs, then the rows they wrote, read by
+     * their keys under the tenant predicate, so a model the identity map
+     * holds for an updated row takes what was stored, and loaded relations
+     * follow. Two rows with one key are refused: Postgres refuses to update
+     * a row twice in one statement, and the others would keep the last.
+     *
+     * MySQL has no conflict target: ON DUPLICATE KEY UPDATE answers to any
+     * unique index the table has. The target is still checked against the
+     * metadata, and the tenant column leads every index make:migration
+     * writes for a tenant's key.
+     *
+     * @param list<array<string, mixed>> $rows each naming the same fields
+     * @param string|list<string> $uniqueBy the key's fields
+     * @param list<string>|null $update the fields an existing row takes from its new one
+     */
+    public function upsert(array $rows, string|array $uniqueBy, ?array $update = null): int
+    {
+        return $this->writeRows('upsert()', $rows, \is_string($uniqueBy) ? [$uniqueBy] : $uniqueBy, $update);
+    }
+
     // ------------------------------------------------------------- internals
+
+    /**
+     * insert() and upsert().
+     *
+     * @param array<mixed> $rows
+     * @param list<string>|null $uniqueBy null for a plain insert
+     * @param list<string>|null $update
+     */
+    private function writeRows(string $what, array $rows, ?array $uniqueBy, ?array $update): int
+    {
+        $this->orm->refuseWriteOf($what);
+        $this->refuseHooks($what);
+        if ($this->conditions !== [] || $this->orders !== [] || $this->limit !== null || $this->offset !== null || $this->with !== []) {
+            throw new \LogicException("{$what} reads nothing: call it on the query a model starts, not on one narrowed.");
+        }
+        if ($rows === []) {
+            return 0;
+        }
+        if (\count($rows) > self::MAX_VALUES) {
+            throw new \LengthException("{$what} writes at most " . self::MAX_VALUES . ' rows at a time.');
+        }
+
+        $tenant = $this->tenantForNewRows();
+        $stored = [];
+        $columns = null;
+        foreach ($rows as $row) {
+            if (!\is_array($row)) {
+                throw new \InvalidArgumentException("{$what} takes rows, each a map of field => value.");
+            }
+            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant);
+            $one[$this->meta->idColumn] ??= Uuid::v7();
+
+            $names = array_keys($one);
+            sort($names);
+            if ($columns !== null && $names !== $columns) {
+                throw new \InvalidArgumentException("Every row {$what} writes names the same fields.");
+            }
+            $columns ??= $names;
+            $stored[] = $one;
+        }
+
+        [$target, $set] = $uniqueBy === null ? [null, []] : $this->conflict($what, $stored, $columns, $uniqueBy, $update);
+
+        return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $tenant): int {
+            $table = Identifiers::quote($this->meta->table);
+            $list = implode(', ', array_map(Identifiers::quote(...), $columns));
+            $tuple = '(' . Compiler::placeholders(\count($columns)) . ')';
+            $conflict = $target === null ? '' : $this->onConflict($target, $set);
+
+            foreach (array_chunk($stored, max(1, intdiv(self::MAX_BINDINGS, \count($columns)))) as $chunk) {
+                $bindings = [];
+                foreach ($chunk as $row) {
+                    foreach ($columns as $column) {
+                        $bindings[] = $row[$column];
+                    }
+                }
+                $this->orm->connection()->execute(
+                    "INSERT INTO {$table} ({$list}) VALUES " . implode(', ', array_fill(0, \count($chunk), $tuple)) . $conflict,
+                    $bindings,
+                );
+            }
+
+            return $target === null
+                ? $this->followInserted($stored, $columns)
+                : $this->followUpserted($stored, $columns, $target, $set, $tenant);
+        });
+    }
+
+    /**
+     * The tenant a new row is stamped with, failing closed where save()
+     * would: no tenancy registered, or no tenant in force -- inside
+     * acrossTenants() too, which lifts reads, not whose a new row is.
+     */
+    private function tenantForNewRows(): ?string
+    {
+        if ($this->meta->tenantColumn === null) {
+            return null;
+        }
+        if (!$this->orm->hasTenancy()) {
+            throw NoTenantContext::noTenancy($this->class);
+        }
+        $tenant = $this->orm->tenant();
+        if ($tenant === '') {
+            throw new NoTenantContext($this->class);
+        }
+
+        return $tenant;
+    }
+
+    /**
+     * An upsert's conflict target, from the metadata, and the columns an
+     * existing row takes.
+     *
+     * @param list<array<string, mixed>> $stored
+     * @param list<string> $columns
+     * @param list<string> $uniqueBy
+     * @param list<string>|null $update
+     * @return array{non-empty-list<string>, list<string>}
+     */
+    private function conflict(string $what, array $stored, array $columns, array $uniqueBy, ?array $update): array
+    {
+        $key = array_map(fn (string $name): string => $this->ownColumn($name), $uniqueBy);
+        $target = $this->meta->conflictTarget($key) ?? throw new MappingException(
+            "{$this->class} declares no #[Unique] key over (" . implode(', ', $key) . "), so {$what} has nothing to conflict on. "
+            . 'Declared: ' . (implode('; ', array_map(static fn (array $k): string => implode(', ', $k), $this->meta->uniqueKeys)) ?: 'none') . '.',
+        );
+        foreach ($target as $column) {
+            if (!\in_array($column, $columns, true)) {
+                throw new \InvalidArgumentException("Every row {$what} writes sets its key, and these leave out {$column}.");
+            }
+        }
+
+        $seen = [];
+        foreach ($stored as $row) {
+            $tuple = json_encode(array_map(static fn (string $column): mixed => $row[$column], $target), JSON_THROW_ON_ERROR);
+            if (isset($seen[$tuple])) {
+                throw new \InvalidArgumentException("Two rows {$what} writes share a key; write each once.");
+            }
+            $seen[$tuple] = true;
+        }
+
+        $fixed = [...$target, $this->meta->idColumn];
+        if ($update === null) {
+            return [$target, array_values(array_diff($columns, $fixed))];
+        }
+
+        $set = [];
+        foreach ($update as $name) {
+            $column = $this->ownColumn($name);
+            if (\in_array($column, $fixed, true) || $column === $this->meta->tenantColumn) {
+                throw new \InvalidArgumentException("{$what} updates no key: '{$name}' is what the row is found by.");
+            }
+            if (!\in_array($column, $columns, true)) {
+                throw new \InvalidArgumentException("{$what} updates '{$name}', which the rows do not set.");
+            }
+            $set[] = $column;
+        }
+
+        return [$target, array_values(array_unique($set))];
+    }
+
+    /** A column of the model's own table, by any name it is known by. */
+    private function ownColumn(string $name): string
+    {
+        $ref = Identifiers::column($this->meta, $name);
+        if ($ref->path !== []) {
+            throw new MappingException("'{$name}' is a column of another table; a write sets {$this->class}'s own.");
+        }
+
+        return $ref->column;
+    }
+
+    /**
+     * ON CONFLICT, as each database spells it.
+     *
+     * @param non-empty-list<string> $target
+     * @param list<string> $set
+     */
+    private function onConflict(array $target, array $set): string
+    {
+        $connection = $this->orm->connection();
+        if ($connection instanceof PdoConnection && $connection->driver() === 'mysql') {
+            $id = Identifiers::quote($this->meta->idColumn);
+
+            return ' ON DUPLICATE KEY UPDATE ' . ($set === []
+                ? "{$id} = {$id}"
+                : implode(', ', array_map(static fn (string $c): string => Identifiers::quote($c) . ' = VALUES(' . Identifiers::quote($c) . ')', $set)));
+        }
+
+        $clause = ' ON CONFLICT (' . implode(', ', array_map(Identifiers::quote(...), $target)) . ')';
+
+        return $set === []
+            ? $clause . ' DO NOTHING'
+            : $clause . ' DO UPDATE SET ' . implode(', ', array_map(static fn (string $c): string => Identifiers::quote($c) . ' = excluded.' . Identifiers::quote($c), $set));
+    }
+
+    /**
+     * After insert(): each new row followed into the relations it is in.
+     *
+     * @param list<array<string, mixed>> $stored
+     * @param list<string> $columns
+     */
+    private function followInserted(array $stored, array $columns): int
+    {
+        foreach ($stored as $row) {
+            $this->orm->followStatementWrite($this->meta, (string) $row[$this->meta->idColumn], $row, $columns);
+        }
+
+        return \count($stored);
+    }
+
+    /**
+     * After upsert(): the rows it wrote, read by their keys under the
+     * tenant predicate -- the database's own comparison, so a key it took
+     * for one whatever its case is found -- each followed as inserted, if
+     * its key is one written, or as updated.
+     *
+     * @param list<array<string, mixed>> $stored
+     * @param list<string> $columns
+     * @param non-empty-list<string> $target
+     * @param list<string> $set
+     */
+    private function followUpserted(array $stored, array $columns, array $target, array $set, ?string $tenant): int
+    {
+        $byId = [];
+        foreach ($stored as $row) {
+            $byId[(string) $row[$this->meta->idColumn]] = $row;
+        }
+
+        $key = array_values(array_diff($target, [$this->meta->tenantColumn]));
+        $table = Identifiers::quote($this->meta->table);
+        $select = implode(', ', array_map(
+            static fn (string $column): string => $table . '.' . Identifiers::quote($column) . ' AS ' . Identifiers::quote($column),
+            $this->meta->selectColumns(),
+        ));
+
+        $inserted = 0;
+        foreach (array_chunk($stored, max(1, intdiv(self::MAX_VALUES, \count($key)))) as $chunk) {
+            $alternatives = [];
+            $bindings = [];
+            foreach ($chunk as $row) {
+                $alternatives[] = '(' . implode(' AND ', array_map(static fn (string $c): string => $table . '.' . Identifiers::quote($c) . ' = ?', $key)) . ')';
+                foreach ($key as $column) {
+                    $bindings[] = $row[$column];
+                }
+            }
+            // The tenant every row was stamped with, which leads the target:
+            // inside acrossTenants() too, where a read's predicate is
+            // lifted, the rows written are that tenant's alone.
+            $where = '(' . implode(' OR ', $alternatives) . ')';
+            if ($tenant !== null && $this->meta->tenantColumn !== null) {
+                $where .= " AND {$table}." . Identifiers::quote($this->meta->tenantColumn) . ' = ?';
+                $bindings[] = $tenant;
+            }
+
+            foreach ($this->orm->connection()->select("SELECT {$select} FROM {$table} WHERE {$where}", $bindings) as $found) {
+                $id = (string) $found[$this->meta->idColumn];
+                if (isset($byId[$id])) {
+                    $inserted++;
+                    $this->orm->followStatementWrite($this->meta, $id, $byId[$id], $columns);
+                } elseif ($set !== []) {
+                    $this->orm->followStatementWrite($this->meta, $id, $found, $set);
+                }
+            }
+        }
+
+        return $inserted;
+    }
+
+    /** Refuses a write through a statement on a model whose saves run #[BeforeSave] methods. */
+    private function refuseHooks(string $what): void
+    {
+        if ($this->meta->hasBeforeSave()) {
+            throw new \LogicException(
+                "{$this->class} has #[BeforeSave] methods, which keep what a model must be when it is saved; {$what} "
+                . 'makes no model to run them on, and would write past them. Save each row instead.',
+            );
+        }
+    }
+
+    /**
+     * The keys of the rows a write through this query writes: what fetch()
+     * would read, locked for the rest of the transaction where the
+     * database can lock rows.
+     *
+     * @return list<string>
+     */
+    private function idsToWrite(): array
+    {
+        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders);
+        $id = $scope->expression(new ColumnRef([], $this->meta->idColumn));
+        [$body, $bindings] = $scope->body();
+        [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
+
+        // Postgres locks the model's own rows alone: a joined table's would
+        // be refused on the side of an outer join that may be NULL. SQLite
+        // has no row locks, and needs none: its write transaction began
+        // IMMEDIATE, holding the database.
+        $connection = $this->orm->connection();
+        $lock = match ($connection instanceof PdoConnection ? $connection->driver() : '') {
+            'pgsql' => ' FOR UPDATE OF ' . Identifiers::quote($scope->alias),
+            'mysql' => ' FOR UPDATE',
+            default => '',
+        };
+
+        $rows = $connection->select("SELECT {$id} AS \"id\"" . $body . $scope->orderBy() . $tail . $lock, [...$bindings, ...$tailBindings]);
+
+        return array_values(array_unique(array_map(static fn (array $row): string => (string) $row['id'], $rows)));
+    }
+
+    /**
+     * WHERE for a write to these rows of the model's table, by key, with
+     * the tenant predicate in force again.
+     *
+     * @param list<string> $ids
+     * @return array{string, list<string>}
+     */
+    private function byKeys(array $ids): array
+    {
+        $table = Identifiers::quote($this->meta->table);
+        $where = $table . '.' . Identifiers::quote($this->meta->idColumn) . ' IN (' . Compiler::placeholders(\count($ids)) . ')';
+        $bindings = $ids;
+
+        $tenant = new Compiler($this->orm)->tenantOnTable($this->meta);
+        if ($tenant !== null) {
+            $where .= ' AND ' . $tenant[0];
+            array_push($bindings, ...$tenant[1]);
+        }
+
+        return [$where, $bindings];
+    }
+
+    /**
+     * After update(): each written row followed, a held model's read again
+     * so it takes what was stored.
+     *
+     * @param list<string> $ids
+     * @param array<string, mixed> $set column => value as written
+     */
+    private function followUpdate(array $ids, array $set): void
+    {
+        $held = array_values(array_filter($ids, fn (string $id): bool => $this->orm->holdsModel($this->class, $id)));
+        $rows = [];
+        foreach (array_chunk($held, self::MAX_VALUES) as $chunk) {
+            foreach ($this->rowsByKey($chunk) as $row) {
+                $rows[(string) $row[$this->meta->idColumn]] = $row;
+            }
+        }
+
+        foreach ($ids as $id) {
+            $this->orm->followStatementWrite($this->meta, $id, $rows[$id] ?? $set, array_keys($set));
+        }
+    }
+
+    /**
+     * These rows of the model's table, every column a model is read with.
+     *
+     * @param list<string> $ids
+     * @return list<array<string, mixed>>
+     */
+    private function rowsByKey(array $ids): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+        [$where, $bindings] = $this->byKeys($ids);
+        $table = Identifiers::quote($this->meta->table);
+        $columns = implode(', ', array_map(
+            static fn (string $column): string => $table . '.' . Identifiers::quote($column) . ' AS ' . Identifiers::quote($column),
+            $this->meta->selectColumns(),
+        ));
+
+        return $this->orm->connection()->select("SELECT {$columns} FROM {$table} WHERE {$where}", $bindings);
+    }
 
     /** @return static */
     private function adding(Condition $condition): self

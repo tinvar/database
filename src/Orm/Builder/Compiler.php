@@ -138,6 +138,18 @@ final class Compiler
     }
 
     /**
+     * The tenant predicate on the model's table by its own name, for a
+     * statement that writes it: UPDATE and DELETE name no alias. The
+     * predicate a read of it is held to, failing closed where a read does.
+     *
+     * @return array{string, list<string>}|null
+     */
+    public function tenantOnTable(ModelMeta $meta): ?array
+    {
+        return $this->tenantPredicate($meta, $meta->table);
+    }
+
+    /**
      * The tenant predicate on one table, or null where the model is not
      * #[TenantScoped] or acrossTenants() lifted scoping. Throws
      * NoTenantContext where find() would.
