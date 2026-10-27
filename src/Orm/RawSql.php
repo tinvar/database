@@ -53,8 +53,15 @@ final class RawSql
             }
         }
 
+        // Text the pattern gives up on is text nobody read: it may name
+        // every one of them.
+        $names = self::names($sql);
+        if ($names === null) {
+            return $tables;
+        }
+
         $found = [];
-        foreach (self::names($sql) as $name) {
+        foreach ($names as $name) {
             $table = $wanted[strtolower($name)] ?? null;
             if ($table !== null) {
                 $found[$table] = true;
@@ -65,7 +72,7 @@ final class RawSql
     }
 
     /**
-     * $sql with every string literal replaced by `?` and cut to
+     * $sql with every string literal replaced by `'?'` and cut to
      * MAX_SHOWN bytes: to show where it was sent, not what it held. A
      * literal is where code that builds SQL from values puts them, and
      * those may be anyone's.
@@ -85,11 +92,13 @@ final class RawSql
      * Every name in $sql, unquoted, with its schema and its parts apart:
      * `"public"."orders"` is public, orders and public.orders.
      *
-     * @return list<string>
+     * @return list<string>|null null where the pattern could not read it
      */
-    private static function names(string $sql): array
+    private static function names(string $sql): ?array
     {
-        preg_match_all(self::TOKENS, $sql, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+        if (preg_match_all(self::TOKENS, $sql, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL) === false) {
+            return null;
+        }
 
         $names = [];
         $dotted = [];   // the parts of the dotted name being read, one list per name
