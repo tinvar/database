@@ -53,12 +53,21 @@ function calls(Orm $orm, string $fromRuntime): void
     $_ = $pallets->withMax(relation: 'crates', column: 'wieghtKg'); // refused
     $_ = $pallets->orderByRelation('crates', Aggregate::Max, 'weightKg', 'desc');
     $_ = $pallets->orderByRelation('crates', Aggregate::Max, 'weight_kgs'); // refused
-    $_ = $query->withCount('pallet'); // refused
+    $_ = $query->withCount('pallet');
+    $_ = $query->withMax('pallet.crates', 'weightKg');
+    $_ = $query->withMax('pallet.crates', 'code'); // refused
+    $_ = $query->withCount('palet.crates'); // refused
+    $_ = $pallets->groupBy('code')->having(Aggregate::Sum, 'crates.weightKg', '>', 1)->having(Aggregate::Count, 'crates', '>', 1);
+    $_ = $pallets->groupBy('code')->having(Aggregate::Sum, 'crates.wieghtKg', '>', 1); // refused
+    $_ = $pallets->groupBy('code')->report(\stdClass::class, ['code' => 'code', 'kg' => [Aggregate::Sum, 'crates.weightKg'], 'n' => [Aggregate::Count, 'crates']]);
+    $_ = $pallets->report(\stdClass::class, ['kg' => [Aggregate::Avg, 'crates.weight']]); // refused
     $_ = $query->groupBy('label', 'pallet.code');
     $_ = $query->groupBy('label', 'pallet.cod'); // refused
     $_ = $query->having(Aggregate::Count, null, '>', 1);
     $_ = $query->having(Aggregate::Sum, 'weightKg', '>', 1);
     $_ = $query->having(Aggregate::Sum, 'wieghtKg', '>', 1); // refused
+    $_ = $query->having(Aggregate::Count, null, '>', 1)->orHaving(Aggregate::Sum, 'weightKg', '<', 9);
+    $_ = $query->having(Aggregate::Count, null, '>', 1)->orHaving(Aggregate::Sum, 'wieghtKg', '<', 9); // refused
     $_ = $query->orderByAggregate(Aggregate::Sum, 'weight_kg');
     $_ = $query->orderByAggregate(Aggregate::Sum, 'weight'); // refused
     $_ = $query->groupBy('label')->report(\stdClass::class, ['label' => 'label', 'n' => Aggregate::Count, 'kg' => [Aggregate::Sum, 'weightKg']]);

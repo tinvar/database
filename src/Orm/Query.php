@@ -86,7 +86,7 @@ final readonly class Query
      *        aggregate over the rows (a report's), or by one over each row's related rows
      * @param list<string> $with relation paths to load with the rows
      * @param list<ColumnRef> $groups what a report groups by
-     * @param list<array{Measure, string, int|float|string}> $havings a report's conditions on its groups
+     * @param list<array{Measure, string, int|float|string, bool}> $havings a report's conditions on its groups, each ORed or ANDed with those before
      * @param list<RelationMeasure> $measures the aggregates over related rows fetchAggregated() reads
      * @param list<list<Condition>>|null $unionAll each arm's conditions, once unionAll() joined them
      */
@@ -417,15 +417,26 @@ final readonly class Query
     #[\NoDiscard]
     public function having(Aggregate $function, string|\BackedEnum|null $column, string $operator, mixed $value): self
     {
-        $sql = self::OPERATORS[strtolower($operator)] ?? null;
-        if ($sql === null || str_contains($sql, 'LIKE')) {
-            throw new \InvalidArgumentException('An aggregate compares with =, <>, <, <=, > or >=.');
-        }
-        if ($value === null) {
-            throw new \InvalidArgumentException('An aggregate compared with NULL matches no group; compare with a value.');
+        return $this->keeping(false, $function, $column, $operator, $value);
+    }
+
+    /**
+     * having(), as an alternative to the conditions before it: `having(Count,
+     * null, '>', 10)->orHaving(Sum, 'stock', '>=', 100)`. SQL's precedence,
+     * AND before OR, as where() and orWhere() have it. Every term compares a
+     * group's aggregate, inside the HAVING alone: the tenant predicate is in
+     * the WHERE, under every group, and no OR here reaches it (ADR 0073).
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function orHaving(Aggregate $function, string|\BackedEnum|null $column, string $operator, mixed $value): self
+    {
+        if ($this->havings === []) {
+            throw new \LogicException('orHaving() is an alternative to a having() before it.');
         }
 
-        return clone($this, ['havings' => [...$this->havings, [$this->measure($function, $column), $sql, self::value($value)]]]);
+        return $this->keeping(true, $function, $column, $operator, $value);
     }
 
     /**
@@ -552,7 +563,7 @@ final readonly class Query
         ?\Closure $constraint = null,
         ?string $as = null,
     ): self {
-        $name = $as ?? $relation . ucfirst($function->value)
+        $name = $as ?? lcfirst(str_replace('.', '', ucwords($relation, '.'))) . ucfirst($function->value)
             . ($column === null ? '' : ucfirst(str_replace('.', '', ucwords($column instanceof \BackedEnum ? (string) $column->value : $column, '.'))));
         foreach ($this->measures as $measure) {
             if ($measure->name === $name) {
@@ -799,12 +810,14 @@ final readonly class Query
         $scope = $compiler->scope($this->meta, $this->conditions, $this->orders, $also);
 
         $list = [];
+        $listBindings = [];
         $aliases = [];
         foreach (array_keys($selected) as $i => $name) {
             $what = $selected[$name];
             $aliases[$name] = "c{$i}";
-            $list[] = ($what instanceof ColumnRef ? $scope->expression($what) : $compiler->measure($scope, $what))
-                . ' AS ' . Identifiers::quote("c{$i}");
+            [$expression, $expressionBindings] = $what instanceof ColumnRef ? [$scope->expression($what), []] : $compiler->measure($this->meta, $scope, $what);
+            $list[] = $expression . ' AS ' . Identifiers::quote("c{$i}");
+            array_push($listBindings, ...$expressionBindings);
         }
 
         [$body, $bindings] = $scope->body();
@@ -814,18 +827,20 @@ final readonly class Query
         }
         $havingBindings = [];
         if ($this->havings !== []) {
-            $terms = [];
-            foreach ($this->havings as [$measure, $operator, $value]) {
-                $terms[] = $compiler->measure($scope, $measure) . " {$operator} " . $compiler->placeholder($value);
+            $terms = '';
+            foreach ($this->havings as $i => [$measure, $operator, $value, $or]) {
+                [$expression, $expressionBindings] = $compiler->measure($this->meta, $scope, $measure);
+                $terms .= ($i === 0 ? '' : ($or ? ' OR ' : ' AND ')) . $expression . " {$operator} " . $compiler->placeholder($value);
+                array_push($havingBindings, ...$expressionBindings);
                 $havingBindings[] = $value;
             }
-            $sql .= ' HAVING ' . implode(' AND ', $terms);
+            $sql .= ' HAVING ' . $terms;
         }
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
 
         $rows = $this->orm->statements()->select(
             $sql . $scope->orderBy() . $tail,
-            [...$bindings, ...$havingBindings, ...$scope->orderBindings(), ...$tailBindings],
+            [...$listBindings, ...$bindings, ...$havingBindings, ...$scope->orderBindings(), ...$tailBindings],
         );
 
         // What a column read without a model answered, for the model-leak
@@ -837,6 +852,13 @@ final readonly class Query
                 : ($what->function === Aggregate::Min || $what->function === Aggregate::Max ? $what->column : null);
             if ($ref !== null) {
                 $this->orm->recordColumnRead($this->ownerOf($ref), $ref->column, array_column($rows, $aliases[$name]));
+            } elseif ($what->over?->column !== null
+                && ($what->function === Aggregate::Min || $what->function === Aggregate::Max)) {
+                $this->orm->recordColumnRead(
+                    self::ownerIn(Metadata::for($what->over->relation->target), $what->over->column),
+                    $what->over->column->column,
+                    array_column($rows, $aliases[$name]),
+                );
             }
         }
 
@@ -1813,9 +1835,59 @@ final readonly class Query
     }
 
     /** An aggregate over this query's rows, its column resolved against the metadata. */
+    /** @return static */
+    private function keeping(bool $or, Aggregate $function, string|\BackedEnum|null $column, string $operator, mixed $value): self
+    {
+        $sql = self::OPERATORS[strtolower($operator)] ?? null;
+        if ($sql === null || str_contains($sql, 'LIKE')) {
+            throw new \InvalidArgumentException('An aggregate compares with =, <>, <, <=, > or >=.');
+        }
+        if ($value === null) {
+            throw new \InvalidArgumentException('An aggregate compared with NULL matches no group; compare with a value.');
+        }
+
+        return clone($this, ['havings' => [...$this->havings, [$this->measure($function, $column), $sql, self::value($value), $or]]]);
+    }
+
     private function measure(Aggregate $function, string|\BackedEnum|null $column): Measure
     {
-        return new Measure($function, $column === null ? null : Identifiers::column($this->meta, $column));
+        if ($column === null) {
+            return new Measure($function, null);
+        }
+
+        // Over the rows' collections: a column a #[HasMany] reaches
+        // ('items.priceCents'), or, counted, the collection itself ('items').
+        $collection = Identifiers::collectionColumn($this->meta, $column);
+        $path = $collection === null ? null : $collection[0];
+        $name = $column instanceof \BackedEnum ? (string) $column->value : $column;
+        if ($path === null && $this->isCollection($name)) {
+            $path = $name;
+        }
+        if ($path === null) {
+            return new Measure($function, Identifiers::column($this->meta, $column));
+        }
+        if ($function === Aggregate::CountDistinct) {
+            throw new \LogicException('A distinct count over each row\'s collection does not add up across a group: group the related model instead.');
+        }
+        if ($collection === null && $function !== Aggregate::Count) {
+            throw new \LogicException("'{$name}' is a collection: {$function->name} reads one of its columns.");
+        }
+
+        $inner = $function === Aggregate::Avg ? Aggregate::Sum : $function;
+
+        return new Measure($function, null, $this->relationMeasure('', $path, $inner, $collection[2] ?? null, null, ''));
+    }
+
+    /** Whether $path is a path of relations from this model that walks a #[HasMany]. */
+    private function isCollection(string $path): bool
+    {
+        try {
+            $relations = Identifiers::relationPath($this->meta, $path);
+        } catch (MappingException) {
+            return false;
+        }
+
+        return array_filter($relations, static fn (RelationMeta $r): bool => $r->kind === RelationKind::HasMany) !== [];
     }
 
     /**
@@ -1847,18 +1919,16 @@ final readonly class Query
         ?\Closure $constraint,
         string $what,
     ): RelationMeasure {
-        $meta = Identifiers::relation($this->meta, $relation);
-        if ($meta->kind !== RelationKind::HasMany) {
-            throw new MappingException(
-                "{$this->class}::\${$relation} is a #[BelongsTo], one row: read its column through a join ('{$relation}.column'), not an aggregate.",
-            );
-        }
-        $target = Metadata::for($meta->target);
+        // A path of relations, each a #[HasMany] or a #[BelongsTo]: the
+        // rows aggregated are the ones it ends at (ADR 0073).
+        $path = Identifiers::relationPath($this->meta, $relation);
+        $last = array_pop($path);
+        $target = Metadata::for($last->target);
         $conditions = $constraint === null
             ? []
-            : self::conditionsOf($constraint(self::of($this->orm, $meta->target)), $meta->target, $what)->conditions;
+            : self::conditionsOf($constraint(self::of($this->orm, $last->target)), $last->target, $what)->conditions;
 
-        return new RelationMeasure($name, $meta, $function, $column === null ? null : Identifiers::column($target, $column), $conditions);
+        return new RelationMeasure($name, $last, $function, $column === null ? null : Identifiers::column($target, $column), $conditions, $path);
     }
 
     /**

@@ -45,16 +45,16 @@ use Tinvar\Orm\RelationKind;
  *
  *   - a column: where() and its kin -- a #[HasMany]'s column too, which
  *     they read as an EXISTS -- orderBy(), pluck(), sum(), min(), max(),
- *     every column groupBy() names, and the column of having() and
+ *     every column groupBy() names, and the column of having(), orHaving() and
  *     orderByAggregate();
  *   - a column of the model's own table: increment(), decrement(), each
  *     key of the fields update() is given as a constant array, each field
  *     of each constant row insert() and upsert() are given, and the fields
  *     of upsert()'s uniqueBy and update -- uniqueBy held, besides, to a
  *     key the model declares with #[Unique] (ADR 0073);
- *   - a relation: with(), whereHas() and its kin, and a #[HasMany] for
- *     withCount(), withSum() and the rest and orderByRelation(), whose
- *     column is the related model's;
+ *   - a relation: with(), whereHas() and its kin, and a relation or a
+ *     path of them for withCount(), withSum() and the rest and
+ *     orderByRelation(), whose column is the last related model's;
  *   - each column a report() reads, as a constant array of them;
  *   - a raw condition, whereRaw().
  *
@@ -79,7 +79,7 @@ final class QueryIdentifierRule implements Rule
     private const array RELATIONS = ['wherehas', 'orwherehas', 'wheredoesnthave'];
 
     /** Methods whose second argument is a column an aggregate reads, or null. */
-    private const array MEASURES = ['having', 'orderbyaggregate'];
+    private const array MEASURES = ['having', 'orhaving', 'orderbyaggregate'];
 
     /**
      * Methods whose first argument is a #[HasMany], and where the related
@@ -186,19 +186,16 @@ final class QueryIdentifierRule implements Rule
             }
         } elseif (\in_array($method, self::MEASURES, true)) {
             foreach ($names($this->argument($args, 1, 'column')) as $name) {
-                $checks[] = static fn (): mixed => Identifiers::column($meta, $name);
+                $checks[] = static fn (): mixed => self::measured($meta, $name);
             }
         } elseif (\array_key_exists($method, self::RELATION_MEASURES)) {
             $at = self::RELATION_MEASURES[$method];
             $columns = $at === null ? [] : $names($this->argument($args, $at[0], $at[1]));
             foreach ($names($this->argument($args, 0, 'relation')) as $relation) {
                 $checks[] = static function () use ($meta, $relation, $columns): mixed {
-                    $found = Identifiers::relation($meta, $relation);
-                    if ($found->kind !== RelationKind::HasMany) {
-                        throw new MappingException("{$meta->class}::\${$relation} is a #[BelongsTo]: an aggregate reads a #[HasMany].");
-                    }
+                    $path = Identifiers::relationPath($meta, $relation);
                     foreach ($columns as $column) {
-                        Identifiers::column(Metadata::for($found->target), $column);
+                        Identifiers::column(Metadata::for($path[\count($path) - 1]->target), $column);
                     }
 
                     return null;
@@ -274,14 +271,44 @@ final class QueryIdentifierRule implements Rule
                     }
                     // A column, or [Aggregate::Sum, 'column']: the column is the second.
                     $column = $value->getConstantArrays() !== [] ? ($value->getConstantArrays()[0]->getValueTypes()[1] ?? null) : $value;
+                    // A plain column is one the report groups by; in an
+                    // aggregate it may be a collection's (ADR 0073).
+                    $aggregated = $value->getConstantArrays() !== [];
                     foreach ($column === null ? [] : $this->names($column) as $name) {
-                        $checks[] = static fn (): mixed => Identifiers::column($meta, $name);
+                        $checks[] = $aggregated
+                            ? static fn (): mixed => self::measured($meta, $name)
+                            : static fn (): mixed => Identifiers::column($meta, $name);
                     }
                 }
             }
         }
 
         return $checks;
+    }
+
+    /**
+     * What an aggregate reads: a column, a #[HasMany]'s column, or -- for a
+     * count -- a path of relations that walks a #[HasMany] (ADR 0073).
+     */
+    private static function measured(ModelMeta $meta, string $name): mixed
+    {
+        if (Identifiers::collectionColumn($meta, $name) !== null) {
+            return null;
+        }
+        try {
+            return Identifiers::column($meta, $name);
+        } catch (MappingException $e) {
+            try {
+                foreach (Identifiers::relationPath($meta, $name) as $relation) {
+                    if ($relation->kind === RelationKind::HasMany) {
+                        return null;
+                    }
+                }
+            } catch (MappingException) {
+            }
+
+            throw $e;
+        }
     }
 
     /** A column of the model's own table: what a write sets. */

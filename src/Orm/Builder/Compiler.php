@@ -12,6 +12,7 @@ use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\RelationKind;
+use Tinvar\Orm\RelationMeta;
 
 /**
  * Turns a query's resolved parts into SQL, with the tenant predicate on
@@ -90,7 +91,7 @@ final class Compiler
         foreach ($orders as [$by, $direction, $nulls]) {
             [$expression, $bindings] = match (true) {
                 $by instanceof ColumnRef => [$scope->expression($by), []],
-                $by instanceof Measure => [$this->measure($scope, $by), []],
+                $by instanceof Measure => $this->measure($meta, $scope, $by),
                 default => $this->relationMeasure($meta, $alias, $by),
             };
             $resolved[] = [$expression, $direction, $nulls, $bindings];
@@ -105,12 +106,49 @@ final class Compiler
      * sum is 0 where it has nothing to add -- a group whose column is NULL
      * throughout -- as it is answered, so a HAVING or a sort reads the
      * value the report shows.
+     *
+     * @return array{string, list<mixed>}
      */
-    public function measure(Scope $scope, Measure $measure): string
+    public function measure(ModelMeta $meta, Scope $scope, Measure $measure): array
     {
+        if ($measure->over !== null) {
+            return $this->measureOver($meta, $scope, $measure->function, $measure->over);
+        }
         $sql = $measure->function->sql($measure->column === null ? null : $scope->expression($measure->column));
 
-        return $measure->function === Aggregate::Sum ? "COALESCE({$sql}, 0)" : $sql;
+        return [$measure->function === Aggregate::Sum ? "COALESCE({$sql}, 0)" : $sql, []];
+    }
+
+    /**
+     * An aggregate over the collections of a group's rows: each row's own,
+     * a correlated subquery under the related model's tenant predicate,
+     * combined by the group's (Measure). A count or a sum adds the rows'
+     * and is 0 over none; MIN and MAX take the least and the most of
+     * theirs, which a row with no related row adds nothing to; an average
+     * is the group's sum over its count, so a row with three children
+     * weighs three times one with one.
+     *
+     * @return array{string, list<mixed>}
+     */
+    private function measureOver(ModelMeta $meta, Scope $scope, Aggregate $function, RelationMeasure $over): array
+    {
+        if ($function === Aggregate::Avg) {
+            [$sum, $sumBindings] = $this->relationMeasure($meta, $scope->alias, $over->as(Aggregate::Sum, $over->column));
+            [$count, $countBindings] = $this->relationMeasure($meta, $scope->alias, $over->as(Aggregate::Count, null));
+
+            // * 1.0, so Postgres and SQLite divide as numbers rather than
+            // as integers, which would round 175.5 down to 175.
+            return ["SUM({$sum}) * 1.0 / NULLIF(SUM({$count}), 0)", [...$sumBindings, ...$countBindings]];
+        }
+
+        [$sql, $bindings] = $this->relationMeasure($meta, $scope->alias, $over);
+
+        return [match ($function) {
+            Aggregate::Count, Aggregate::Sum => "COALESCE(SUM({$sql}), 0)",
+            Aggregate::Min => "MIN({$sql})",
+            Aggregate::Max => "MAX({$sql})",
+            default => throw new \LogicException("{$function->name} over a collection is no aggregate of each row's."),
+        }, $bindings];
     }
 
     /**
@@ -130,23 +168,57 @@ final class Compiler
      */
     public function relationMeasure(ModelMeta $meta, string $alias, RelationMeasure $measure): array
     {
-        $relation = $measure->relation;
-        if ($relation->kind !== RelationKind::HasMany) {
-            throw new \LogicException("{$relation->key()} is no #[HasMany]: an aggregate reads a row's collection.");
+        $path = [...$measure->through, $measure->relation];
+        $metas = [$meta];
+        foreach ($path as $relation) {
+            $metas[] = Metadata::for($relation->target);
         }
-        $target = Metadata::for($relation->target);
-        $inner = $this->scope($target, $measure->conditions, [], $measure->column === null ? [] : [$measure->column]);
+        $last = \count($path);
+        $inner = $this->scope($metas[$last], $measure->conditions, [], $measure->column === null ? [] : [$measure->column]);
 
-        $link = Identifiers::quote($inner->alias) . '.' . Identifiers::quote($relation->foreignKey)
-            . ' = ' . Identifiers::quote($alias) . '.' . Identifiers::quote($meta->idColumn);
-        [$body, $bindings] = $inner->body($link);
+        // Along a path ('shelves.items'), the model it ends at is read, as
+        // any relation's rows are, and each table between joined back to
+        // the row by INNER JOIN, its tenant predicate in the ON: a row the
+        // tenant may not see breaks the path there, as a whereHas() along
+        // it would find nothing (ADR 0073).
+        $joins = '';
+        $joinBindings = [];
+        $aliases = [$last => $inner->alias];
+        for ($i = $last - 1; $i >= 1; $i--) {
+            $aliases[$i] = $this->alias();
+            $joins .= ' JOIN ' . Identifiers::quote($metas[$i]->table) . ' AS ' . Identifiers::quote($aliases[$i])
+                . ' ON ' . self::link($path[$i], $metas[$i], $aliases[$i], $metas[$i + 1], $aliases[$i + 1]);
+            $tenant = $this->tenantPredicate($metas[$i], $aliases[$i]);
+            if ($tenant !== null) {
+                $joins .= ' AND ' . $tenant[0];
+                array_push($joinBindings, ...$tenant[1]);
+            }
+        }
 
+        $where = array_values(array_filter([$inner->where, self::link($path[0], $meta, $alias, $metas[1], $aliases[1])], static fn (string $part): bool => $part !== ''));
         $expression = $measure->function->sql($measure->column === null ? null : $inner->expression($measure->column));
         if ($measure->function === Aggregate::Sum) {
             $expression = "COALESCE({$expression}, 0)";
         }
 
-        return ["(SELECT {$expression}{$body})", $bindings];
+        return [
+            "(SELECT {$expression} FROM {$inner->from}{$joins} WHERE " . implode(' AND ', $where) . ')',
+            [...$inner->fromBindings, ...$joinBindings, ...$inner->whereBindings],
+        ];
+    }
+
+    /**
+     * The condition a relation holds between a row of its model, read as
+     * $parentAlias, and a row of its target, read as $childAlias: the
+     * child's foreign key for a #[HasMany], the parent's for a #[BelongsTo].
+     */
+    private static function link(RelationMeta $relation, ModelMeta $parent, string $parentAlias, ModelMeta $child, string $childAlias): string
+    {
+        return $relation->kind === RelationKind::HasMany
+            ? Identifiers::quote($childAlias) . '.' . Identifiers::quote($relation->foreignKey)
+                . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($parent->idColumn)
+            : Identifiers::quote($childAlias) . '.' . Identifiers::quote($child->idColumn)
+                . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($relation->foreignKey);
     }
 
     /**

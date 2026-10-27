@@ -206,13 +206,13 @@ describe('aggregates over a row\'s related rows', function () {
             ->toBe(['Alpha', 'Bravo']);
     });
 
-    it('refuses what is no collection, a name read twice, and fetch() dropping them', function () {
+    it('refuses what is no relation, a name read twice, and fetch() dropping them', function () {
         $orm = Shelves::sqlite()->orm();
 
-        expect(fn () => $orm->query(Shelf::class)->withCount('aisle'))->toThrow(MappingException::class)
-            ->and(fn () => $orm->query(Shelf::class)->withCount('nothing'))->toThrow(MappingException::class)
+        expect(fn () => $orm->query(Shelf::class)->withCount('nothing'))->toThrow(MappingException::class)
+            ->and(fn () => $orm->query(Shelf::class)->withCount('items.nothing'))->toThrow(MappingException::class)
             ->and(fn () => $orm->query(Shelf::class)->withSum('items', 'secret'))->toThrow(MappingException::class)
-            ->and(fn () => $orm->query(Shelf::class)->withSum('items.shelf', 'name'))->toThrow(MappingException::class)
+            ->and(fn () => $orm->query(Shelf::class)->withSum('items.shelf', 'nothing'))->toThrow(MappingException::class)
             ->and(fn () => $orm->query(Shelf::class)->withCount('items')->withCount('items'))->toThrow(\InvalidArgumentException::class)
             ->and(fn () => $orm->query(Shelf::class)->withAggregate('items', Aggregate::Sum))->toThrow(\InvalidArgumentException::class)
             ->and(fn () => $orm->actAs('acme', static fn (): array => $orm->query(Shelf::class)->withCount('items')->fetch()))
