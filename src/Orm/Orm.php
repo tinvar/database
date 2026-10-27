@@ -866,8 +866,40 @@ final class Orm
      */
     private function tenantScope(ModelMeta $meta): array
     {
-        if ($meta->tenantColumn === null) {
+        $tenants = $this->tenantsInScope($meta);
+        if ($tenants === null || $meta->tenantColumn === null) {
             return ['', []];
+        }
+
+        if (\count($tenants) > 1) {
+            return [
+                '"' . $meta->tenantColumn . '" IN (' . implode(', ', array_fill(0, \count($tenants), '?')) . ')',
+                $tenants,
+            ];
+        }
+
+        return ['"' . $meta->tenantColumn . '" = ?', $tenants];
+    }
+
+    /**
+     * The tenants a read of $meta is held to now -- the tenant in force, or
+     * every tenant in the subtree withinSubtree() widened to -- or null when
+     * nothing holds it: the model is not #[TenantScoped], or acrossTenants()
+     * lifted scoping. Throws NoTenantContext where a read must fail closed.
+     *
+     * The one answer find(), all(), whereIn(), relation loads and the query
+     * builder (Builder\Compiler) all predicate on, so the builder cannot
+     * scope a read differently from them.
+     *
+     * @return non-empty-list<string>|null
+     * @throws NoTenantContext with no tenancy registered, or no tenant in force
+     *
+     * @internal for the Orm and its query builder, inside this package
+     */
+    public function tenantsInScope(ModelMeta $meta): ?array
+    {
+        if ($meta->tenantColumn === null) {
+            return null;
         }
         // Before acrossTenants() is asked: with no tenancy registered it
         // lifts nothing, since no tenant's rows are anyone's to read.
@@ -875,7 +907,7 @@ final class Orm
             throw NoTenantContext::noTenancy($meta->class);
         }
         if ($this->unscopedDepth() > 0) {
-            return ['', []];
+            return null;
         }
 
         $tenant = $this->identityMap->tenant();
@@ -884,14 +916,23 @@ final class Orm
         }
 
         $subtree = $this->subtreeInForce();
-        if ($subtree !== null && \count($subtree) > 1) {
-            return [
-                '"' . $meta->tenantColumn . '" IN (' . implode(', ', array_fill(0, \count($subtree), '?')) . ')',
-                $subtree,
-            ];
-        }
 
-        return ['"' . $meta->tenantColumn . '" = ?', [$tenant]];
+        return $subtree !== null && \count($subtree) > 1 ? $subtree : [$tenant];
+    }
+
+    /**
+     * A query over $class: an immutable builder, read when a terminal method
+     * -- fetch(), first(), count(), paginate() -- runs it, under the scope in
+     * force then.
+     *
+     * @template T of Model
+     * @param class-string<T> $class
+     * @return Query<T>
+     */
+    #[\NoDiscard]
+    public function query(string $class): Query
+    {
+        return Query::of($this, $class);
     }
 
     // ---------------------------------------------------------------- reading
@@ -1877,6 +1918,117 @@ final class Orm
     }
 
     /**
+     * Loads $relation for every one of $parents in one statement and puts
+     * what it read in each: a collection filled, a #[BelongsTo] ghost filled
+     * from its row. For Query::with(), so a relation the code is about to
+     * read is not a lazy load at all.
+     *
+     * Through the same path a lazy load takes -- loadRelationRows(), under
+     * the related model's tenant predicate, cached under the tenant's key
+     * unless the read is widened -- and hydrated in one result set, so a
+     * relation read on what it loaded loads for all of it. Not recorded as a
+     * lazy load (LazyLoads): nothing lazy asked for it.
+     *
+     * A relation already loaded on a parent is left as it is. A #[BelongsTo]
+     * whose row is not there to read -- dangling, or another tenant's -- is
+     * left a ghost, which throws DanglingRelation when read, as it would
+     * have without this.
+     *
+     * @param list<Model> $parents
+     * @return list<Model> the related models, each once: the parents of a nested load
+     *
+     * @internal for the query builder, inside this package
+     */
+    public function eagerLoad(RelationMeta $relation, array $parents): array
+    {
+        if ($parents === []) {
+            return [];
+        }
+
+        $key = $this->relationCacheKey($relation);
+        $widened = $this->isWidened();
+        $many = $relation->kind === RelationKind::HasMany;
+        $loaded = $this->loadRelationRows($relation, $parents, $key, lazy: false);
+
+        // Each parent's rows: what this load read, and -- scoped, where the
+        // cache is the tenant's own -- what an earlier load had cached.
+        /** @var array<string, list<array<string, mixed>>> $groups */
+        $groups = [];
+        foreach ($parents as $parent) {
+            $group = $many ? $parent->primaryKey() : (string) ($parent->foreignKey($relation->property) ?? '');
+            if ($group === '' || isset($groups[$group])) {
+                continue;
+            }
+
+            if (isset($loaded[$group])) {
+                $groups[$group] = $many ? $loaded[$group] : \array_slice($loaded[$group], 0, 1);
+            } elseif (!$widened && $this->hasRows($key, $group)) {
+                /** @var list<array<string, mixed>>|array<string, mixed>|null $cached */
+                $cached = $this->relationRows[$key][$group];
+                /** @var list<array<string, mixed>> $rows */
+                $rows = $many ? ($cached ?? []) : ($cached === null ? [] : [$cached]);
+                $groups[$group] = $rows;
+            } else {
+                $groups[$group] = [];
+            }
+        }
+
+        $target = Metadata::for($relation->target);
+        $rows = [];
+        foreach ($groups as $group) {
+            foreach ($group as $row) {
+                $rows[(string) ($row[$target->idColumn] ?? '')] = $row;
+            }
+        }
+
+        $byId = [];
+        foreach ($this->hydrateAll($relation->target, array_values($rows)) as $model) {
+            $byId[$model->primaryKey()] = $model;
+        }
+
+        $owner = Metadata::for($relation->owner);
+        $property = new \ReflectionProperty($relation->owner, $relation->property);
+        foreach ($parents as $parent) {
+            if ($many) {
+                if (!$property->isInitialized($parent)) {
+                    continue;
+                }
+                $collection = $owner->get($parent, $relation->property);
+                if (!$collection instanceof Collection || $collection->isLoaded()) {
+                    continue;
+                }
+
+                $items = [];
+                foreach ($groups[$parent->primaryKey()] ?? [] as $row) {
+                    $item = $byId[(string) ($row[$target->idColumn] ?? '')] ?? null;
+                    if ($item !== null) {
+                        $items[] = $item;
+                    }
+                }
+                $collection->replaceItems($items);
+                continue;
+            }
+
+            $foreignKey = $parent->foreignKey($relation->property);
+            $related = $foreignKey === null ? null : ($byId[(string) $foreignKey] ?? null);
+            if ($related === null) {
+                continue;
+            }
+
+            // Scoped, the ghost in the property is the identity map's, and
+            // hydrateAll() above filled it in place. Widened, it is a ghost
+            // of its own the map never held, so the model read takes its
+            // place -- standing for the same key.
+            if ($widened && (!$property->isInitialized($parent) || $owner->get($parent, $relation->property) !== $related)) {
+                $owner->set($parent, $relation->property, $related);
+                $parent->rememberForeignKey($relation->property, $foreignKey, $related);
+            }
+        }
+
+        return array_values($byId);
+    }
+
+    /**
      * One statement for every parent handed in. This is the whole point of the
      * batching: the group may span result sets and query calls.
      *
@@ -1893,12 +2045,14 @@ final class Orm
      *        knows better than the parents can say: the scheduler, which hands in
      *        every parent a tick awaited. Otherwise read from the parents (batchOf())
      *        -- and only when a test records lazy loads.
+     * @param bool $lazy whether a lazy read asked for it, and so goes on the record a
+     *        test reads; an eager load (Query::with()) is a statement of the query's own
      * @return array<string, list<array<string, mixed>>>
      *
      * @internal for the Orm's own relation loading and the batch
      *     scheduler's, inside this package
      */
-    public function loadRelationRows(RelationMeta $relation, array $parents, ?string $key = null, ?string $batch = null): array
+    public function loadRelationRows(RelationMeta $relation, array $parents, ?string $key = null, ?string $batch = null, bool $lazy = true): array
     {
         // The scheduler passes the key the awaiting fiber computed, because
         // the tenant it was namespaced under is the one being re-entered, not
@@ -1930,7 +2084,9 @@ final class Orm
 
         // A statement is about to run: told to a test recording lazy loads,
         // with whether it ran in a batch. Never evaluated otherwise.
-        $this->lazyLoads?->record(new LazyLoad($relation->key(), \count($parents), $batch ?? self::batchOf($parents)));
+        if ($lazy) {
+            $this->lazyLoads?->record(new LazyLoad($relation->key(), \count($parents), $batch ?? self::batchOf($parents)));
+        }
 
         $ids = array_keys($groupKeys);
         $targetMeta = Metadata::for($relation->target);

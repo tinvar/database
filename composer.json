@@ -20,7 +20,8 @@
       "Tinvar\\Orm\\": "src/Orm/"
     },
     "files": [
-      "aliases.php"
+      "aliases.php",
+      "functions.php"
     ]
   },
   "config": { "sort-packages": true },

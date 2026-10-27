@@ -893,7 +893,7 @@ final class PdoConnection implements Connection, TenantSetting
      */
     private static function bind(\PDOStatement $statement, array $bindings): void
     {
-        foreach (array_values($bindings) as $i => $value) {
+        foreach ($bindings as $i => $value) {
             $statement->bindValue($i + 1, $value, match (true) {
                 \is_int($value) => \PDO::PARAM_INT,
                 $value === null => \PDO::PARAM_NULL,

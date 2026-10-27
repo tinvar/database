@@ -44,6 +44,22 @@ abstract class Model
         return Metadata::for(static::class);
     }
 
+    /**
+     * A query over this model's rows, read through $orm.
+     *
+     * The spec writes `Rack::query()`. The Orm is passed rather than found:
+     * a model reaching for an Orm held statically would hold the one a
+     * worker built, across every request it serves, and a query made in a
+     * fiber would read whichever request last set it (ADR 0057).
+     *
+     * @return Query<static>
+     */
+    #[\NoDiscard]
+    public static function query(Orm $orm): Query
+    {
+        return Query::of($orm, static::class);
+    }
+
     public function primaryKey(): string
     {
         return static::meta()->keyOf($this);
