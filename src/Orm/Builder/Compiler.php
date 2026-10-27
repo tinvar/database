@@ -9,6 +9,7 @@ use Tinvar\Orm\Nulls;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\Orm;
+use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\RelationKind;
 
 /**
@@ -205,13 +206,13 @@ final class Compiler
             case Condition::COMPARE:
                 \assert($condition->column !== null);
 
-                return [$expression($condition->column) . " {$condition->operator} ?", $condition->values];
+                return [$expression($condition->column) . " {$condition->operator} " . $this->placeholder($condition->values[0] ?? null), $condition->values];
 
             case Condition::IN:
                 \assert($condition->column !== null);
 
                 return [
-                    $expression($condition->column) . ($condition->not ? ' NOT IN (' : ' IN (') . self::placeholders(\count($condition->values)) . ')',
+                    $expression($condition->column) . ($condition->not ? ' NOT IN (' : ' IN (') . implode(', ', array_map($this->placeholder(...), $condition->values)) . ')',
                     $condition->values,
                 ];
 
@@ -227,8 +228,13 @@ final class Compiler
 
             case Condition::RAW:
                 $parts = [];
+                $param = 0;
                 foreach ($condition->tokens as [$kind, $text]) {
-                    $parts[] = $text instanceof ColumnRef ? $expression($text) : $text;
+                    $parts[] = match (true) {
+                        $text instanceof ColumnRef => $expression($text),
+                        $kind === 'param' => $this->placeholder($condition->values[$param++] ?? null),
+                        default => $text,
+                    };
                 }
 
                 return ['(' . implode(' ', $parts) . ')', $condition->values];
@@ -272,6 +278,25 @@ final class Compiler
     private function alias(): string
     {
         return 't' . $this->aliases++;
+    }
+
+    /**
+     * A value's placeholder: a float's cast to a float, elsewhere than on
+     * MySQL. Bound, it goes as text -- PDO has no float type -- and SQLite
+     * compares text with a number as greater where no column's affinity
+     * converts it (`position * ? > ?`), while Postgres takes the text for
+     * the column's type and refuses '2.5' for an integer. MySQL converts
+     * text it compares with a number, and has no CAST(... AS DOUBLE
+     * PRECISION) before 8.0.17.
+     */
+    private function placeholder(mixed $value): string
+    {
+        if (!\is_float($value)) {
+            return '?';
+        }
+        $connection = $this->orm->statements();
+
+        return $connection instanceof PdoConnection && $connection->driver() === 'mysql' ? '?' : 'CAST(? AS DOUBLE PRECISION)';
     }
 
     public static function placeholders(int $count): string

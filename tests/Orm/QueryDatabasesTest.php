@@ -55,6 +55,11 @@ function readsAlike(Orm $orm): void
         ->and($acme(static fn (): int => $orm->query(Shelf::class)->whereHas('items', static fn (Query $q): Query => $q->where('priceCents', '>', 900))->count()))->toBe(0)
         ->and($acme(static fn (): array => names($orm->query(Shelf::class)->whereDoesntHave('items')->fetch())))->toBe(['Charlie'])
         ->and($acme(static fn (): array => names($orm->query(Shelf::class)->whereRaw('position * ? > ?', [10, 25])->orderBy('name')->fetch())))->toBe(['Charlie', 'Foxtrot'])
+        // A float, which PDO binds as text: compared as a number on each,
+        // not as a string on SQLite nor refused for an integer on Postgres.
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->whereRaw('position * ? > ?', [1.5, 4.0])->orderBy('name')->fetch())))->toBe(['Charlie', 'Foxtrot'])
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->where('position', '>', 2.5)->orderBy('name')->fetch())))->toBe(['Charlie', 'Foxtrot'])
+        ->and($acme(static fn (): array => names($orm->query(Shelf::class)->whereIn('position', [3.0, 4.5])->orderBy('name')->fetch())))->toBe(['Charlie'])
         ->and($acme(static fn (): int|float => $orm->query(Item::class)->sum('priceCents')))->toBe(700)
         ->and($acme(static fn (): array => array_map('strval', $orm->query(Item::class)->orderBy('priceCents')->limit(2)->offset(1)->pluck('priceCents'))))->toBe(['100', '250'])
         ->and($acme(static fn (): array => names($orm->query(Shelf::class)->orderBy('position')->paginate(2, 3)->items)))->toBe(['Foxtrot'])
