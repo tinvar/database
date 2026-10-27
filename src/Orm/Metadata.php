@@ -11,6 +11,7 @@ use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
+use Tinvar\Orm\Attributes\Unique;
 use Tinvar\Support\KnownAttributes;
 use Tinvar\Support\Str;
 
@@ -115,6 +116,7 @@ final class Metadata
         if ($idProperty === null) {
             throw MappingException::noId($class);
         }
+        $tenantColumn = $tenant?->newInstance()->column;
 
         return new ModelMeta(
             class: $class,
@@ -123,7 +125,7 @@ final class Metadata
             idColumn: $columns[$idProperty],
             columns: $columns,
             relations: $relations,
-            tenantColumn: $tenant?->newInstance()->column,
+            tenantColumn: $tenantColumn,
             decoder: self::compileDecoder($plan),
             filler: self::compileFiller($class),
             readKey: self::compileKeyReader($class, $idProperty),
@@ -131,7 +133,67 @@ final class Metadata
             read: self::compileReader($class),
             columnReader: self::compileColumnReader($class, $plan),
             beforeSave: self::compileBeforeSave($reflection),
+            uniqueKeys: self::compileUniqueKeys($reflection, $columns, $relations, $columns[$idProperty], $tenantColumn),
         );
+    }
+
+    /**
+     * The model's #[Unique] keys, each as the columns it names, in the
+     * order written: what an upsert may conflict on (ADR 0057).
+     *
+     * A name is looked up as the query builder looks one up -- a property
+     * mapping a column, a #[BelongsTo] property for its foreign key, or a
+     * column -- and one that is none of them is refused when the model
+     * compiles, not at the first upsert. The key and the tenant column are
+     * no part of one: the key is unique already, and the tenant column
+     * leads every key of a #[TenantScoped] model by itself.
+     *
+     * @param \ReflectionClass<Model> $reflection
+     * @param array<string, string> $columns property => column
+     * @param array<string, RelationMeta> $relations
+     * @return list<list<string>>
+     */
+    private static function compileUniqueKeys(\ReflectionClass $reflection, array $columns, array $relations, string $idColumn, ?string $tenantColumn): array
+    {
+        $byName = $columns;
+        $own = array_values($columns);
+        foreach ($relations as $property => $relation) {
+            if ($relation->kind === RelationKind::BelongsTo) {
+                $byName[$property] = $relation->foreignKey;
+                $own[] = $relation->foreignKey;
+            }
+        }
+
+        $keys = [];
+        foreach ($reflection->getAttributes(Unique::class, \ReflectionAttribute::IS_INSTANCEOF) as $attribute) {
+            $names = $attribute->newInstance()->columns;
+            if ($names === []) {
+                throw new MappingException("{$reflection->getName()}: #[Unique] names no column.");
+            }
+
+            $key = [];
+            foreach ($names as $name) {
+                $column = $byName[$name] ?? (\in_array($name, [...$own, $tenantColumn], true) ? $name : null);
+                if ($column === null) {
+                    throw new MappingException(
+                        "{$reflection->getName()}: #[Unique] names '{$name}', which is no column, property or #[BelongsTo] of the model.",
+                    );
+                }
+                if ($column === $idColumn || $column === $tenantColumn) {
+                    throw new MappingException(
+                        "{$reflection->getName()}: #[Unique] names '{$name}'. The key is unique already, and the tenant "
+                        . 'column leads every key of a #[TenantScoped] model by itself.',
+                    );
+                }
+                if (\in_array($column, $key, true)) {
+                    throw new MappingException("{$reflection->getName()}: #[Unique] names '{$column}' twice.");
+                }
+                $key[] = $column;
+            }
+            $keys[] = $key;
+        }
+
+        return $keys;
     }
 
     /**

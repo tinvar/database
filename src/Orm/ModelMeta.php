@@ -26,6 +26,7 @@ final class ModelMeta
      * @param \Closure(Model, string, mixed): void $write
      * @param \Closure(Model, string): mixed      $read
      * @param list<\Closure(Model): void>  $beforeSave the #[BeforeSave] methods, in the order they run
+     * @param list<list<string>>           $uniqueKeys each #[Unique] key, as its columns, without the tenant column
      */
     public function __construct(
         public readonly string $class,
@@ -42,8 +43,41 @@ final class ModelMeta
         private readonly \Closure $read,
         private readonly \Closure $columnReader,
         private readonly array $beforeSave = [],
+        public readonly array $uniqueKeys = [],
     ) {
         $this->saving = new \WeakMap();
+    }
+
+    /**
+     * Whether a save runs #[BeforeSave] methods: what a write through a
+     * query, which makes no model to run them on, refuses to write past.
+     */
+    public function hasBeforeSave(): bool
+    {
+        return $this->beforeSave !== [];
+    }
+
+    /**
+     * The #[Unique] key whose columns are $columns, in any order, with the
+     * tenant column leading it on a #[TenantScoped] model: an upsert's
+     * conflict target. Null where the model declares no such key.
+     *
+     * @param list<string> $columns
+     * @return non-empty-list<string>|null
+     */
+    public function conflictTarget(array $columns): ?array
+    {
+        $wanted = $columns;
+        sort($wanted);
+        foreach ($this->uniqueKeys as $key) {
+            $sorted = $key;
+            sort($sorted);
+            if ($sorted === $wanted && $key !== []) {
+                return $this->tenantColumn === null ? $key : [$this->tenantColumn, ...$key];
+            }
+        }
+
+        return null;
     }
 
     /**

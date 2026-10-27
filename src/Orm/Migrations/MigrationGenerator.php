@@ -186,14 +186,14 @@ final class MigrationGenerator
      * What the models describe, by table.
      *
      * @param list<class-string<Model>> $models
-     * @return array<string, array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>}>
+     * @return array<string, array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>}>
      */
     private function wanted(array $models): array
     {
         $tables = [];
         foreach ($models as $model) {
             $meta = Metadata::for($model);
-            $table = $tables[$meta->table] ?? ['columns' => [], 'indexes' => [], 'tenant' => null, 'keys' => []];
+            $table = $tables[$meta->table] ?? ['columns' => [], 'indexes' => [], 'tenant' => null, 'keys' => [], 'uniques' => []];
 
             foreach ($meta->columns as $property => $column) {
                 $table['columns'][$column] = $property === $meta->idProperty
@@ -218,6 +218,15 @@ final class MigrationGenerator
             if ($meta->tenantColumn !== null) {
                 $table['tenant'] = $meta->tenantColumn;
                 unset($table['columns'][$meta->tenantColumn]);
+            }
+
+            // Each #[Unique] key, the tenant column first on a tenant's
+            // table: the index an upsert's conflict target has to match.
+            foreach ($meta->uniqueKeys as $key) {
+                $unique = $meta->tenantColumn === null ? $key : [$meta->tenantColumn, ...$key];
+                if (!\in_array($unique, $table['uniques'], true)) {
+                    $table['uniques'][] = $unique;
+                }
             }
             $tables[$meta->table] = $table;
         }
@@ -316,7 +325,7 @@ final class MigrationGenerator
      * matched to the one table no model maps whose columns are the wanted
      * table's exactly -- and only where neither could be matched to another.
      *
-     * @param array<string, array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>}> $wanted
+     * @param array<string, array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>}> $wanted
      * @return array<string, string> the wanted name => the database's name
      */
     private function tableRenames(array $wanted): array
@@ -357,7 +366,7 @@ final class MigrationGenerator
      * their undoing. $live is the name the database has the table under: a
      * table renamed by this migration is read under its old name.
      *
-     * @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>} $table
+     * @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>} $table
      * @return array{list<string>, list<string>, bool} up, down, and whether there is anything to do
      */
     private function changes(string $name, array $table, string $live): array
@@ -461,6 +470,27 @@ final class MigrationGenerator
             }
             $additions[] = "            \$table->index({$this->phpList($columnsOfIndex)});";
             $undoIndexes[] = Index::of($name, $columnsOfIndex, false, null)->name;
+        }
+
+        // A unique key is there when a unique index has its columns, in any
+        // order: the set is what a conflict target matches.
+        $liveUniques = [];
+        foreach ($liveIndexes as $index) {
+            if ($index['unique']) {
+                $columnsOfIndex = $index['columns'];
+                sort($columnsOfIndex);
+                $liveUniques[] = $columnsOfIndex;
+            }
+        }
+        foreach ($table['uniques'] as $columnsOfIndex) {
+            $sorted = $columnsOfIndex;
+            sort($sorted);
+            if (\in_array($sorted, $liveUniques, true)) {
+                continue;
+            }
+            $comments[] = "{$name} gets a unique index over (" . implode(', ', $columnsOfIndex) . '), which rows already sharing those values refuse: find them first.';
+            $additions[] = "            \$table->unique({$this->phpList($columnsOfIndex)});";
+            $undoIndexes[] = Index::of($name, $columnsOfIndex, true, null)->name;
         }
 
         $comments = [...$comments, ...$this->staleIndexes($name, $table, $liveIndexes)];
@@ -621,7 +651,7 @@ final class MigrationGenerator
      * its orderBy changes. An index is no data, but it may serve a query no
      * model knows of, so it is said rather than dropped.
      *
-     * @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>} $table
+     * @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>} $table
      * @param list<array{name: string, columns: list<string>, unique: bool}> $live
      * @return list<string>
      */
@@ -706,7 +736,7 @@ final class MigrationGenerator
         }
     }
 
-    /** @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>} $table */
+    /** @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>} $table */
     private function renderCreate(string $name, array $table): string
     {
         $lines = [];
@@ -718,6 +748,9 @@ final class MigrationGenerator
         }
         foreach ($table['indexes'] as $columns) {
             $lines[] = "            \$table->index({$this->phpList($columns)});";
+        }
+        foreach ($table['uniques'] as $columns) {
+            $lines[] = "            \$table->unique({$this->phpList($columns)});";
         }
 
         return "        \$schema->create({$this->php($name)}, function (Table \$table): void {\n" . implode("\n", $lines) . "\n        });";
@@ -787,7 +820,7 @@ final class MigrationGenerator
      * MySQL check a foreign key's table exists when the key is made. A cycle
      * keeps the models' order, and fails there for whoever reviews it.
      *
-     * @template T of array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>}
+     * @template T of array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>}
      * @param array<string, T> $tables
      * @return array<string, T>
      */
