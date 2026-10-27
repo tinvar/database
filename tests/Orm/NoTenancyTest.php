@@ -126,3 +126,23 @@ describe('a tenant\'s name', function () {
             ->and($orm->actAs('acme', static fn (): string => $orm->tenant()))->toBe('acme');
     });
 });
+
+describe('an actAs() refused for its tenant\'s name', function () {
+    // Refused before it changes anything: the scope around it -- an
+    // acrossTenants(), a subtree read -- goes on exactly as it was, rather
+    // than narrowed, or widened, for the rest of the work it encloses.
+    it('leaves the scope around it as it was', function () {
+        $orm = new Orm((new TenantFixture())->connection, tenants: Tenancy::flat());
+
+        $after = $orm->actAs('acme', static fn (): array => $orm->acrossTenants(static function () use ($orm): array {
+            try {
+                $orm->actAs("acme\n", static fn () => null);
+            } catch (\InvalidArgumentException) {
+            }
+
+            return [$orm->tenant(), $orm->isUnscoped()];
+        }));
+
+        expect($after)->toBe(['acme', true]);
+    });
+});

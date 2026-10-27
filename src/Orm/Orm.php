@@ -323,12 +323,7 @@ final class Orm
      */
     public function switchTenant(string $tenant): void
     {
-        // A tenant's name is printable text: what a Postgres setting can
-        // carry, and never the claim a token minted with no tenancy carries,
-        // which is spelled with a control character (TenantBounds::isName()).
-        if ($tenant !== '' && !TenantBounds::isName($tenant)) {
-            throw new \InvalidArgumentException('A tenant\'s name has no control character in it.');
-        }
+        self::assertTenantName($tenant);
         if ($tenant === $this->identityMap->tenant()) {
             return;
         }
@@ -360,6 +355,18 @@ final class Orm
     public function tenant(): string
     {
         return $this->identityMap->tenant();
+    }
+
+    /**
+     * A tenant's name is printable text: what a Postgres setting can carry,
+     * and never the claim a token minted with no tenancy carries, which is
+     * spelled with a control character (TenantBounds::isName()).
+     */
+    private static function assertTenantName(string $tenant): void
+    {
+        if ($tenant !== '' && !TenantBounds::isName($tenant)) {
+            throw new \InvalidArgumentException('A tenant\'s name has no control character in it.');
+        }
     }
 
     /**
@@ -413,6 +420,11 @@ final class Orm
      */
     public function actAs(string $tenant, \Closure $work): mixed
     {
+        // Refused before anything below changes: the scope lifted and the
+        // subtree dropped here would otherwise stay so for the rest of the
+        // work around this call, with no finally to put them back.
+        self::assertTenantName($tenant);
+
         $previous = $this->identityMap->tenant();
         $previousUnscoped = $this->unscopedDepth();
         $previousSubtree = $this->subtreeState();
