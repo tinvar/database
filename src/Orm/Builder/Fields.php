@@ -144,6 +144,21 @@ final class Fields
             return self::hooked($meta, $scratch, $stored, $tenant);
         }
 
+        // A copy reads the row as it was: but MySQL works a single-table
+        // UPDATE's assignments out left to right, each seeing those before
+        // it, where Postgres and SQLite read every one from the old row. A
+        // copy from a column the same write sets would store one value on
+        // MySQL and another elsewhere, so it is refused on all of them.
+        foreach ($stored as $column => $value) {
+            if ($value instanceof Assignment && $value->source !== null && $value->source !== $column
+                && (\array_key_exists($value->source, $stored) || \in_array($value->source, $properties, true))) {
+                throw new \InvalidArgumentException(
+                    "{$meta->class}: '{$column}' copies {$value->source}, which this write sets as well; "
+                    . 'a database may read either value. Copy in one update() and set it in another.',
+                );
+            }
+        }
+
         // Each through the model's column reader, as save() stores it.
         $read = $meta->columnValues($scratch);
         foreach ($properties as $column) {
