@@ -23,7 +23,7 @@
     },
     "files": [
       "aliases.php",
-      "functions.php"
+      "src/Orm/functions.php"
     ]
   },
   "config": { "sort-packages": true },
