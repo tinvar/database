@@ -387,7 +387,10 @@ final readonly class Query
             [...$bindings, ...$tailBindings],
         );
 
-        return array_column($rows, 'value');
+        $values = array_column($rows, 'value');
+        $this->orm->recordColumnRead($this->ownerOf($ref), $ref->column, $values);
+
+        return $values;
     }
 
     /** The sum of a column over the matching rows: 0 for none. */
@@ -1301,7 +1304,28 @@ final readonly class Query
         $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref]);
         [$body, $bindings] = $scope->body();
 
-        return $this->orm->statements()->select("SELECT {$function}(" . $scope->expression($ref) . ') AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? null;
+        $value = $this->orm->statements()->select("SELECT {$function}(" . $scope->expression($ref) . ') AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? null;
+        // MIN() and MAX() answer one of the column's own values.
+        $this->orm->recordColumnRead($this->ownerOf($ref), $ref->column, [$value]);
+
+        return $value;
+    }
+
+    /**
+     * The model whose table $ref's column is on: this query's, or the one
+     * its #[BelongsTo] path ends at.
+     *
+     * @return class-string<Model>
+     */
+    private function ownerOf(ColumnRef $ref): string
+    {
+        $meta = $this->meta;
+        foreach ($ref->path as $property) {
+            $relation = $meta->relations[$property] ?? throw new \LogicException("No relation '{$property}' on {$meta->class}.");
+            $meta = Metadata::for($relation->target);
+        }
+
+        return $meta->class;
     }
 
     /**

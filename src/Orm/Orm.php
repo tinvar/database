@@ -127,6 +127,17 @@ final class Orm
     private ?array $reads = null;
 
     /**
+     * Every string a column read without a model -- pluck(), min(), max()
+     * -- returned while reads are recorded, by the model and column it is
+     * of: the model-leak check looks for these as it does for a model's
+     * columns, or `pluck('passwordHash')` copied into a Data field would
+     * pass it. Null while recording is off.
+     *
+     * @var list<array{model: class-string<Model>, column: string, value: string}>|null
+     */
+    private ?array $columnReads = null;
+
+    /**
      * Whether tenancy was registered with this Orm: without it, no
      * #[TenantScoped] model is read or written at all.
      */
@@ -237,6 +248,42 @@ final class Orm
     public function recordReads(bool $on): void
     {
         $this->reads = $on ? ($this->reads ?? []) : null;
+        $this->columnReads = $on ? ($this->columnReads ?? []) : null;
+    }
+
+    /**
+     * Records the strings a read of one column without a model returned,
+     * while reads are recorded; nothing otherwise.
+     *
+     * @param class-string<Model> $model
+     * @param list<mixed> $values
+     *
+     * @internal for the query builder and the testing layer
+     */
+    public function recordColumnRead(string $model, string $column, array $values): void
+    {
+        if ($this->columnReads === null) {
+            return;
+        }
+        foreach ($values as $value) {
+            if (\is_string($value)) {
+                $this->columnReads[] = ['model' => $model, 'column' => $column, 'value' => $value];
+            }
+        }
+    }
+
+    /**
+     * What reads of one column without a model returned since recording was
+     * turned on, or since the last flush(); none while it is off.
+     *
+     * @return list<array{model: class-string<Model>, column: string, value: string}>
+     *
+     * @internal for the testing layer (tinvar/testing), released with this
+     *     package at one version; not for applications
+     */
+    public function columnReadsRecorded(): array
+    {
+        return $this->columnReads ?? [];
     }
 
     /**
@@ -341,6 +388,9 @@ final class Orm
         $this->entered = [];
         if ($this->reads !== null) {
             $this->reads = [];
+        }
+        if ($this->columnReads !== null) {
+            $this->columnReads = [];
         }
 
         // A transaction still open here was left in a fiber nobody resumes.
