@@ -1138,7 +1138,7 @@ final class Orm
         // foreign id is a 404" and hands a policy a phantom subject.
         // isPersisted() is true only after markClean() -- hydrate from a real
         // row, or an insert -- so it separates both ghost cases from a read.
-        // QueryRunner::resolveModels() guards the same way; every other
+        // The query runner's resolveModels() guards the same way; every other
         // resolution path (Binder, ActionRunner, Validator) comes through
         // here, so the guard belongs here too.
         if (!$this->isWidened() && ($existing = $this->identityMap->get($class, $id))) {

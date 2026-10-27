@@ -9,7 +9,7 @@ namespace Tinvar\Orm;
  * (Orm::recordLazyLoads()), in order.
  *
  * Only a test turns this on: the testing layer, for the application under
- * test (Testing::use()), or an ORM test for an Orm of its own. Nothing in a
+ * test (through its use()), or an ORM test for an Orm of its own. Nothing in a
  * request does, so a worker never holds one.
  */
 final class LazyLoads
