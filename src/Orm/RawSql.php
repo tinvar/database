@@ -106,6 +106,22 @@ final class RawSql
         foreach ($matches as $match) {
             [$text, $at] = $match[0];
             $text = (string) $text;
+            // What one database reads otherwise than this pattern: a
+            // backslash escaping a quote (MySQL, Postgres's E''), a comment
+            // MySQL runs (`/*! ... */`) or does not take for one (`--x`),
+            // and a dollar quote, which is a name on MySQL. Unread, so it
+            // may name every table.
+            $literal = $match['literal'][0] ?? null;
+            $comment = $match['comment'][0] ?? null;
+            $unread = match (true) {
+                $literal !== null => str_contains($literal, '\\') || ($match['tag'][0] ?? null) !== null,
+                $comment !== null => str_starts_with($comment, '/*!')
+                    || (str_starts_with($comment, '--') && preg_match('/^--(\s|$)/', $comment) !== 1),
+                default => false,
+            };
+            if ($unread) {
+                return null;
+            }
             $name = match (true) {
                 ($match['bare'][0] ?? null) !== null => $text,
                 ($match['quoted'][0] ?? null) !== null => self::unquote($text),

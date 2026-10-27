@@ -35,8 +35,13 @@ describe('RawSql', function () {
         'a subquery' => ['SELECT id FROM brands WHERE id IN (SELECT brand_id FROM shelves)', ['shelves']],
         'in a literal' => ["SELECT 'shelves', 'it''s shelves' AS x FROM brands", []],
         'in a comment' => ["SELECT 1 -- shelves\n/* items */", []],
-        'a dollar quote' => ['SELECT $q$ shelves $q$', []],
         'nothing' => ['SELECT 1', []],
+        // Each read otherwise by a database than by the pattern, which may
+        // hide a table there: flagged as naming every one.
+        'a comment MySQL runs' => ['SELECT * FROM /*! shelves */', ['shelves', 'app.items']],
+        'a backslash in a literal' => ["SELECT '\\'', x FROM shelves WHERE a = ''", ['shelves', 'app.items']],
+        'a dollar quote, a name on MySQL' => ['SELECT id AS $x$ FROM shelves ORDER BY $x$', ['shelves', 'app.items']],
+        '-- with no space, no comment on MySQL' => ["SELECT 5--1 FROM shelves\n", ['shelves', 'app.items']],
     ]);
 
     it('shows a statement with its literals taken out, cut short', function () {
