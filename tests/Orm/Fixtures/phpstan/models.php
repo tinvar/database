@@ -6,9 +6,11 @@ namespace Tinvar\Tests\Orm\PHPStanFixture;
 
 use Tinvar\Orm\Attributes\BelongsTo;
 use Tinvar\Orm\Attributes\Column;
+use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
+use Tinvar\Orm\Collection;
 use Tinvar\Orm\Model;
 
 /*
@@ -21,6 +23,10 @@ final class Pallet extends Model
 {
     #[Id] public private(set) string $id;
     #[Column] public string $code;
+
+    /** @var Collection<Crate> */
+    #[HasMany(Crate::class)]
+    public Collection $crates;
 }
 
 #[Table('crates'), TenantScoped]

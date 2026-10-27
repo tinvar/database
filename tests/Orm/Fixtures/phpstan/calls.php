@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Tests\Orm\PHPStanFixture;
 
+use Tinvar\Orm\Aggregate;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\Query;
@@ -39,6 +40,36 @@ function calls(Orm $orm, string $fromRuntime): void
     $_ = $orm->query(Crate::class)->whereNotIn('weigth_kg', [1]); // refused
     $_ = $query->pluck('label');
     $_ = $query->sum('secret'); // refused
+
+    // Groups, aggregates, collections and writes (ADR 0064).
+    $pallets = Pallet::query($orm);
+    $_ = $pallets->where('crates.label', 'x');
+    $_ = $pallets->whereIn('crates.lable', ['x']); // refused
+    $_ = $pallets->orderBy('crates.label'); // refused
+    $_ = $pallets->withCount('crates');
+    $_ = $pallets->withCount('crate'); // refused
+    $_ = $pallets->withSum('crates', 'weightKg');
+    $_ = $pallets->withSum('crates', 'weight'); // refused
+    $_ = $pallets->withMax(relation: 'crates', column: 'wieghtKg'); // refused
+    $_ = $pallets->orderByRelation('crates', Aggregate::Max, 'weightKg', 'desc');
+    $_ = $pallets->orderByRelation('crates', Aggregate::Max, 'weight_kgs'); // refused
+    $_ = $query->withCount('pallet'); // refused
+    $_ = $query->groupBy('label', 'pallet.code');
+    $_ = $query->groupBy('label', 'pallet.cod'); // refused
+    $_ = $query->having(Aggregate::Count, null, '>', 1);
+    $_ = $query->having(Aggregate::Sum, 'weightKg', '>', 1);
+    $_ = $query->having(Aggregate::Sum, 'wieghtKg', '>', 1); // refused
+    $_ = $query->orderByAggregate(Aggregate::Sum, 'weight_kg');
+    $_ = $query->orderByAggregate(Aggregate::Sum, 'weight'); // refused
+    $_ = $query->groupBy('label')->report(\stdClass::class, ['label' => 'label', 'n' => Aggregate::Count, 'kg' => [Aggregate::Sum, 'weightKg']]);
+    $_ = $query->report(\stdClass::class, ['kg' => [Aggregate::Sum, 'wieghtKg']]); // refused
+    $_ = $query->report(\stdClass::class, ['label' => 'lable']); // refused
+    $query->increment('weightKg');
+    $query->decrement('weightKg', 2, ['label' => 'x']);
+    $query->increment('wieghtKg'); // refused
+    $query->increment('pallet.code'); // refused
+    $query->update(['label' => 'x', 'weightKg' => 3]);
+    $query->update(['lable' => 'x']); // refused
 
     // Known only at runtime: the builder's to check when it runs.
     $_ = $query->where($fromRuntime, 'x');
