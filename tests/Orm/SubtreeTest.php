@@ -17,13 +17,10 @@ namespace Tinvar\Tests\Orm\Subtree;
 use Tinvar\Orm\MissingRow;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\TenantBounds;
-use Tinvar\Orm\TenantHierarchy;
 use Tinvar\Orm\TenantSubtrees;
-use Tinvar\Orm\TenantTree;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\ScriptRun;
 use Tinvar\Tests\Orm\Fixtures\Hierarchy\Tenants;
-use Tinvar\Tests\Orm\Fixtures\Hierarchy\Tree;
 
 require_once __DIR__ . '/Fixtures/hierarchy.php';
 
@@ -46,105 +43,24 @@ function across(Orm $orm, string $tenant, \Closure $work): mixed
     return $orm->actAs($tenant, static fn (): mixed => $orm->grantSubtree(static fn (): mixed => $orm->withinSubtree($work)));
 }
 
-/** A tree read through closures, for the shapes a real one must not take. */
-function treeOf(\Closure $parentOf, \Closure $descendantsOf): TenantHierarchy
-{
-    return new TenantHierarchy(new readonly class ($parentOf, $descendantsOf) implements TenantTree {
-        public function __construct(private \Closure $parentOf, private \Closure $descendantsOf) {}
-
-        public function parentOf(string $tenant): ?string
-        {
-            return ($this->parentOf)($tenant);
-        }
-
-        public function descendantsOf(string $tenant): array
-        {
-            return ($this->descendantsOf)($tenant);
-        }
-    });
-}
-
-describe('the hierarchy', function () {
-    it('places a tenant under its parent and every ancestor, and nowhere else', function () {
-        $tenants = new TenantHierarchy(new Tree());
-
-        expect($tenants->contains('reseller', 'acme-west'))->toBeTrue()
-            ->and($tenants->contains('acme', 'acme-west'))->toBeTrue()
-            ->and($tenants->contains('reseller', 'reseller'))->toBeTrue()
-            ->and($tenants->contains('acme', 'reseller'))->toBeFalse()
-            ->and($tenants->contains('acme', 'globex'))->toBeFalse()
-            ->and($tenants->contains('reseller', 'other'))->toBeFalse()
-            ->and($tenants->contains('reseller', 'nobody'))->toBeFalse()
-            ->and($tenants->contains('', 'acme'))->toBeFalse()
-            ->and($tenants->contains('reseller', ''))->toBeFalse();
-    });
-
-    // Walked up from the tenant, so the answer costs its depth, not the
-    // size of the subtree it is asked about.
-    it('answers by walking up from the tenant, one parent at a time', function () {
-        $tree = new Tree();
-
-        new TenantHierarchy($tree)->contains('reseller', 'acme-west');
-
-        expect($tree->asked)->toBe(2);
-    });
-
-    it('refuses rather than admits on a tree that loops or goes deeper than any real one', function () {
-        $loop = treeOf(static fn (string $t): string => $t === 'a' ? 'b' : 'a', static fn (): array => []);
-        $deep = treeOf(static fn (string $t): ?string => $t === 'level-0' ? null : 'level-' . ((int) substr($t, 6) - 1), static fn (): array => []);
-
-        expect($loop->contains('root', 'a'))->toBeFalse()
-            ->and($deep->contains('level-0', 'level-' . TenantHierarchy::MAX_DEPTH))->toBeTrue()
-            ->and($deep->contains('level-0', 'level-' . (TenantHierarchy::MAX_DEPTH + 1)))->toBeFalse();
-    });
-
-    it('gives a subtree root first, each tenant once', function () {
-        $doubled = treeOf(static fn (): ?string => null, static fn (): array => ['acme', '', 'acme', 'reseller', 'globex']);
-
-        expect(new TenantHierarchy(new Tree())->subtree('reseller'))->toBe(['reseller', 'acme', 'globex', 'acme-west'])
-            ->and(new TenantHierarchy(new Tree())->subtree('acme-west'))->toBe(['acme-west'])
-            ->and($doubled->subtree('reseller'))->toBe(['reseller', 'acme', 'globex']);
-    });
-
-    // A part of a subtree would be a silently wrong answer.
-    it('refuses a subtree larger than a read can carry, rather than reading part of it', function () {
-        $huge = treeOf(static fn (): ?string => null, static fn (): array => array_map(
-            static fn (int $i): string => "t{$i}",
-            range(1, TenantHierarchy::MAX_SUBTREE),
-        ));
-
-        expect(fn () => $huge->subtree('root'))->toThrow(\LengthException::class, 'more than the 1000');
-    });
-
+describe('the tree', function () {
     // The Orm takes the tree through a port, and reads every answer through
     // its own final TenantBounds, so the limits hold whatever implementation
-    // it is given (ADR 0056; TreeBoundsTest gives it ones that drop them).
+    // it is given (ADR 0056; TreeBoundsTest gives it ones that drop them,
+    // and tinvar/tenancy's TenantHierarchy is tested with tenancy).
     it('is read by the Orm through its own checks, whatever implements the port', function () {
         $parameter = new \ReflectionMethod(Orm::class, '__construct')->getParameters()[2];
         $type = $parameter->getType();
-        $orm = new Orm(new Tenants()->connection, tenants: new TenantHierarchy(new Tree()));
+        $orm = new Tenants()->orm();
 
         expect($parameter->getName())->toBe('tenants')
             ->and($type instanceof \ReflectionNamedType ? $type->getName() : null)->toBe(TenantSubtrees::class)
             ->and(new \ReflectionClass(TenantBounds::class)->isFinal())->toBeTrue()
             ->and(new \ReflectionMethod(Orm::class, 'tenants')->getReturnType()?->__toString())->toBe('?' . TenantBounds::class)
             ->and($orm->tenants())->toBeInstanceOf(TenantBounds::class)
-            ->and($orm->tenants()?->contains('reseller', 'acme-west'))->toBeTrue();
-    });
-
-    it('keeps its names from before the split as aliases, for one release', function () {
-        set_error_handler(static fn (int $level): bool => $level === \E_USER_DEPRECATED);
-
-        try {
-            $hierarchy = new \Tinvar\Tenancy\TenantHierarchy(new Tree());
-            $tree = new \ReflectionClass('Tinvar\Tenancy\TenantTree')->getName();
-        } finally {
-            restore_error_handler();
-        }
-
-        expect($hierarchy)->toBeInstanceOf(TenantHierarchy::class)
-            ->and($tree)->toBe(TenantTree::class)
-            ->and($hierarchy->contains('reseller', 'acme-west'))->toBeTrue();
+            ->and($orm->tenants()?->contains('reseller', 'acme-west'))->toBeTrue()
+            ->and($orm->tenants()?->contains('acme', 'globex'))->toBeFalse()
+            ->and($orm->tenants()?->subtree('reseller'))->toBe(['reseller', 'acme', 'globex', 'acme-west']);
     });
 });
 

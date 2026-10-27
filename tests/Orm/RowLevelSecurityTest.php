@@ -22,8 +22,6 @@ use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\RowLevelSecurity;
 use Tinvar\Support\Uuid;
-use Tinvar\Orm\TenantHierarchy;
-use Tinvar\Orm\TenantTree;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Script;
 use Tinvar\Tests\Orm\Fixtures\Databases;
@@ -85,20 +83,6 @@ describe('the policy', function () {
     });
 });
 
-/** globex under acme, here: the two tenants withPolicies() seeds, one below the other. */
-final class AcmeOverGlobex implements TenantTree
-{
-    public function parentOf(string $tenant): ?string
-    {
-        return $tenant === 'globex' ? 'acme' : null;
-    }
-
-    public function descendantsOf(string $tenant): array
-    {
-        return $tenant === 'acme' ? ['globex'] : [];
-    }
-}
-
 /** @return list<string> the names a raw query with no tenant predicate reads */
 function rawNames(PdoConnection $connection): array
 {
@@ -138,7 +122,7 @@ describe('on Postgres', function () {
     // while it is in force -- and the tenant alone again after.
     it('widens the policy to the subtree inside withinSubtree(), and to the tenant alone after', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'), new TenantHierarchy(new AcmeOverGlobex()));
+            $orm = new Orm($connection, new IdentityMap('test'), Tenancy::tree(['globex' => 'acme']));
             $across = static fn (string $tenant): array => $orm->actAs($tenant, static fn (): array => $orm->grantSubtree(
                 static fn (): array => $orm->withinSubtree(static fn (): array => rawNames($connection)),
             ));
@@ -152,7 +136,7 @@ describe('on Postgres', function () {
 
     it('lets a raw write inside the subtree, and refuses one outside it', function () {
         withPolicies(function (PdoConnection $connection): void {
-            $orm = new Orm($connection, new IdentityMap('test'), new TenantHierarchy(new AcmeOverGlobex()));
+            $orm = new Orm($connection, new IdentityMap('test'), Tenancy::tree(['globex' => 'acme']));
             $write = static fn (string $tenant): int => $orm->actAs('acme', static fn (): int => $orm->grantSubtree(
                 static fn (): int => $orm->withinSubtree(static fn (): int => $connection->execute(
                     'INSERT INTO scripts VALUES (?, ?, ?)',

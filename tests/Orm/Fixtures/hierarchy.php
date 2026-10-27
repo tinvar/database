@@ -8,8 +8,6 @@ use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Support\Uuid;
-use Tinvar\Orm\TenantHierarchy;
-use Tinvar\Orm\TenantTree;
 use Tinvar\Tests\Orm\Fixtures\Tenancy;
 
 require_once __DIR__ . '/tenant.php';
@@ -23,42 +21,14 @@ require_once __DIR__ . '/tenant.php';
  *     │   └── acme-west
  *     └── globex
  */
-final class Tree implements TenantTree
+final class Tree
 {
-    /** @var array<string, string> child => parent */
-    public array $parents = [
+    /** child => parent */
+    public const array PARENTS = [
         'acme' => 'reseller',
         'globex' => 'reseller',
         'acme-west' => 'acme',
     ];
-
-    /** How many times each question was asked, for tests of what a check costs. */
-    public int $asked = 0;
-
-    public function parentOf(string $tenant): ?string
-    {
-        $this->asked++;
-
-        return $this->parents[$tenant] ?? null;
-    }
-
-    public function descendantsOf(string $tenant): array
-    {
-        $this->asked++;
-        $found = [];
-        $queue = [$tenant];
-        while ($queue !== []) {
-            $node = array_shift($queue);
-            foreach ($this->parents as $child => $parent) {
-                if ($parent === $node && !\in_array($child, $found, true)) {
-                    $found[] = $child;
-                    $queue[] = $child;
-                }
-            }
-        }
-
-        return $found;
-    }
 }
 
 /** Each tenant's one script, and a run under it, in a database of their own. */
@@ -87,8 +57,15 @@ final class Tenants
         $this->connection = new PdoConnection($pdo, 'hierarchy-test');
     }
 
-    public function orm(?Tree $tree = new Tree()): Orm
+    /**
+     * An Orm over the tree, as tinvar/tenancy would register one -- through
+     * this suite's own port, which the database's suite runs without -- or
+     * over tenants side by side, for null.
+     *
+     * @param array<string, string>|null $parents child => parent
+     */
+    public function orm(?array $parents = Tree::PARENTS): Orm
     {
-        return new Orm($this->connection, new IdentityMap('hierarchy-test'), $tree === null ? Tenancy::flat() : new TenantHierarchy($tree));
+        return new Orm($this->connection, new IdentityMap('hierarchy-test'), $parents === null ? Tenancy::flat() : Tenancy::tree($parents));
     }
 }
