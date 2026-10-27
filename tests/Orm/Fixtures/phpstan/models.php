@@ -10,6 +10,7 @@ use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
+use Tinvar\Orm\Attributes\Unique;
 use Tinvar\Orm\Collection;
 use Tinvar\Orm\Model;
 
@@ -29,7 +30,7 @@ final class Pallet extends Model
     public Collection $crates;
 }
 
-#[Table('crates'), TenantScoped]
+#[Table('crates'), TenantScoped, Unique('label')]
 final class Crate extends Model
 {
     #[Id] public private(set) string $id;

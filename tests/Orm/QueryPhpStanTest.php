@@ -79,5 +79,6 @@ it('reports every misspelt column, relation and raw condition, and nothing else'
         ->and($messages[0])->toContain("has no column 'lable'")
         ->and(implode("\n", $messages))->toContain('Connection::select() sends raw SQL on the tenant table crates: nothing adds the tenant predicate')
         ->and(implode("\n", $messages))->toContain('Connection::execute() sends raw SQL on the tenant table crate_events')
-        ->and(implode("\n", $messages))->toContain('Connection::select() is sent SQL PHPStan cannot read');
+        ->and(implode("\n", $messages))->toContain('Connection::select() is sent SQL PHPStan cannot read')
+        ->and(implode("\n", $messages))->toContain('Query<Tinvar\\Tests\\Orm\\PHPStanFixture\\Crate>::upsert(): Tinvar\\Tests\\Orm\\PHPStanFixture\\Crate declares no #[Unique] key over (weight_kg)');
 });

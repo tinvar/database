@@ -70,6 +70,16 @@ function calls(Orm $orm, string $fromRuntime): void
     $query->increment('pallet.code'); // refused
     $query->update(['label' => 'x', 'weightKg' => 3]);
     $query->update(['lable' => 'x']); // refused
+    $query->insert([['label' => 'x', 'weightKg' => 3], ['label' => 'y', 'weight_kg' => 4]]);
+    $query->insert([['label' => 'x', 'wieghtKg' => 3]]); // refused
+    $query->insert([['pallet.code' => 'x']]); // refused
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], 'label', update: ['weightKg']);
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], ['label']);
+    $query->upsert([['lable' => 'x', 'weightKg' => 3]], 'label'); // refused
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], 'weightKg'); // refused
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], uniqueBy: ['lable']); // refused
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], 'label', ['wieghtKg']); // refused
+    $query->upsert([['label' => 'x']], $fromRuntime);
 
     // Known only at runtime: the builder's to check when it runs.
     $_ = $query->where($fromRuntime, 'x');

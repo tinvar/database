@@ -47,8 +47,11 @@ use Tinvar\Orm\RelationKind;
  *     they read as an EXISTS -- orderBy(), pluck(), sum(), min(), max(),
  *     every column groupBy() names, and the column of having() and
  *     orderByAggregate();
- *   - a column of the model's own table: increment(), decrement(), and
- *     each key of the fields update() is given as a constant array;
+ *   - a column of the model's own table: increment(), decrement(), each
+ *     key of the fields update() is given as a constant array, each field
+ *     of each constant row insert() and upsert() are given, and the fields
+ *     of upsert()'s uniqueBy and update -- uniqueBy held, besides, to a
+ *     key the model declares with #[Unique] (ADR 0073);
  *   - a relation: with(), whereHas() and its kin, and a #[HasMany] for
  *     withCount(), withSum() and the rest and orderByRelation(), whose
  *     column is the related model's;
@@ -108,7 +111,7 @@ final class QueryIdentifierRule implements Rule
         $method = $node->name->toLowerString();
         $checked = \in_array($method, [...self::FILTERS, ...self::COLUMNS, ...self::OWN, ...self::RELATIONS, ...self::MEASURES], true)
             || \array_key_exists($method, self::RELATION_MEASURES)
-            || \in_array($method, ['with', 'groupby', 'whereraw', 'orwhereraw', 'update', 'report'], true);
+            || \in_array($method, ['with', 'groupby', 'whereraw', 'orwhereraw', 'update', 'insert', 'upsert', 'report'], true);
         if (!$checked) {
             return [];
         }
@@ -212,6 +215,54 @@ final class QueryIdentifierRule implements Rule
                     foreach ($this->names($key) as $name) {
                         $checks[] = static fn (): mixed => self::own($meta, $name);
                     }
+                }
+            }
+        } elseif ($method === 'insert' || $method === 'upsert') {
+            foreach ($this->constantArrays($scope, $this->argument($args, 0, 'rows')) as [, $rows]) {
+                foreach ($rows as $row) {
+                    foreach ($row->getConstantArrays() as $fields) {
+                        foreach ($fields->getKeyTypes() as $key) {
+                            foreach ($this->names($key) as $name) {
+                                $checks[] = static fn (): mixed => self::own($meta, $name);
+                            }
+                        }
+                    }
+                }
+            }
+            if ($method === 'upsert') {
+                $listed = function (?Node\Arg $arg) use ($scope, $names): array {
+                    $found = $names($arg);
+                    foreach ($this->constantArrays($scope, $arg) as [, $values]) {
+                        foreach ($values as $value) {
+                            $found = [...$found, ...$this->names($value)];
+                        }
+                    }
+
+                    return $found;
+                };
+                foreach ($listed($this->argument($args, 2, 'update')) as $name) {
+                    $checks[] = static fn (): mixed => self::own($meta, $name);
+                }
+                // The key, whole, where PHPStan reads it as one: a single
+                // constant string, or one constant list of them.
+                $uniqueBy = $this->argument($args, 1, 'uniqueBy');
+                $lists = $uniqueBy === null ? [] : $scope->getType($uniqueBy->value)->getConstantArrays();
+                $fields = match (true) {
+                    $uniqueBy === null, \count($lists) > 1 => [],
+                    \count($lists) === 1 => $listed($uniqueBy),
+                    default => \count($names($uniqueBy)) === 1 ? $names($uniqueBy) : [],
+                };
+                if ($fields !== []) {
+                    $checks[] = static function () use ($meta, $fields): mixed {
+                        $columns = array_map(static fn (string $name): string => self::own($meta, $name), $fields);
+                        if ($meta->conflictTarget($columns) === null) {
+                            throw new MappingException(
+                                "{$meta->class} declares no #[Unique] key over (" . implode(', ', $columns) . '), so upsert() has nothing to conflict on.',
+                            );
+                        }
+
+                        return null;
+                    };
                 }
             }
         } elseif ($method === 'report') {
