@@ -496,3 +496,18 @@ it('gives up on the switch once the busy timeout has passed', function () {
         removeDatabase($path);
     }
 });
+
+// Bound as text, an integer compared with an expression -- which has no
+// column affinity to convert it -- sorted after every number, and the
+// condition held for no row.
+it('binds an integer as an integer', function () {
+    $connection = new PdoConnection(new \PDO('sqlite::memory:'));
+    $connection->execute('CREATE TABLE shelves (position INTEGER NOT NULL)');
+    foreach ([1, 2, 3] as $position) {
+        $connection->execute('INSERT INTO shelves VALUES (?)', [$position]);
+    }
+
+    expect($connection->select('SELECT position FROM shelves WHERE position * ? > ? ORDER BY position LIMIT ?', [10, 15, 5]))
+        ->toBe([['position' => 2], ['position' => 3]])
+        ->and($connection->select('SELECT ? AS a, ? AS b, ? AS c', [null, 'x', 1.5]))->toBe([['a' => null, 'b' => 'x', 'c' => '1.5']]);
+});

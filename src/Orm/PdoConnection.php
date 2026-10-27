@@ -290,7 +290,8 @@ final class PdoConnection implements Connection, TenantSetting
         $rows = $this->run(function () use ($sql, $bindings): array {
             $this->applyTenantSetting();
             $statement = $this->pdo->prepare($sql);
-            $statement->execute($bindings);
+            self::bind($statement, $bindings);
+            $statement->execute();
 
             return $statement->fetchAll();
         });
@@ -305,7 +306,8 @@ final class PdoConnection implements Connection, TenantSetting
         $statement = fn (): int => $this->run(function () use ($sql, $bindings): int {
             $this->applyTenantSetting();
             $statement = $this->pdo->prepare($sql);
-            $statement->execute($bindings);
+            self::bind($statement, $bindings);
+            $statement->execute();
 
             return $statement->rowCount();
         });
@@ -875,6 +877,29 @@ final class PdoConnection implements Connection, TenantSetting
     public function pdo(): \PDO
     {
         return $this->pdo;
+    }
+
+    /**
+     * Binds each value by position: an integer as an integer, anything else
+     * as execute() would have, text.
+     *
+     * Text for everything let SQLite compare a number with a string where
+     * neither side has a column's affinity to convert it -- `position * ? > ?`
+     * bound 30 against '25', and a number sorts before every string, so the
+     * condition was false for every row. MySQL, preparing natively, reads a
+     * text LIMIT as an error. Postgres sends integers as text either way.
+     *
+     * @param list<mixed> $bindings
+     */
+    private static function bind(\PDOStatement $statement, array $bindings): void
+    {
+        foreach (array_values($bindings) as $i => $value) {
+            $statement->bindValue($i + 1, $value, match (true) {
+                \is_int($value) => \PDO::PARAM_INT,
+                $value === null => \PDO::PARAM_NULL,
+                default => \PDO::PARAM_STR,
+            });
+        }
     }
 
     private function record(string $sql): void
