@@ -670,8 +670,9 @@ final readonly class Query
      *
      * MySQL has no conflict target: ON DUPLICATE KEY UPDATE answers to any
      * unique index the table has. The target is still checked against the
-     * metadata, and the tenant column leads every index make:migration
-     * writes for a tenant's key.
+     * metadata; and on a #[TenantScoped] model upsert() is refused there,
+     * since a collision on an index the tenant column does not lead would
+     * update another tenant's row.
      *
      * @param list<array<string, mixed>> $rows each naming the same fields
      * @param string|list<string> $uniqueBy the key's fields
@@ -784,6 +785,18 @@ final readonly class Query
      */
     private function conflict(string $what, array $stored, array $columns, array $uniqueBy, ?array $update): array
     {
+        // MySQL's ON DUPLICATE KEY UPDATE answers to whichever unique index
+        // a row collides with, whatever the statement names: one a tenant's
+        // key is not led by -- an email unique across every tenant -- would
+        // have it update another tenant's row. Refused, not guarded.
+        $connection = $this->orm->statements();
+        if ($this->meta->tenantColumn !== null && $connection instanceof PdoConnection && $connection->driver() === 'mysql') {
+            throw new \LogicException(
+                "{$what} on a #[TenantScoped] model is refused on MySQL, which cannot hold a conflict to the tenant's key: "
+                . 'a row colliding with another tenant\'s on any unique index would update it.',
+            );
+        }
+
         $key = array_map(fn (string $name): string => $this->ownColumn($name), $uniqueBy);
         $target = $this->meta->conflictTarget($key) ?? throw new MappingException(
             "{$this->class} declares no #[Unique] key over (" . implode(', ', $key) . "), so {$what} has nothing to conflict on. "

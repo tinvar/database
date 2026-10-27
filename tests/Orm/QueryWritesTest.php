@@ -338,6 +338,23 @@ describe('insert() and upsert()', function () {
     });
 });
 
+describe('on MySQL', function () {
+    it('writes as SQLite does, and refuses an upsert it cannot hold to the tenant', function () {
+        Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
+            $orm = $fixture->orm(connection: $connection);
+
+            $orm->actAs('acme', static function () use ($orm): void {
+                expect($orm->query(Shelf::class)->where('aisle.code', 'A1')->update(['note' => 'my']))->toBe(2)
+                    ->and($orm->query(Item::class)->where('priceCents', '<', 200)->delete())->toBe(2)
+                    ->and(fn () => $orm->query(Aisle::class)->upsert([['code' => 'A1']], 'code'))->toThrow(\LogicException::class, 'refused on MySQL');
+            });
+
+            expect($orm->query(Brand::class)->upsert([['name' => 'Xi', 'rank' => 30], ['name' => 'Omega', 'rank' => 40]], 'name'))->toBe(1)
+                ->and($orm->query(Brand::class)->orderBy('name')->pluck('rank'))->toEqual([40, 30, 2, 1]);
+        });
+    })->skip(fn () => \Tinvar\Tests\Orm\Fixtures\Databases::mysqlMissing() !== null, 'MySQL is not available');
+});
+
 describe('on Postgres, with row-level security', function () {
     it('upserts within the tenant, under the policy', function () {
         Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
