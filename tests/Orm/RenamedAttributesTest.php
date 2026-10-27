@@ -134,3 +134,59 @@ it('runs an old-named #[BeforeSave] hook', function () {
 
     expect($saved)->toBe('padded');
 });
+
+/**
+ * Runs $code in a PHP of its own, autoloaded as this suite is but with no
+ * alias ever made -- every package's alias autoloader taken off -- as an
+ * application will be once the aliases are gone in 0.5. Answers what it
+ * printed.
+ */
+function withoutAliases(string $code): string
+{
+    $autoload = var_export(\dirname((string) new \ReflectionClass(\Composer\Autoload\ClassLoader::class)->getFileName(), 2) . '/autoload.php', true);
+    $script = <<<PHP
+        <?php
+        require {$autoload};
+        foreach (spl_autoload_functions() as \$loader) {
+            if (\$loader instanceof \\Closure && str_ends_with((string) new \\ReflectionFunction(\$loader)->getFileName(), '/aliases.php')) {
+                spl_autoload_unregister(\$loader);
+            }
+        }
+        {$code}
+        PHP;
+
+    $process = proc_open([PHP_BINARY, '-d', 'display_errors=stderr'], [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']], $pipes);
+    \assert(\is_resource($process));
+    fwrite($pipes[0], $script);
+    fclose($pipes[0]);
+    $printed = (string) stream_get_contents($pipes[1]) . (string) stream_get_contents($pipes[2]);
+    proc_close($process);
+
+    return trim($printed);
+}
+
+// Once an old name is no alias of anything, PHP matches nothing by it, and
+// a model written #[\Tinvar\Attributes\TenantScoped] compiled as not
+// tenant-scoped: it read every tenant's rows. It is refused instead, saying
+// what the name became.
+it('refuses a model written with an old name that is no alias of anything', function () {
+    $printed = withoutAliases(<<<'PHP'
+        #[\Tinvar\Orm\Attributes\Table('scripts'), \Tinvar\Attributes\TenantScoped]
+        final class Unaliased extends \Tinvar\Orm\Model
+        {
+            #[\Tinvar\Orm\Attributes\Id] public private(set) string $id;
+        }
+
+        try {
+            $column = \Tinvar\Orm\Metadata::for(Unaliased::class)->tenantColumn;
+            echo 'compiled, tenant column: ', var_export($column, true);
+        } catch (\Throwable $e) {
+            echo get_class($e), ': ', $e->getMessage();
+        }
+        PHP);
+
+    expect($printed)->toBe(
+        'LogicException: Unaliased carries #[\Tinvar\Attributes\TenantScoped], which is no class now: it was renamed '
+        . 'Tinvar\Orm\Attributes\TenantScoped. Write the new name; under the old one the attribute would be ignored (ADR 0055).',
+    );
+});

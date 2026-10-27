@@ -11,6 +11,7 @@ use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
+use Tinvar\Support\KnownAttributes;
 use Tinvar\Support\Str;
 
 /**
@@ -65,6 +66,11 @@ final class Metadata
     private static function compile(string $class): ModelMeta
     {
         $reflection = new \ReflectionClass($class);
+
+        // And one naming a Tinvar class that does not exist -- an old name
+        // with no alias made for it -- is refused rather than matched by
+        // nothing, which would compile #[TenantScoped] as absent.
+        KnownAttributes::check($reflection);
 
         // Every attribute is read as an instance of its class, not by the
         // name it was written with: a model still spelling an attribute by

@@ -20,19 +20,25 @@ declare(strict_types=1);
  * namespaces, which are the framework's, on purpose: the layer rule reads
  * src/ alone.
  */
-spl_autoload_register(static function (string $class): void {
-    $renamed = [
-        'tinvar\\attributes\\table' => Tinvar\Orm\Attributes\Table::class,
-        'tinvar\\attributes\\column' => Tinvar\Orm\Attributes\Column::class,
-        'tinvar\\attributes\\id' => Tinvar\Orm\Attributes\Id::class,
-        'tinvar\\attributes\\belongsto' => Tinvar\Orm\Attributes\BelongsTo::class,
-        'tinvar\\attributes\\hasmany' => Tinvar\Orm\Attributes\HasMany::class,
-        'tinvar\\attributes\\beforesave' => Tinvar\Orm\Attributes\BeforeSave::class,
-        'tinvar\\attributes\\tenantscoped' => Tinvar\Orm\Attributes\TenantScoped::class,
-    ][strtolower(ltrim($class, '\\'))] ?? null;
+$renamed = [
+    'tinvar\\attributes\\table' => Tinvar\Orm\Attributes\Table::class,
+    'tinvar\\attributes\\column' => Tinvar\Orm\Attributes\Column::class,
+    'tinvar\\attributes\\id' => Tinvar\Orm\Attributes\Id::class,
+    'tinvar\\attributes\\belongsto' => Tinvar\Orm\Attributes\BelongsTo::class,
+    'tinvar\\attributes\\hasmany' => Tinvar\Orm\Attributes\HasMany::class,
+    'tinvar\\attributes\\beforesave' => Tinvar\Orm\Attributes\BeforeSave::class,
+    'tinvar\\attributes\\tenantscoped' => Tinvar\Orm\Attributes\TenantScoped::class,
+];
 
-    if ($renamed !== null) {
-        @trigger_error("{$class} is deprecated since tinvar/database 0.4 and is removed in 0.5; use {$renamed}.", \E_USER_DEPRECATED);
-        class_alias($renamed, $class);
+// Recorded whether or not an alias is ever made, so a refusal of an old
+// name can say what it became (Tinvar\Support\KnownAttributes).
+Tinvar\Support\RenamedClasses::record($renamed);
+
+spl_autoload_register(static function (string $class) use ($renamed): void {
+    $current = $renamed[strtolower(ltrim($class, '\\'))] ?? null;
+
+    if ($current !== null) {
+        @trigger_error("{$class} is deprecated since tinvar/database 0.4 and is removed in 0.5; use {$current}.", \E_USER_DEPRECATED);
+        class_alias($current, $class);
     }
 });
