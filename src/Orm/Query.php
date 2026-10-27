@@ -601,11 +601,45 @@ final readonly class Query
 
         // Another arm of the union this query is already, rather than a
         // union of a union.
-        $conditions = \count($this->conditions) === 1 && $this->conditions[0]->kind === Condition::UNION && !$this->conditions[0]->or
+        $conditions = \count($this->conditions) === 1 && $this->conditions[0]->kind === Condition::UNION && !$this->conditions[0]->or && !$this->conditions[0]->not
             ? [Condition::union(false, [...$this->conditions[0]->arms, $arm])]
             : [Condition::union(false, [$this->conditions, $arm])];
 
         return clone($this, ['conditions' => $conditions]);
+    }
+
+    /**
+     * The rows this query reads that $other reads too. Compiled as union()
+     * is, as a condition: this query's conditions, in parentheses of their
+     * own, AND the key IN $other's keys -- a statement of its own over the
+     * model's table, under the model's tenant predicate, its joins with
+     * theirs in the ON -- and the read around it under the predicate again.
+     * So the result is a query like any other: sorted, narrowed, counted,
+     * paged by number or by cursor, and written (ADR 0073).
+     *
+     * @param self<T> $other
+     * @return static
+     */
+    #[\NoDiscard]
+    public function intersect(self $other): self
+    {
+        return $this->narrowedByArm($other, 'intersect()', false);
+    }
+
+    /**
+     * The rows this query reads that $other does not: intersect()'s
+     * converse, the key NOT IN $other's keys. A key is never NULL, so NOT
+     * IN reads as it says; and $other's arm is read under the tenant
+     * predicate like this query, so a row of another tenant's $other
+     * might have named is no row this query could read in the first place.
+     *
+     * @param self<T> $other
+     * @return static
+     */
+    #[\NoDiscard]
+    public function except(self $other): self
+    {
+        return $this->narrowedByArm($other, 'except()', true);
     }
 
     /**
@@ -1951,6 +1985,26 @@ final readonly class Query
         }
 
         return $other->conditions;
+    }
+
+    /**
+     * intersect() and except(): this query's conditions grouped, so an
+     * orWhere() among them never takes the arm as one of its alternatives.
+     *
+     * @param self<T> $other
+     * @return static
+     */
+    private function narrowedByArm(self $other, string $what, bool $not): self
+    {
+        $arm = $this->arm($other, $what);
+        if ($this->unionAll !== null) {
+            throw new \LogicException("{$what} narrows the rows of the model's table, and this query is a unionAll() of its arms' rows.");
+        }
+
+        return clone($this, ['conditions' => [
+            ...($this->conditions === [] ? [] : [Condition::group(false, $this->conditions)]),
+            Condition::union(false, [$arm], $not),
+        ]]);
     }
 
     /**

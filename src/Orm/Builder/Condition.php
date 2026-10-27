@@ -88,11 +88,14 @@ final readonly class Condition
      * The rows any of $arms matches: the key IN a UNION of each arm's keys,
      * every arm read under the model's tenant predicate (Query::union()).
      *
+     * With $not, the rows none of $arms matches: the key NOT IN them, which
+     * a key -- never NULL -- reads as it says (Query::except()).
+     *
      * @param list<list<Condition>> $arms
      */
-    public static function union(bool $or, array $arms): self
+    public static function union(bool $or, array $arms, bool $not = false): self
     {
-        return new self(self::UNION, $or, arms: $arms);
+        return new self(self::UNION, $or, not: $not, arms: $arms);
     }
 
     /**

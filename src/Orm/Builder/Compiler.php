@@ -442,7 +442,7 @@ final class Compiler
         }
 
         return [
-            Identifiers::quote($alias) . '.' . Identifiers::quote($meta->idColumn) . ' IN (' . implode(' UNION ', $arms) . ')',
+            Identifiers::quote($alias) . '.' . Identifiers::quote($meta->idColumn) . ($condition->not ? ' NOT IN (' : ' IN (') . implode(' UNION ', $arms) . ')',
             $bindings,
         ];
     }
