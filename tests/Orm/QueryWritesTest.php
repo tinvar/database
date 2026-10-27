@@ -52,6 +52,25 @@ function column(Shelves $fixture, string $column, string $table = 'shelves'): ar
 }
 
 describe('update()', function () {
+    // fig is on Foxtrot: never read, so neither held nor in any cached
+    // group. All the write knows of it is the column it set, which is no
+    // row to hydrate a model from.
+    it('moves a row it never read into a loaded collection whole', function () {
+        $fixture = Shelves::sqlite();
+        $orm = $fixture->orm();
+
+        $orm->actAs('acme', static function () use ($orm): void {
+            $bravo = $orm->query(Shelf::class)->where('name', 'Bravo')->first();
+            \assert($bravo instanceof Shelf);
+            expect($bravo->items->count())->toBe(1);
+
+            $orm->query(Item::class)->where('name', 'fig')->update(['shelf' => $bravo]);
+
+            expect(array_map(static fn (Item $item): string => $item->name, $bravo->items->all()))->toBe(['banana', 'fig'])
+                ->and(array_map(static fn (Item $item): int => $item->priceCents, $bravo->items->all()))->toBe([50, 300]);
+        });
+    });
+
     it('writes the rows the query reads, under the tenant in force and no other', function () {
         $fixture = Shelves::sqlite();
         $orm = $fixture->orm();

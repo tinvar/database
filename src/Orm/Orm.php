@@ -1899,15 +1899,19 @@ final class Orm
             $this->relationRows[$key][$from] = $rows;
         }
 
+        $written = $row === null ? [] : [...($previous ?? []), ...$row, $column => $to];
+
         if ($to !== null && $this->hasRows($key, $to)) {
-            if ($this->isWidened()) {
+            if ($this->isWidened() || array_diff($meta->selectColumns(), array_keys($written)) !== []) {
                 // Possibly another tenant's row: a scoped parent must not be
-                // handed it. Dropped, so the next read loads under its scope.
+                // handed it. Or a row written through a query that was never
+                // read, of which only the columns written are known -- no row
+                // to make a model of. Either way dropped, so the next read
+                // loads it whole, under its scope.
                 unset($this->relationRows[$key][$to]);
             } else {
                 /** @var list<array<string, mixed>> $rows */
                 $rows = $this->relationRows[$key][$to];
-                $written = [...($previous ?? []), ...$row, $column => $to];
 
                 // Back where it was if it stayed, so a relation with no order
                 // keeps the order the database gave it.
