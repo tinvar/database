@@ -107,6 +107,7 @@ final class Metadata
         $columns = [];
         $relations = [];
         $idProperty = null;
+        $createdAt = null;
         /** @var list<array{string, string, (\Closure(mixed): mixed)|null, (\Closure(object): mixed)|null}> $plan */
         $plan = [];
 
@@ -130,6 +131,8 @@ final class Metadata
 
             if ($isId) {
                 $idProperty = $name;
+            } elseif ($name === 'createdAt' && self::isTimestamp($property)) {
+                $createdAt = $name;
             }
         }
 
@@ -154,7 +157,21 @@ final class Metadata
             columnReader: self::compileColumnReader($class, $plan),
             beforeSave: self::compileBeforeSave($reflection),
             uniqueKeys: self::compileUniqueKeys($reflection, $columns, $relations, $columns[$idProperty], $tenantColumn),
+            createdAtProperty: $createdAt,
         );
+    }
+
+    /**
+     * Whether a column property holds a moment the ORM can stamp: typed
+     * DateTimeImmutable, or the interface it implements, and nothing else --
+     * a string or an int column named createdAt is the model's own to fill.
+     */
+    private static function isTimestamp(\ReflectionProperty $property): bool
+    {
+        $type = $property->getType();
+
+        return $type instanceof \ReflectionNamedType
+            && \in_array($type->getName(), [\DateTimeImmutable::class, \DateTimeInterface::class], true);
     }
 
     /**

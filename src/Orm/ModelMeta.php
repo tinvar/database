@@ -27,6 +27,8 @@ final class ModelMeta
      * @param \Closure(Model, string): mixed      $read
      * @param list<\Closure(Model): void>  $beforeSave the #[BeforeSave] methods, in the order they run
      * @param list<list<string>>           $uniqueKeys each #[Unique] key, as its columns, without the tenant column
+     * @param string|null                  $createdAtProperty a `createdAt` column typed as a moment, which
+     *        the ORM stamps on insert when nothing has set it (Orm::now())
      */
     public function __construct(
         public readonly string $class,
@@ -44,6 +46,7 @@ final class ModelMeta
         private readonly \Closure $columnReader,
         private readonly array $beforeSave = [],
         public readonly array $uniqueKeys = [],
+        public readonly ?string $createdAtProperty = null,
     ) {
         $this->saving = new \WeakMap();
     }

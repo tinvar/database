@@ -167,11 +167,15 @@ final class Orm
      *        through TenantBounds, so the limits of a walk -- a loop or more than
      *        32 levels says "not under", a subtree of more than 1,000 tenants
      *        throws -- hold whatever an implementation returns (ADR 0056).
+     * @param (\Closure(): \DateTimeImmutable)|null $clock what now() answers: the time a
+     *        new row's createdAt is stamped with. The system's, in UTC, unless given --
+     *        a test's moved clock, say.
      */
     public function __construct(
         private readonly Connection $connection,
         private readonly IdentityMap $identityMap = new IdentityMap(),
         ?TenantSubtrees $tenants = null,
+        private readonly ?\Closure $clock = null,
     ) {
         $this->tenancy = $tenants !== null;
         $this->tenants = $tenants !== null && $tenants->hierarchical() ? new TenantBounds($tenants) : null;
@@ -1629,6 +1633,15 @@ final class Orm
     }
 
     /**
+     * The time a write is made at, as the ORM stamps it: a new row's
+     * createdAt.
+     */
+    public function now(): \DateTimeImmutable
+    {
+        return $this->clock === null ? new \DateTimeImmutable('now', new \DateTimeZone('UTC')) : ($this->clock)();
+    }
+
+    /**
      * @template T of Model
      * @param T $model
      * @return T
@@ -1644,6 +1657,14 @@ final class Orm
             // key without asking the database, so a row stored under one
             // could be written and never read back.
             throw new MappingException("{$meta->class}: a preset key must be a UUID.");
+        }
+
+        // "Asymmetric visibility keeps IDs and timestamps read-only outside
+        // the ORM": a createdAt typed as a moment, and `private(set)` as the
+        // spec writes it, is the ORM's to fill, as the key is. One the model
+        // set itself -- a backfill, an import keeping its dates -- is kept.
+        if ($meta->createdAtProperty !== null && !$this->isSet($model, $meta, $meta->createdAtProperty)) {
+            $meta->set($model, $meta->createdAtProperty, $this->now());
         }
 
         $values = $meta->writeValues($model);

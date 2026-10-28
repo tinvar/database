@@ -54,9 +54,10 @@ final class Fields
      * @param bool $inserting whether the row is new, and so may name its key, and its tenant
      * @param string|null $tenant the tenant in force, for a new row of a #[TenantScoped] model
      * @param bool $hooks run the model's #[BeforeSave] methods on the new row, as save() runs them on a new model
+     * @param \DateTimeImmutable|null $now the time a new row's createdAt is stamped with (Orm::now()), unless it names one
      * @return array<string, mixed> column => stored value, or an Assignment update() writes
      */
-    public static function row(ModelMeta $meta, array $values, bool $inserting, ?string $tenant = null, bool $hooks = false): array
+    public static function row(ModelMeta $meta, array $values, bool $inserting, ?string $tenant = null, bool $hooks = false, ?\DateTimeImmutable $now = null): array
     {
         if ($hooks && !$inserting) {
             throw new \LogicException('#[BeforeSave] methods run on a whole new row, never on part of one.');
@@ -141,7 +142,7 @@ final class Fields
         }
 
         if ($hooks) {
-            return self::hooked($meta, $scratch, $stored, $tenant);
+            return self::hooked($meta, $scratch, $stored, $tenant, $now);
         }
 
         // A copy reads the row as it was: but MySQL works a single-table
@@ -157,6 +158,15 @@ final class Fields
                     . 'a database may read either value. Copy in one update() and set it in another.',
                 );
             }
+        }
+
+        // A new row's createdAt, as save() stamps it (Orm::insert()), unless
+        // the row names one -- which it can only where the model lets anyone
+        // set it: a private(set) one was refused above.
+        $created = $meta->createdAtProperty;
+        if ($inserting && $now !== null && $created !== null && !isset($properties[$created])) {
+            $meta->set($scratch, $created, $now);
+            $properties[$created] = $meta->columns[$created];
         }
 
         // Each through the model's column reader, as save() stores it.
@@ -282,9 +292,15 @@ final class Fields
      * @param array<string, mixed> $stored what the row named, before the hooks
      * @return array<string, mixed>
      */
-    private static function hooked(ModelMeta $meta, Model $scratch, array $stored, ?string $tenant): array
+    private static function hooked(ModelMeta $meta, Model $scratch, array $stored, ?string $tenant, ?\DateTimeImmutable $now): array
     {
         $meta->beforeSave($scratch);
+
+        // After the hooks, as save() stamps it: one a hook set is kept.
+        $created = $meta->createdAtProperty;
+        if ($now !== null && $created !== null && !new \ReflectionProperty($meta->class, $created)->isInitialized($scratch)) {
+            $meta->set($scratch, $created, $now);
+        }
 
         $row = $meta->columnValues($scratch);
         foreach ($meta->relations as $property => $relation) {

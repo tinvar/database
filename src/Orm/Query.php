@@ -1394,6 +1394,7 @@ final readonly class Query
         }
 
         $tenant = $this->tenantForNewRows();
+        $now = $this->orm->now();
         $stored = [];
         $columns = null;
         $preset = [];
@@ -1401,7 +1402,7 @@ final readonly class Query
             if (!\is_array($row)) {
                 throw new \InvalidArgumentException("{$what} takes rows, each a map of field => value.");
             }
-            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant, hooks: $uniqueBy === null && $this->meta->hasBeforeSave());
+            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant, hooks: $uniqueBy === null && $this->meta->hasBeforeSave(), now: $now);
             if (isset($one[$this->meta->idColumn])) {
                 $preset[] = (string) $one[$this->meta->idColumn];
             }
