@@ -24,11 +24,29 @@ abstract class Factory
     /** @var array<string, Model> relation property => parent */
     private array $parents = [];
 
+    /** Made-up values for definition(): `$this->faker->bothify('R-##')`. */
+    protected Fake $faker;
+
     /** @return T */
     abstract public function definition(): Model;
 
     /** Every factory is built with no arguments, which is what new() relies on. */
-    final public function __construct() {}
+    final public function __construct()
+    {
+        $this->faker = new Fake();
+    }
+
+    /**
+     * The same factory drawing its made-up values from $seed, so a run can
+     * be made again exactly.
+     */
+    public function seeded(int $seed): static
+    {
+        $clone = clone $this;
+        $clone->faker = new Fake($seed);
+
+        return $clone;
+    }
 
     public static function new(): static
     {
