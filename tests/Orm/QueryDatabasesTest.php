@@ -18,6 +18,7 @@ namespace Tinvar\Tests\Orm\QueryDatabases;
 
 use Tinvar\Orm\Aggregate;
 use Tinvar\Orm\Aggregated;
+use Tinvar\Orm\AsyncConnection;
 use Tinvar\Orm\CursorPage;
 use Tinvar\Orm\NoTenantContext;
 use Tinvar\Orm\Nulls;
@@ -289,6 +290,34 @@ describe('on MySQL', function () {
 
     it('groups, aggregates, unions and increments as SQLite does', function () {
         Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
+            aggregatesAlike($fixture->orm(connection: $connection));
+        });
+    });
+})->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
+
+describe('on Postgres through the async driver, with row-level security', function () {
+    it('reads as SQLite does, under the policy', function () {
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            readsAlike($fixture->orm(connection: $connection));
+        });
+    });
+
+    it('groups, aggregates, unions and increments as SQLite does, under the policy', function () {
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            aggregatesAlike($fixture->orm(connection: $connection));
+        });
+    });
+})->group('pgsql')->skip(Databases::asyncPostgresMissing() !== null, Databases::asyncPostgresMissing() ?? '');
+
+describe('on MySQL through the async driver', function () {
+    it('reads as SQLite does', function () {
+        Shelves::onMySqlAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            readsAlike($fixture->orm(connection: $connection));
+        });
+    });
+
+    it('groups, aggregates, unions and increments as SQLite does', function () {
+        Shelves::onMySqlAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
             aggregatesAlike($fixture->orm(connection: $connection));
         });
     });

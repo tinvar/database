@@ -79,6 +79,15 @@ final class Databases
         return \is_string($found) ? $found : null;
     }
 
+    /**
+     * Why the async Postgres driver's tests are skipped, or null when they
+     * run: the server, and ext-pgsql, which amphp/postgres runs on.
+     */
+    public static function asyncPostgresMissing(): ?string
+    {
+        return self::postgresMissing() ?? (\extension_loaded('pgsql') ? null : 'ext-pgsql is not loaded: the async Postgres driver runs on it.');
+    }
+
     /** Why the MySQL tests are skipped, or null when they run. */
     public static function mysqlMissing(): ?string
     {
@@ -146,6 +155,35 @@ final class Databases
                 $pdo->exec('SET search_path TO DEFAULT');
             }
         }
+    }
+
+    /**
+     * The Postgres server found, as the async driver's config: the same
+     * host, port, database, user and password, with $options -- a search
+     * path, a role -- for every session to start with.
+     */
+    public static function asyncPostgres(string $options): \Amp\Postgres\PostgresConfig
+    {
+        return \Amp\Postgres\PostgresConfig::fromString(self::connectionString('pgsql'))->withOptions($options);
+    }
+
+    /** The MySQL server found, as the async driver's config, in $database with $sqlMode. */
+    public static function asyncMySql(string $database, string $sqlMode): \Amp\Mysql\MysqlConfig
+    {
+        return \Amp\Mysql\MysqlConfig::fromString(self::connectionString('mysql'))->withDatabase($database)->withSqlMode($sqlMode);
+    }
+
+    /** A PDO DSN's pairs as the amphp clients read them: `key=value`, space apart. */
+    private static function connectionString(string $driver): string
+    {
+        $pairs = [];
+        foreach (explode(';', substr(self::dsn($driver), \strlen($driver) + 1)) as $pair) {
+            if (str_contains($pair, '=') && !str_starts_with($pair, 'connect_timeout=')) {
+                $pairs[] = str_replace(' ', '\\ ', trim($pair));
+            }
+        }
+
+        return implode(' ', $pairs);
     }
 
     /** @param \Closure(): ?string $dsn */

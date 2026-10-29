@@ -12,7 +12,9 @@ use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Orm\Attributes\Unique;
+use Tinvar\Orm\AsyncConnection;
 use Tinvar\Orm\Collection;
+use Tinvar\Orm\Connection;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\Orm;
@@ -188,7 +190,7 @@ final class Shelves
         return $connection;
     }
 
-    public function orm(?TenantSubtrees $tenants = null, ?PdoConnection $connection = null): Orm
+    public function orm(?TenantSubtrees $tenants = null, ?Connection $connection = null): Orm
     {
         return new Orm($connection ?? $this->connection(), new IdentityMap('test'), $tenants ?? Tenancy::flat());
     }
@@ -212,6 +214,41 @@ final class Shelves
      */
     public static function onPostgres(\Closure $test, ?\Closure $prepare = null): void
     {
+        self::underPolicies(static function (self $shelves) use ($test): void {
+            $test($shelves, $shelves->connection('pgsql'));
+        }, $prepare);
+    }
+
+    /**
+     * onPostgres() through the async driver (ADR 0087): the same rows and
+     * policies, read by a pool of sessions that each start in the scratch
+     * schema as the same role, given in the connection's options.
+     *
+     * @param \Closure(self, AsyncConnection): void $test
+     */
+    public static function onPostgresAsync(\Closure $test, int $poolSize = 4, ?float $statementTimeout = null): void
+    {
+        self::underPolicies(static function (self $shelves, string $schema, string $role) use ($test, $poolSize, $statementTimeout): void {
+            $connection = AsyncConnection::postgres(
+                Databases::asyncPostgres("-c search_path={$schema} -c role={$role}"),
+                'pgsql-async',
+                $poolSize,
+                statementTimeout: $statementTimeout,
+            );
+            try {
+                $test($shelves, $connection);
+            } finally {
+                $connection->close();
+            }
+        });
+    }
+
+    /**
+     * @param \Closure(self, string, string): void $test given the rows, the schema and the role
+     * @param (\Closure(\PDO): void)|null $prepare
+     */
+    private static function underPolicies(\Closure $test, ?\Closure $prepare = null): void
+    {
         Databases::inScratchSchema('pgsql', static function (\PDO $pdo, string $schema) use ($test, $prepare): void {
             $shelves = new self($pdo);
             if ($prepare !== null) {
@@ -230,7 +267,7 @@ final class Shelves
             $pdo->exec("SET ROLE {$role}");
 
             try {
-                $test($shelves, $shelves->connection('pgsql'));
+                $test($shelves, $schema, $role);
             } finally {
                 if ($pdo->inTransaction()) {
                     $pdo->rollBack();
@@ -259,6 +296,32 @@ final class Shelves
                 $prepare($pdo);
             }
             $test($shelves, $shelves->connection('mysql'));
+        });
+    }
+
+    /**
+     * onMySql() through the async driver: a pool of sessions in the
+     * scratch database, each started with ANSI_QUOTES in its SQL mode.
+     *
+     * @param \Closure(self, AsyncConnection): void $test
+     */
+    public static function onMySqlAsync(\Closure $test, int $poolSize = 4, ?float $statementTimeout = null): void
+    {
+        Databases::inScratchSchema('mysql', static function (\PDO $pdo, string $database) use ($test, $poolSize, $statementTimeout): void {
+            $pdo->exec("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')");
+            $shelves = new self($pdo);
+            $mode = $pdo->query('SELECT @@SESSION.sql_mode')?->fetchColumn();
+            $connection = AsyncConnection::mysql(
+                Databases::asyncMySql($database, \is_string($mode) ? $mode : 'ANSI_QUOTES'),
+                'mysql-async',
+                $poolSize,
+                statementTimeout: $statementTimeout,
+            );
+            try {
+                $test($shelves, $connection);
+            } finally {
+                $connection->close();
+            }
         });
     }
 }
