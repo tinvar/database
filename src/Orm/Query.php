@@ -1587,7 +1587,7 @@ final readonly class Query
     private function onConflict(array $target, array $set): string
     {
         $connection = $this->orm->statements();
-        if ($connection instanceof PdoConnection && $connection->driver() === 'mysql') {
+        if ($connection instanceof NamesDriver && $connection->driver() === 'mysql') {
             $id = Identifiers::quote($this->meta->idColumn);
 
             return ' ON DUPLICATE KEY UPDATE ' . ($set === []
@@ -1606,7 +1606,7 @@ final readonly class Query
     {
         $connection = $this->orm->statements();
 
-        return $connection instanceof PdoConnection && $connection->driver() === 'mysql';
+        return $connection instanceof NamesDriver && $connection->driver() === 'mysql';
     }
 
     /**
@@ -1834,7 +1834,7 @@ final readonly class Query
         // would then wait on this one. SQLite has no row locks, and needs
         // none: its write transaction began IMMEDIATE, holding the database.
         $connection = $this->orm->statements();
-        $lock = match ($connection instanceof PdoConnection ? $connection->driver() : '') {
+        $lock = match ($connection instanceof NamesDriver ? $connection->driver() : '') {
             'pgsql', 'mysql' => ' FOR UPDATE OF ' . Identifiers::quote($scope->alias),
             default => '',
         };

@@ -10,7 +10,7 @@ use Tinvar\Orm\Nulls;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\Orm;
-use Tinvar\Orm\PdoConnection;
+use Tinvar\Orm\NamesDriver;
 use Tinvar\Orm\RelationKind;
 use Tinvar\Orm\RelationMeta;
 
@@ -468,7 +468,7 @@ final class Compiler
         }
         $connection = $this->orm->statements();
 
-        return $connection instanceof PdoConnection && $connection->driver() === 'mysql' ? '?' : 'CAST(? AS DOUBLE PRECISION)';
+        return $connection instanceof NamesDriver && $connection->driver() === 'mysql' ? '?' : 'CAST(? AS DOUBLE PRECISION)';
     }
 
     public static function placeholders(int $count): string

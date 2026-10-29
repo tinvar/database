@@ -6,7 +6,7 @@ namespace Tinvar\Orm\Schema;
 
 use Tinvar\Orm\Connection;
 use Tinvar\Orm\Migrations\MigrationRefused;
-use Tinvar\Orm\PdoConnection;
+use Tinvar\Orm\NamesDriver;
 
 /**
  * What one database calls the builder's types and statements, what it can
@@ -122,7 +122,7 @@ abstract class Dialect
     /** The dialect for a connection's driver. */
     public static function for(Connection $connection): self
     {
-        $driver = $connection instanceof PdoConnection ? $connection->pdo()->getAttribute(\PDO::ATTR_DRIVER_NAME) : null;
+        $driver = $connection instanceof NamesDriver ? $connection->driver() : null;
 
         return match ($driver) {
             'sqlite' => new SqliteDialect(),

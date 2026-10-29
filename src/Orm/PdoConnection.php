@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
-final class PdoConnection implements Connection, TenantSetting
+final class PdoConnection implements Connection, TenantSetting, NamesDriver
 {
     /**
      * The most statements the log keeps between resets; the count goes on.
