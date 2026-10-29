@@ -43,25 +43,14 @@ final class Orm
     private ?\Closure $acrossTenantsFlag = null;
 
     /**
-     * What a rollback has to put back: one frame per open transaction(),
-     * each a list of undo steps recorded before a write replaced what they
-     * restore -- a model's snapshot, a loaded relation's items. A nested
-     * frame that returns is folded into the one around it, since the outer
-     * rollback undoes its writes too.
-     *
-     * @var list<list<\Closure(): void>>
+     * The open transactions' journals and afterCommit() callbacks: the
+     * connection's one transaction's (TransactionFrames), or, on a
+     * ConcurrentConnection, each fiber's own.
      */
-    private array $journal = [];
+    private TransactionFrames $mainFrames;
 
-    /**
-     * What waits for the outermost transaction to commit: one frame per open
-     * transaction(), alongside the journal's. A nested frame that returns is
-     * folded into the one around it, since only the outermost commit makes
-     * its writes visible; one that rolls back is dropped with its writes.
-     *
-     * @var list<list<\Closure(): void>>
-     */
-    private array $afterCommit = [];
+    /** @var \WeakMap<object, TransactionFrames> */
+    private \WeakMap $framesByFiber;
 
     /** What connection() hands out while raw statements are flagged; null while they are not. */
     private ?RawStatements $rawStatements = null;
@@ -184,6 +173,8 @@ final class Orm
         $this->readOnlyByFiber = new \WeakMap();
         $this->subtreeByFiber = new \WeakMap();
         $this->subtreeGrantByFiber = new \WeakMap();
+        $this->mainFrames = new TransactionFrames();
+        $this->framesByFiber = new \WeakMap();
 
         // The database's half of failing closed (RowLevelSecurity): the
         // connection asks, before each statement, which tenant the fiber
@@ -455,8 +446,8 @@ final class Orm
         // A transaction still open here was left in a fiber nobody resumes.
         // Its frames would hold the next request's afterCommit() callbacks
         // for a commit that never comes, and fold its undo into theirs.
-        $this->journal = [];
-        $this->afterCommit = [];
+        $this->mainFrames = new TransactionFrames();
+        $this->framesByFiber = new \WeakMap();
 
         // And the database's copy, now rather than at the next statement:
         // anything reaching the connection around this class before then
@@ -1834,14 +1825,15 @@ final class Orm
         // intent even if nothing in it writes through save().
         $this->refuseWrite('transaction()');
 
-        $this->journal[] = [];
-        $this->afterCommit[] = [];
+        $frames = $this->frames();
+        $frames->journal[] = [];
+        $frames->afterCommit[] = [];
 
         try {
             $result = $this->connection->transaction($work);
         } catch (\Throwable $e) {
             // Nothing it was waiting to announce happened.
-            array_pop($this->afterCommit);
+            array_pop($frames->afterCommit);
 
             // The rows written inside the transaction are gone, but the models
             // still carry the snapshots those writes took: an undone insert
@@ -1849,7 +1841,7 @@ final class Orm
             // same save() wrote nothing. Loaded relations were refilled for
             // writes that no longer exist, too. Undone newest first, so a
             // model saved twice ends with the snapshot it had before either.
-            foreach (array_reverse(self::popFrame($this->journal)) as $undo) {
+            foreach (array_reverse(self::popFrame($frames->journal)) as $undo) {
                 $undo();
             }
 
@@ -1864,16 +1856,16 @@ final class Orm
         // A nested call that returned is undone if the outer one rolls back.
         // A frame flush() dropped -- its fiber resumed after the request
         // ended -- has nothing left to fold.
-        $frame = self::popFrame($this->journal);
-        if ($this->journal !== []) {
-            array_push($this->journal[array_key_last($this->journal)], ...$frame);
+        $frame = self::popFrame($frames->journal);
+        if ($frames->journal !== []) {
+            array_push($frames->journal[array_key_last($frames->journal)], ...$frame);
         }
 
         // And what waited on it waits on the outer one, which may still roll
         // back. Only the outermost commit is a commit anyone else can read.
-        $waiting = self::popFrame($this->afterCommit);
-        if ($this->afterCommit !== []) {
-            array_push($this->afterCommit[array_key_last($this->afterCommit)], ...$waiting);
+        $waiting = self::popFrame($frames->afterCommit);
+        if ($frames->afterCommit !== []) {
+            array_push($frames->afterCommit[array_key_last($frames->afterCommit)], ...$waiting);
         } else {
             self::runAll($waiting);
         }
@@ -1904,13 +1896,14 @@ final class Orm
      */
     public function afterCommit(\Closure $callback): void
     {
-        if ($this->afterCommit === []) {
+        $frames = $this->frames();
+        if ($frames->afterCommit === []) {
             $callback();
 
             return;
         }
 
-        $this->afterCommit[array_key_last($this->afterCommit)][] = $callback;
+        $frames->afterCommit[array_key_last($frames->afterCommit)][] = $callback;
     }
 
     /**
@@ -1954,9 +1947,25 @@ final class Orm
     /** @param \Closure(): void $undo run if the open transaction rolls back */
     private function journal(\Closure $undo): void
     {
-        if ($this->journal !== []) {
-            $this->journal[array_key_last($this->journal)][] = $undo;
+        $frames = $this->frames();
+        if ($frames->journal !== []) {
+            $frames->journal[array_key_last($frames->journal)][] = $undo;
         }
+    }
+
+    /**
+     * The calling fiber's frames on a ConcurrentConnection, whose
+     * transactions are each fiber's own; the one set otherwise, since
+     * PdoConnection's one transaction is every fiber's.
+     */
+    private function frames(): TransactionFrames
+    {
+        $fiber = \Fiber::getCurrent();
+        if ($fiber === null || !$this->connection instanceof ConcurrentConnection) {
+            return $this->mainFrames;
+        }
+
+        return $this->framesByFiber[$fiber] ??= new TransactionFrames();
     }
 
     // ------------------------------------------------------- after a write
