@@ -13,6 +13,13 @@ namespace Tinvar\Orm;
  *
  * Registration happens in a relation accessor rather than a lazy-ghost
  * initializer; ADR 0002 records why the spec's wording is unsafe on PHP 8.5.
+ *
+ * Over a ConcurrentConnection -- fiber mode, ADR 0087 -- a fiber also
+ * suspends while its statement is in flight, and the event loop, not this
+ * class, resumes it. Such a fiber is neither finished nor waiting on a
+ * relation, so the scheduler waits in the loop until every fiber is one or
+ * the other, and only then flushes: the tick's statements overlap, and a
+ * relation is still loaded once for every fiber that wants it.
  */
 final class BatchScheduler
 {
@@ -21,7 +28,28 @@ final class BatchScheduler
 
     private int $rounds = 0;
 
-    public function __construct(private readonly Orm $orm) {}
+    /**
+     * Fiber mode's bookkeeping: the fibers this scheduler started, those of
+     * them waiting on a relation, and how many are neither waiting on one
+     * nor finished -- running, or waiting on the database.
+     *
+     * @var \WeakMap<object, true>
+     */
+    private \WeakMap $tasks;
+
+    /** @var \WeakMap<object, true> */
+    private \WeakMap $parked;
+
+    private int $running = 0;
+
+    /** What wakes the main context's wait in the event loop; null while it is not waiting. */
+    private ?\Closure $wake = null;
+
+    public function __construct(private readonly Orm $orm)
+    {
+        $this->tasks = new \WeakMap();
+        $this->parked = new \WeakMap();
+    }
 
     /**
      * Registers a relation load for this tick and suspends until it has run.
@@ -48,6 +76,22 @@ final class BatchScheduler
             $this->pending[$key]['parents'][$groupKey] = $parent;
         }
 
+        $fiber = \Fiber::getCurrent();
+        $concurrent = $this->concurrent();
+        if ($concurrent === null || $fiber === null || !isset($this->tasks[$fiber])) {
+            \Fiber::suspend();
+
+            return;
+        }
+
+        // A fiber waiting on a relation holds no database session: the flush
+        // that answers it needs sessions, and a pool held by fibers that are
+        // only waiting would starve it.
+        $concurrent->release();
+        $this->parked[$fiber] = true;
+        $this->running--;
+        $this->nudge();
+
         \Fiber::suspend();
     }
 
@@ -73,6 +117,12 @@ final class BatchScheduler
         $this->pending = [];
         $this->rounds++;
 
+        if ($this->concurrent() !== null) {
+            $this->flushConcurrently($groups);
+
+            return;
+        }
+
         foreach ($groups as $key => $group) {
             // A load that fails fails only the fibers that awaited it. They
             // resume to find their group missing, and resolveHasMany()'s
@@ -96,6 +146,46 @@ final class BatchScheduler
                 });
             } catch (\Throwable) {
                 continue;
+            }
+        }
+    }
+
+    /**
+     * flush() over a ConcurrentConnection: each group's load in a fiber of
+     * its own, as loadAs() runs one, all at once, waited for in the event
+     * loop. A load that fails fails only the fibers that awaited it, as
+     * above: the fiber's wrapper keeps the failure (task()).
+     *
+     * @param array<string, array{relation: RelationMeta, tenant: string, parents: array<string, Model>}> $groups
+     */
+    private function flushConcurrently(array $groups): void
+    {
+        $loads = [];
+        foreach ($groups as $key => $group) {
+            $loads[] = $this->task(function () use ($group, $key): void {
+                $this->orm->actAs($group['tenant'], function () use ($group, $key): void {
+                    $this->orm->loadRelationRows(
+                        $group['relation'],
+                        array_values($group['parents']),
+                        $key,
+                        LazyLoad::RENDER,
+                    );
+                });
+            });
+        }
+
+        foreach ($loads as $load) {
+            $this->running++;
+            $load->start();
+        }
+
+        $this->waitForTheDatabase();
+
+        // Nothing in a load waits on a relation. If one did, no flush would
+        // ever resume it, and the rows it was loading would never arrive.
+        foreach ($loads as $load) {
+            if (!$load->isTerminated()) {
+                throw new \LogicException('A batched relation load suspended; it has to run to completion.');
             }
         }
     }
@@ -136,6 +226,10 @@ final class BatchScheduler
      */
     public function run(array $tasks): array
     {
+        if ($this->concurrent() !== null) {
+            return $this->runConcurrently($tasks);
+        }
+
         $results = [];
         $live = [];
 
@@ -163,6 +257,138 @@ final class BatchScheduler
         }
 
         return $results;
+    }
+
+    /**
+     * run() over a ConcurrentConnection.
+     *
+     * The main context gives its session back first: it waits here while
+     * the tasks run, and a session it held would be one fewer for them. Then
+     * each round runs every task that can run, waits in the event loop
+     * while any is waiting on the database, and flushes once every task left
+     * is waiting on a relation.
+     *
+     * Each task is wrapped: one resumed by the event loop finishes inside
+     * the loop, where a throw would end the loop rather than the task, so
+     * the wrapper keeps the failure as the task's result, as settle() does.
+     *
+     * @param array<array-key, \Closure(): mixed> $tasks
+     * @return array<array-key, mixed>
+     */
+    private function runConcurrently(array $tasks): array
+    {
+        $this->concurrent()?->release();
+
+        $results = [];
+        $live = [];
+        foreach ($tasks as $id => $task) {
+            $live[$id] = $this->task($task);
+        }
+
+        foreach ($live as $fiber) {
+            $this->running++;
+            $fiber->start();
+        }
+
+        while (true) {
+            $this->waitForTheDatabase();
+
+            foreach ($live as $id => $fiber) {
+                if ($fiber->isTerminated()) {
+                    $results[$id] = $fiber->getReturn()[1];
+                    unset($live[$id]);
+                }
+            }
+
+            if ($live === []) {
+                return $results;
+            }
+
+            if (!$this->hasPending()) {
+                throw new \LogicException(
+                    'Render stalled: ' . \count($live) . ' fiber(s) suspended with no pending relation load. '
+                    . 'A suspend outside the scheduler cannot be resumed.',
+                );
+            }
+
+            $this->flush();
+
+            foreach ($live as $fiber) {
+                if (isset($this->parked[$fiber]) && $fiber->isSuspended()) {
+                    unset($this->parked[$fiber]);
+                    $this->running++;
+                    $fiber->resume();
+                }
+            }
+        }
+    }
+
+    /**
+     * A fiber of this scheduler's for $work, over a ConcurrentConnection: it
+     * answers [true, what $work returned] or [false, what it threw], and on
+     * its way out gives back its session and says it has finished.
+     *
+     * @param \Closure(): mixed $work
+     * @return \Fiber<mixed, mixed, array{bool, mixed}, mixed>
+     */
+    private function task(\Closure $work): \Fiber
+    {
+        $concurrent = $this->concurrent();
+        $fiber = new \Fiber(function () use ($work, $concurrent): array {
+            try {
+                return [true, $work()];
+            } catch (\Throwable $e) {
+                return [false, $e];
+            } finally {
+                $concurrent?->release();
+                $this->running--;
+                $this->nudge();
+            }
+        });
+        $this->tasks[$fiber] = true;
+
+        return $fiber;
+    }
+
+    /**
+     * Waits in the event loop until no fiber of this scheduler's is running
+     * or waiting on the database: each has finished or waits on a relation.
+     */
+    private function waitForTheDatabase(): void
+    {
+        $concurrent = $this->concurrent();
+        if ($concurrent === null) {
+            return;
+        }
+
+        try {
+            $concurrent->waitUntil($this->settled(...), function (\Closure $wake): void {
+                $this->wake = $wake;
+            });
+        } finally {
+            $this->wake = null;
+        }
+    }
+
+    /** Whether every fiber of this scheduler's has finished or waits on a relation. */
+    private function settled(): bool
+    {
+        return $this->running === 0;
+    }
+
+    private function nudge(): void
+    {
+        if ($this->wake !== null) {
+            ($this->wake)();
+        }
+    }
+
+    /** The connection, when it runs fibers' statements at once; null for a sync one. */
+    private function concurrent(): ?ConcurrentConnection
+    {
+        $connection = $this->orm->statements();
+
+        return $connection instanceof ConcurrentConnection ? $connection : null;
     }
 
     /**
