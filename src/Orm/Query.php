@@ -1228,6 +1228,7 @@ final readonly class Query
                 );
             }
 
+            $this->orm->noteRowTenants($this->meta, $ids);
             $this->followUpdate($ids, $set);
 
             return $count;
@@ -1255,6 +1256,8 @@ final readonly class Query
 
         return $this->orm->transaction(function (): int {
             $ids = $this->idsToWrite();
+            // Read while the rows are there to read.
+            $this->orm->noteRowTenants($this->meta, $ids);
 
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {

@@ -526,8 +526,11 @@ final class Orm
      * an update reaches only the subscribers a render in that tenant allowed.
      *
      * A write made inside withinSubtree() or acrossTenants() is made as the
-     * tenant in force, which is all this can name; one made as the child is
-     * made by actAs()ing it.
+     * tenant in force, but the rows an update or a delete there reaches may
+     * be a child's, or anyone's: each such row's own tenant is named too
+     * (noteRowTenants(), ADR 0106), so the child's pages and cached queries
+     * are told of a write to its row as they are when the write actAs()es
+     * it. An insert is stamped with the tenant in force, already named.
      *
      * @template T
      * @param \Closure(): T $work
@@ -547,6 +550,53 @@ final class Orm
         } finally {
             if (\count($this->entered) > $frame) {
                 array_splice($this->entered, $frame);
+            }
+        }
+    }
+
+    /**
+     * Names, for every tenantsEnteredBy() open, the tenants the rows of
+     * $meta keyed $ids are stored in -- before a delete removes them, or
+     * after an update wrote them -- where the write reached past the tenant
+     * in force: inside withinSubtree() or acrossTenants() (ADR 0106).
+     *
+     * Asked of the database rather than the models: a statement-level
+     * update or delete reads no model, and a model need not map its tenant
+     * column. Nothing is asked where nothing would change -- no frame open,
+     * no tenant column, or a write held to the tenant in force, which is
+     * named already -- so the narrow write, the common one, costs nothing.
+     *
+     * @param list<string> $ids
+     *
+     * @internal for the Orm and its query builder, inside this package
+     */
+    public function noteRowTenants(ModelMeta $meta, array $ids): void
+    {
+        if ($this->entered === [] || $meta->tenantColumn === null || $ids === [] || !$this->isWidened()) {
+            return;
+        }
+
+        foreach (array_chunk($ids, 1_000) as $chunk) {
+            $rows = $this->connection->select(
+                sprintf(
+                    'SELECT DISTINCT "%s" AS "tenant" FROM "%s" WHERE "%s" IN (%s)',
+                    $meta->tenantColumn,
+                    $meta->table,
+                    $meta->idColumn,
+                    implode(', ', array_fill(0, \count($chunk), '?')),
+                ),
+                $chunk,
+            );
+            foreach ($rows as $row) {
+                $tenant = $row['tenant'] ?? null;
+                if (!\is_string($tenant) || $tenant === '') {
+                    continue;
+                }
+                foreach ($this->entered as $frame => $tenants) {
+                    if (!\in_array($tenant, $tenants, true)) {
+                        $this->entered[$frame][] = $tenant;
+                    }
+                }
             }
         }
     }
@@ -1780,6 +1830,7 @@ final class Orm
         if ($restore !== null) {
             $this->journal($restore);
         }
+        $this->noteRowTenants($meta, [$meta->keyOf($model)]);
         $written = $meta->writeValues($model);
         $this->journalSnapshot($model);
         $model->markClean($written);
@@ -1800,6 +1851,9 @@ final class Orm
         if ($scope !== '') {
             $sql .= " AND {$scope}";
         }
+
+        // Read while the row is there to read.
+        $this->noteRowTenants($meta, [$meta->keyOf($model)]);
 
         $this->connection->execute($sql, [$meta->keyOf($model), ...$scopeBindings]);
         $this->identityMap->forget($meta->class, $meta->keyOf($model));
