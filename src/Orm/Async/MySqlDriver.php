@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Tinvar\Orm\Async;
 
 use Amp\Mysql\MysqlConfig;
+use Amp\Mysql\Internal\ConnectionProcessor;
 use Amp\Mysql\MysqlConnection;
+use Amp\Mysql\SocketMysqlConnection;
 use Amp\Postgres\PostgresConnection;
 use Amp\Sql\SqlQueryError;
 use Amp\Sql\SqlResult;
@@ -21,10 +23,8 @@ use function Amp\Mysql\connect;
  * is the one line there. A session is told whether to refuse writes, by
  * transaction_read_only, which statements outside a transaction run under
  * as well -- where PdoConnection holds a MySQL read-only scope in PHP alone
- * -- and cleared by setting it back. A session-wide setting a raw
- * statement makes is not cleared: MySQL's own reset is a protocol command
- * the client keeps to itself, and it would drop what the session was
- * opened with, the SQL mode, too.
+ * -- and cleared on its way back by MySQL's own reset, which takes
+ * everything a raw statement left on it as well (clear()).
  *
  * @internal AsyncConnection's, inside this package
  */
@@ -84,15 +84,55 @@ final readonly class MySqlDriver implements Driver
         return null;
     }
 
+    /**
+     * COM_RESET_CONNECTION, MySQL's own reset: an open transaction rolled
+     * back, table locks and GET_LOCK() locks released, temporary tables and
+     * prepared statements dropped, user variables gone, every session
+     * variable back to the server's -- whatever a raw statement left. Then
+     * what the session was opened with, its character set and SQL mode,
+     * which the reset set back to the server's too, is set again.
+     *
+     * amphp/mysql sends the command but keeps it to its connection's
+     * internals, so it is reached by reflection, on the exact version
+     * pinned. Should that ever fail -- another class, the property gone --
+     * the clearing fails, and the pool closes the session rather than lend
+     * it on uncleared.
+     */
     public function clear(PostgresConnection|MysqlConnection $link): void
     {
-        $link->query('SET SESSION transaction_read_only = OFF');
+        if (!$link instanceof SocketMysqlConnection) {
+            throw new \LogicException('Only amphp/mysql\'s socket connection can be reset.');
+        }
+
+        $processor = new \ReflectionProperty(SocketMysqlConnection::class, 'processor')->getValue($link);
+        if (!$processor instanceof ConnectionProcessor) {
+            throw new \LogicException('amphp/mysql\'s connection no longer keeps the processor this resets it through.');
+        }
+        $processor->resetConnection()->await();
+
+        $link->useCharacterSet($this->config->getCharset(), $this->config->getCollation());
+        $mode = $this->config->getSqlMode();
+        if ($mode !== null) {
+            $link->execute('SET SESSION sql_mode = ?', [$mode]);
+        }
     }
 
     /** @return SqlResult<mixed> */
     public function execute(PostgresConnection|MysqlConnection $link, string $sql, array $bindings): SqlResult
     {
-        return $link->execute($sql, Bindings::asText($bindings));
+        try {
+            return $link->execute($sql, Bindings::asText($bindings));
+        } catch (SqlQueryError $e) {
+            // ER_UNSUPPORTED_PS: a statement MySQL will not prepare --
+            // START TRANSACTION, LOCK TABLES. pdo_mysql sends one of these
+            // as text instead, and so does this, when there is nothing to
+            // bind: its answer is text, as PDO's is then.
+            if ($bindings !== [] || !str_starts_with($e->getMessage(), 'MySQL error (1295)')) {
+                throw $e;
+            }
+
+            return $link->query($sql);
+        }
     }
 
     public function error(\Throwable $failure): \PDOException

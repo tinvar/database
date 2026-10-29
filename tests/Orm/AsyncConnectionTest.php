@@ -160,6 +160,31 @@ describe('on Postgres, with row-level security', function () {
         }, poolSize: 1);
     });
 
+    it('hands the next fiber none of a session\'s temporary tables, advisory locks or settings', function () {
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            $left = async(static function () use ($connection): int {
+                $connection->execute('CREATE TEMPORARY TABLE scratch (a INTEGER)');
+                $connection->select('SELECT pg_advisory_lock(87)');
+                $connection->execute("SET statement_timeout = '7s'");
+                $connection->select("SELECT set_config('app.other', 'x', false)");
+
+                return backend($connection);
+            })->await();
+
+            [$pid, $state] = async(static fn (): array => [backend($connection), $connection->select(
+                "SELECT to_regclass('pg_temp.scratch') AS scratch, current_setting('statement_timeout') AS timeout, "
+                . "current_setting('app.other', true) AS other, "
+                . "(SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()) AS locks",
+            )[0]])->await();
+
+            expect($pid)->toBe($left)
+                ->and($state['scratch'])->toBeNull()
+                ->and($state['timeout'])->toBe('0')
+                ->and($state['other'] ?? '')->toBe('')
+                ->and($state['locks'])->toBe(0);
+        }, poolSize: 1);
+    });
+
     it('clears what a raw statement set on a session, and closes one it cannot clear', function () {
         Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
             // A raw SET ROLE: the session starts as the policy's role, and
@@ -481,6 +506,45 @@ describe('on MySQL', function () {
             expect($states)->each->toBe(0)
                 ->and($connection->execute("INSERT INTO brands VALUES ('b-b', 'B', 1)"))->toBe(1);
         });
+    });
+
+    it('hands the next fiber none of a session\'s transaction, variables, temporary tables, locks or modes', function () {
+        Shelves::onMySqlAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            $mode = $connection->select('SELECT @@SESSION.sql_mode AS mode')[0]['mode'];
+            $connection->release();
+
+            $left = async(static function () use ($connection): int {
+                $connection->execute('START TRANSACTION');
+                $connection->execute("INSERT INTO brands VALUES ('b-open', 'Open', 1)");
+                $connection->execute('SET @tenant = 42');
+                $connection->execute('CREATE TEMPORARY TABLE scratch (a INTEGER)');
+                $connection->select("SELECT GET_LOCK('tinvar_87', 0)");
+                $connection->execute("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+
+                return (int) $connection->select('SELECT CONNECTION_ID() AS id')[0]['id'];
+            })->await();
+
+            [$id, $state, $scratch] = async(static function () use ($connection): array {
+                $state = $connection->select(
+                    "SELECT CONNECTION_ID() AS id, @tenant AS tenant, IS_USED_LOCK('tinvar_87') AS holder, @@SESSION.sql_mode AS mode",
+                )[0];
+                try {
+                    $connection->select('SELECT * FROM scratch');
+                    $scratch = true;
+                } catch (\PDOException) {
+                    $scratch = false;
+                }
+
+                return [(int) $state['id'], $state, $scratch];
+            })->await();
+
+            expect($id)->toBe($left)
+                ->and($state['tenant'])->toBeNull()
+                ->and($state['holder'])->toBeNull()
+                ->and($state['mode'])->toBe($mode)
+                ->and($scratch)->toBeFalse()
+                ->and(brands($connection))->toBe(['Xi', 'Ypsilon', 'Zeta']);
+        }, poolSize: 1);
     });
 
     it('closes a session whose statement runs past the timeout', function () {
