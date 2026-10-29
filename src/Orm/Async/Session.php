@@ -64,8 +64,15 @@ final class Session
     /** The server's id for this session's backend (Driver::backend()). */
     public readonly int $backend;
 
-    public function __construct(public readonly PostgresConnection|MysqlConnection $link, Driver $driver)
+    /** When it was last handed back cleared, on the pool's clock: how long it has waited idle. */
+    public float $idleSince;
+
+    /**
+     * @param float $openedAt when it was opened, on the pool's clock: its lifetime runs from here
+     */
+    public function __construct(public readonly PostgresConnection|MysqlConnection $link, Driver $driver, public readonly float $openedAt = 0.0)
     {
+        $this->idleSince = $openedAt;
         $this->backend = $driver->backend($link);
         $this->tenant = $driver->tenantKey('', false, []);
         $this->readOnly = false;

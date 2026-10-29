@@ -26,6 +26,24 @@ use function Amp\async;
  * The pool lives as long as the worker; sessions outlive requests, and
  * nothing a request told one outlives its clearing.
  *
+ * And it keeps a clock. A session lives at most `maxLifetime` seconds from
+ * its connect, and waits idle at most `idleTimeout`: past either it is
+ * closed rather than lent, and one past its lifetime on its way back is
+ * closed rather than kept -- so a worker that runs for days does not hold
+ * sessions a server or a proxy between has long since timed out, nor one
+ * session for ever against a server whose settings or failover moved on.
+ * Nothing runs between requests to close them -- FrankenPHP's worker runs
+ * no event loop while it waits -- so the clock is read when a session is
+ * asked for or handed back, every idle one past its time closed then.
+ *
+ * An idle session is asked `SELECT 1` before it is lent, within the
+ * checkout timeout: one that does not answer -- the server restarted, a
+ * proxy dropped it -- is closed, never lent, and the checkout goes on to
+ * the next or a new one. Without it, the first statement of whichever
+ * fiber was lent a dead session failed, and with it the fiber's work. A
+ * session idle for less than `checkAfter` is lent unasked: 0, the
+ * default, asks every time.
+ *
  * @internal AsyncConnection's, inside this package
  */
 final class Pool
@@ -45,16 +63,32 @@ final class Pool
     /** @var DeferredFuture<null>|null completed when the last clearing queued is done */
     private ?DeferredFuture $cleared = null;
 
+    /**
+     * @param float $idleTimeout seconds a session may wait idle before it is closed rather than lent
+     * @param float $maxLifetime seconds from its connect after which a session is closed rather than lent or kept
+     * @param float $checkAfter seconds idle after which a session is asked SELECT 1 before it is lent; 0 for always
+     * @param (\Closure(): float)|null $clock seconds on a monotonic clock; hrtime() unless given
+     */
     public function __construct(
         private readonly Driver $driver,
         private readonly int $size,
         private readonly float $checkoutTimeout,
+        private readonly float $idleTimeout = 240.0,
+        private readonly float $maxLifetime = 1800.0,
+        private readonly float $checkAfter = 0.0,
+        private readonly ?\Closure $clock = null,
     ) {
         if ($size < 1) {
             throw new \InvalidArgumentException('A pool holds at least one session.');
         }
         if ($checkoutTimeout <= 0) {
             throw new \InvalidArgumentException('A checkout waits some time for a session to come free.');
+        }
+        if ($idleTimeout <= 0 || $maxLifetime <= 0) {
+            throw new \InvalidArgumentException('A session\'s idle timeout and lifetime are some time: a pool that keeps sessions for ever is the one this replaces.');
+        }
+        if ($checkAfter < 0) {
+            throw new \InvalidArgumentException('A session is asked whether it answers after 0 seconds idle or more.');
         }
     }
 
@@ -69,11 +103,15 @@ final class Pool
         $deadline = hrtime(true) + (int) ($this->checkoutTimeout * 1e9);
 
         while (true) {
+            $this->expire();
             while (($session = array_pop($this->idle)) !== null) {
-                if (!$session->link->isClosed()) {
+                if ($session->link->isClosed()) {
+                    $this->forget($session);
+                    continue;
+                }
+                if ($this->answers($session)) {
                     return $session;
                 }
-                $this->forget($session);
             }
 
             if ($this->open < $this->size) {
@@ -82,7 +120,7 @@ final class Pool
                 try {
                     $link = $this->driver->connect();
 
-                    return new Session($link, $this->driver);
+                    return new Session($link, $this->driver, $this->now());
                 } catch (\Throwable $e) {
                     $link?->close();
                     $this->open--;
@@ -145,7 +183,14 @@ final class Pool
             $clearing = async(fn () => $this->clear($session));
             try {
                 $clearing->await(new TimeoutCancellation($this->checkoutTimeout));
-                $this->idle[] = $session;
+                // Cleared, and past its lifetime: closed now rather than
+                // kept for a checkout that would close it anyway.
+                if ($this->now() - $session->openedAt >= $this->maxLifetime) {
+                    $this->discard($session);
+                } else {
+                    $session->idleSince = $this->now();
+                    $this->idle[] = $session;
+                }
             } catch (\Throwable) {
                 $clearing->ignore();
                 $this->discard($session);
@@ -227,6 +272,61 @@ final class Pool
             $this->discard($session);
         }
         $this->idle = [];
+    }
+
+    /**
+     * Closes every idle session past its idle timeout or its lifetime. The
+     * idle list is oldest first, as sessions come back, but a lifetime runs
+     * from the connect, so every one is looked at.
+     */
+    private function expire(): void
+    {
+        $now = $this->now();
+        $kept = [];
+        foreach ($this->idle as $session) {
+            if ($now - $session->idleSince >= $this->idleTimeout || $now - $session->openedAt >= $this->maxLifetime) {
+                $this->discard($session);
+            } else {
+                $kept[] = $session;
+            }
+        }
+        $this->idle = $kept;
+    }
+
+    /**
+     * Whether an idle session still answers, asked within the checkout
+     * timeout. One that does not is closed, and is never lent: its backend
+     * is gone, or no answer can be trusted to come.
+     */
+    private function answers(Session $session): bool
+    {
+        if ($this->now() - $session->idleSince < $this->checkAfter) {
+            return true;
+        }
+
+        $session->busy = true;
+        $asking = async(static fn () => $session->link->query('SELECT 1'));
+        try {
+            $asking->await(new TimeoutCancellation($this->checkoutTimeout));
+            $session->busy = false;
+
+            return true;
+        } catch (\Throwable) {
+            $asking->ignore();
+
+            return false;
+        } finally {
+            // Unanswered, or answered with a failure: closed. One still
+            // busy has its statement cancelled first, as any is.
+            if ($session->busy) {
+                $this->discard($session);
+            }
+        }
+    }
+
+    private function now(): float
+    {
+        return $this->clock === null ? hrtime(true) / 1e9 : ($this->clock)();
     }
 
     /**

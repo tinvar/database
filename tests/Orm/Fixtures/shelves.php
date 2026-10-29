@@ -225,15 +225,15 @@ final class Shelves
      * schema as the same role, given in the connection's options.
      *
      * @param \Closure(self, AsyncConnection): void $test
+     * @param array{idleTimeout?: float, maxLifetime?: float, checkAfter?: float, clock?: \Closure(): float} $pool the pool's clock
      */
-    public static function onPostgresAsync(\Closure $test, int $poolSize = 4, ?float $statementTimeout = null): void
+    public static function onPostgresAsync(\Closure $test, int $poolSize = 4, ?float $statementTimeout = null, array $pool = []): void
     {
-        self::underPolicies(static function (self $shelves, string $schema, string $role) use ($test, $poolSize, $statementTimeout): void {
+        self::underPolicies(static function (self $shelves, string $schema, string $role) use ($test, $poolSize, $statementTimeout, $pool): void {
             $connection = AsyncConnection::postgres(
                 Databases::asyncPostgres("-c search_path={$schema} -c role={$role}"),
                 'pgsql-async',
-                $poolSize,
-                statementTimeout: $statementTimeout,
+                ...['poolSize' => $poolSize, 'statementTimeout' => $statementTimeout, ...$pool],
             );
             try {
                 $test($shelves, $connection);
@@ -304,6 +304,7 @@ final class Shelves
      * scratch database, each started with ANSI_QUOTES in its SQL mode.
      *
      * @param \Closure(self, AsyncConnection): void $test
+     * @param array{idleTimeout?: float, maxLifetime?: float, checkAfter?: float, clock?: \Closure(): float} $pool the pool's clock
      */
     public static function onMySqlAsync(\Closure $test, int $poolSize = 4, ?float $statementTimeout = null): void
     {

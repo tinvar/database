@@ -58,6 +58,16 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
     /** How long a statement waits for a session to come free, in seconds. */
     public const float CHECKOUT_TIMEOUT = 10.0;
 
+    /**
+     * How long a session may wait idle before it is closed rather than lent,
+     * in seconds: under the five minutes and more that servers, poolers and
+     * load balancers between commonly drop an idle connection at.
+     */
+    public const float IDLE_TIMEOUT = 240.0;
+
+    /** How long a session lives from its connect before it is closed rather than lent or kept, in seconds. */
+    public const float MAX_LIFETIME = 1800.0;
+
     private int $statements = 0;
 
     /** @var list<string> */
@@ -92,18 +102,20 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
     /** @var (\Closure(): array{string, bool, list<string>})|null */
     private ?\Closure $tenantScope = null;
 
+    /** @param array{idleTimeout: float, maxLifetime: float, checkAfter: float, clock: (\Closure(): float)|null} $clock */
     private function __construct(
         private readonly Driver $driver,
         private readonly string $name,
         int $poolSize,
         float $checkoutTimeout,
         private readonly ?float $statementTimeout,
+        array $clock,
     ) {
         if ($statementTimeout !== null && $statementTimeout <= 0) {
             throw new \InvalidArgumentException('A statement timeout is some time; leave it null for none.');
         }
 
-        $this->pool = new Pool($driver, $poolSize, $checkoutTimeout);
+        $this->pool = new Pool($driver, $poolSize, $checkoutTimeout, $clock['idleTimeout'], $clock['maxLifetime'], $clock['checkAfter'], $clock['clock']);
         $this->leases = new \WeakMap();
     }
 
@@ -118,6 +130,10 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
      *
      * @param float|null $statementTimeout seconds a statement may run before its
      *        session is closed under it and it fails; null for none
+     * @param float $idleTimeout seconds a pooled session may wait idle before it is closed rather than lent
+     * @param float $maxLifetime seconds from its connect after which a session is closed rather than lent or kept
+     * @param float $checkAfter seconds idle after which a session is asked SELECT 1 before it is lent; 0, every time
+     * @param (\Closure(): float)|null $clock the pool's clock, in seconds; a monotonic one unless given (for tests)
      */
     public static function postgres(
         PostgresConfig $config,
@@ -125,14 +141,23 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
         int $poolSize = self::POOL_SIZE,
         float $checkoutTimeout = self::CHECKOUT_TIMEOUT,
         ?float $statementTimeout = null,
+        float $idleTimeout = self::IDLE_TIMEOUT,
+        float $maxLifetime = self::MAX_LIFETIME,
+        float $checkAfter = 0.0,
+        ?\Closure $clock = null,
     ): self {
-        return new self(new PostgresDriver($config), $name, $poolSize, $checkoutTimeout, $statementTimeout);
+        return new self(new PostgresDriver($config), $name, $poolSize, $checkoutTimeout, $statementTimeout, [
+            'idleTimeout' => $idleTimeout, 'maxLifetime' => $maxLifetime, 'checkAfter' => $checkAfter, 'clock' => $clock,
+        ]);
     }
 
     /**
      * MySQL. The SQL mode a session starts with is the config's
      * (MysqlConfig::withSqlMode()); the ORM quotes identifiers as standard
-     * SQL does, so it wants ANSI_QUOTES in it, as on PdoConnection.
+     * SQL does, so it wants ANSI_QUOTES in it, as on PdoConnection. The
+     * pool's clock is as postgres() takes it.
+     *
+     * @param (\Closure(): float)|null $clock
      */
     public static function mysql(
         MysqlConfig $config,
@@ -140,8 +165,14 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
         int $poolSize = self::POOL_SIZE,
         float $checkoutTimeout = self::CHECKOUT_TIMEOUT,
         ?float $statementTimeout = null,
+        float $idleTimeout = self::IDLE_TIMEOUT,
+        float $maxLifetime = self::MAX_LIFETIME,
+        float $checkAfter = 0.0,
+        ?\Closure $clock = null,
     ): self {
-        return new self(new MySqlDriver($config), $name, $poolSize, $checkoutTimeout, $statementTimeout);
+        return new self(new MySqlDriver($config), $name, $poolSize, $checkoutTimeout, $statementTimeout, [
+            'idleTimeout' => $idleTimeout, 'maxLifetime' => $maxLifetime, 'checkAfter' => $checkAfter, 'clock' => $clock,
+        ]);
     }
 
     public function select(string $sql, array $bindings = []): array

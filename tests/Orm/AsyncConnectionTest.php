@@ -53,6 +53,16 @@ function backend(AsyncConnection $connection): int
     return \is_int($pid) ? $pid : throw new \LogicException('No backend pid.');
 }
 
+/** Ends a backend from the server's side, as a restart or a proxy's timeout would, and waits until it is gone. */
+function terminate(int $pid): void
+{
+    $admin = Databases::another('pgsql');
+    $admin->query("SELECT pg_terminate_backend({$pid})");
+    for ($i = 0; $i < 100 && $admin->query("SELECT 1 FROM pg_stat_activity WHERE pid = {$pid}")->fetch() !== false; $i++) {
+        usleep(20_000);
+    }
+}
+
 describe('on Postgres, with row-level security', function () {
     it('runs statements from different fibers at once, each on a session of its own', function () {
         Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
@@ -316,6 +326,96 @@ describe('on Postgres, with row-level security', function () {
                 ->and($connection->sessionsOpen())->toBe(0)
                 ->and(backend($connection))->not->toBe($slow);
         }, statementTimeout: 0.3);
+    });
+
+    it('closes a session idle past its timeout rather than lend it', function () {
+        $now = 1000.0;
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection) use (&$now): void {
+            $first = backend($connection);
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+            expect($connection->idleSessions())->toHaveCount(1);
+
+            $now += 59.0;
+            expect(backend($connection))->toBe($first);
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+
+            // Idle a minute: closed at the next checkout, and a fresh one lent.
+            $now += 60.0;
+            expect(backend($connection))->not->toBe($first)
+                ->and($connection->sessionsOpen())->toBe(1);
+        }, pool: ['idleTimeout' => 60.0, 'clock' => static function () use (&$now): float {
+            return $now;
+        }]);
+    });
+
+    it('closes a session past its lifetime, on its way back and before it is lent', function () {
+        $now = 1000.0;
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection) use (&$now): void {
+            $first = backend($connection);
+            $now += 50.0;
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+            expect($connection->idleSessions())->toHaveCount(1);
+
+            // Still young: lent again. Then past its 100 s while lent, and
+            // handed back: closed, not kept.
+            expect(backend($connection))->toBe($first);
+            $now += 60.0;
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+            expect($connection->idleSessions())->toBe([])
+                ->and($connection->sessionsOpen())->toBe(0);
+
+            // And one that ages out while it waits idle is not lent.
+            $second = backend($connection);
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+            $now += 101.0;
+            expect(backend($connection))->not->toBe($second)
+                ->and($connection->sessionsOpen())->toBe(1);
+        }, pool: ['maxLifetime' => 100.0, 'idleTimeout' => 1000.0, 'clock' => static function () use (&$now): float {
+            return $now;
+        }]);
+    });
+
+    it('asks an idle session whether it answers before lending it, and closes one the server dropped', function () {
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            $dropped = backend($connection);
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+
+            // The server ends the backend while it waits idle -- a restart,
+            // a proxy's timeout -- and nothing here hears of it.
+            terminate($dropped);
+
+            // Lent a fresh one, and the first statement runs; before, it
+            // failed on the dead session.
+            expect(backend($connection))->not->toBe($dropped)
+                ->and($connection->sessionsOpen())->toBe(1);
+        });
+    });
+
+    it('lends a session idle less than checkAfter without asking it', function () {
+        $now = 1000.0;
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection) use (&$now): void {
+            $dropped = backend($connection);
+            $connection->release();
+            $connection->rollBackOpenTransaction();
+            terminate($dropped);
+
+            // Idle a second, under the five it is asked after: lent as it
+            // is, so its first statement finds it dead -- and it is closed.
+            $now += 1.0;
+            expect(static fn () => backend($connection))->toThrow(\PDOException::class)
+                ->and($connection->sessionsOpen())->toBe(0);
+
+            $now += 10.0;
+            expect(backend($connection))->not->toBe($dropped);
+        }, pool: ['checkAfter' => 5.0, 'clock' => static function () use (&$now): float {
+            return $now;
+        }]);
     });
 
     it('closes a session a request ends under mid-statement, rather than hand it back with the answer pending', function () {
