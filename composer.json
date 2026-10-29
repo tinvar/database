@@ -9,11 +9,15 @@
     "tinvar/support": "0.4.*"
   },
   "require-dev": {
+    "amphp/mysql": "3.1.1",
+    "amphp/postgres": "2.2.1",
     "pestphp/pest": "^4.0",
     "phpstan/phpstan": "^2.1"
   },
   "suggest": {
-    "ext-pdo": "Every connection the ORM makes is a PDO connection.",
+    "amphp/mysql": "Fiber mode's async MySQL driver, AsyncConnection::mysql(): statements from a render's fibers at once.",
+    "amphp/postgres": "Fiber mode's async Postgres driver, AsyncConnection::postgres(), with ext-pgsql: statements from a render's fibers at once.",
+    "ext-pdo": "Every connection the ORM makes but the async driver's is a PDO connection.",
     "ext-pdo_pgsql": "PostgreSQL driver, with the row-level security that holds a tenant's rows to it.",
     "phpstan/phpstan": "Checks the column and relation names in query builder calls against the models (extension.neon)."
   },
