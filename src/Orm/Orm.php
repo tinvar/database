@@ -168,7 +168,8 @@ final class Orm
      *        32 levels says "not under", a subtree of more than 1,000 tenants
      *        throws -- hold whatever an implementation returns (ADR 0056).
      * @param (\Closure(): \DateTimeImmutable)|null $clock what now() answers: the time a
-     *        new row's createdAt is stamped with. The system's, in UTC, unless given --
+     *        new row's createdAt, and a written row's updatedAt, are stamped with.
+     *        The system's, in UTC, unless given --
      *        a test's moved clock, say.
      */
     public function __construct(
@@ -1634,7 +1635,7 @@ final class Orm
 
     /**
      * The time a write is made at, as the ORM stamps it: a new row's
-     * createdAt.
+     * createdAt, and the updatedAt of a row inserted or updated.
      */
     public function now(): \DateTimeImmutable
     {
@@ -1663,8 +1664,13 @@ final class Orm
         // the ORM": a createdAt typed as a moment, and `private(set)` as the
         // spec writes it, is the ORM's to fill, as the key is. One the model
         // set itself -- a backfill, an import keeping its dates -- is kept.
-        if ($meta->createdAtProperty !== null && !$this->isSet($model, $meta, $meta->createdAtProperty)) {
-            $meta->set($model, $meta->createdAtProperty, $this->now());
+        // An updatedAt likewise, at the same moment, so a new row reads as
+        // changed when it was made.
+        $now = $this->now();
+        foreach ([$meta->createdAtProperty, $meta->updatedAtProperty] as $stamped) {
+            if ($stamped !== null && !$this->isSet($model, $meta, $stamped)) {
+                $meta->set($model, $stamped, $now);
+            }
         }
 
         $values = $meta->writeValues($model);
@@ -1724,6 +1730,22 @@ final class Orm
             return $model;   // nothing to write
         }
 
+        // Every update moves updatedAt, unless this save set it itself -- a
+        // change to it is in the diff -- as insert() keeps one the model set.
+        // What it held is put back if the write is refused or rolled back,
+        // so a save tried again stamps it again rather than keeping this
+        // stamp as if the model had set it.
+        $updated = $meta->updatedAtProperty;
+        $restore = null;
+        if ($updated !== null && !\array_key_exists($meta->columns[$updated], $changes)) {
+            $previous = $this->isSet($model, $meta, $updated) ? [$updated => $meta->get($model, $updated)] : [];
+            $meta->set($model, $updated, $this->now());
+            $changes[$meta->columns[$updated]] = $meta->writeValues($model)[$meta->columns[$updated]];
+            $restore = static function () use ($model, $meta, $previous): void {
+                $meta->fill($model, $previous);
+            };
+        }
+
         [$scope, $scopeBindings] = $this->tenantScope($meta);
 
         $sql = sprintf(
@@ -1742,21 +1764,31 @@ final class Orm
             $sql .= " AND {$scope}";
         }
 
-        $affected = $this->connection->execute(
-            $sql,
-            [...array_values($changes), $meta->keyOf($model), ...$scopeBindings],
-        );
+        try {
+            $affected = $this->connection->execute(
+                $sql,
+                [...array_values($changes), $meta->keyOf($model), ...$scopeBindings],
+            );
 
-        // Nothing matched: the row is gone, or the tenant predicate excluded
-        // it. Treated as success, the change was lost and the model marked
-        // clean, so a retry sent nothing either. Thrown before markClean() so
-        // the change stays pending. (This relies on the driver counting rows
-        // matched, which SQLite and Postgres do; MySQL's PDO driver counts
-        // rows changed unless MYSQL_ATTR_FOUND_ROWS is set.)
-        if ($affected === 0) {
-            throw MissingRow::onUpdate($meta->class, $meta->keyOf($model));
+            // Nothing matched: the row is gone, or the tenant predicate excluded
+            // it. Treated as success, the change was lost and the model marked
+            // clean, so a retry sent nothing either. Thrown before markClean() so
+            // the change stays pending. (This relies on the driver counting rows
+            // matched, which SQLite and Postgres do; MySQL's PDO driver counts
+            // rows changed unless MYSQL_ATTR_FOUND_ROWS is set.)
+            if ($affected === 0) {
+                throw MissingRow::onUpdate($meta->class, $meta->keyOf($model));
+            }
+        } catch (\Throwable $e) {
+            if ($restore !== null) {
+                $restore();
+            }
+            throw $e;
         }
 
+        if ($restore !== null) {
+            $this->journal($restore);
+        }
         $written = $meta->writeValues($model);
         $this->journalSnapshot($model);
         $model->markClean($written);

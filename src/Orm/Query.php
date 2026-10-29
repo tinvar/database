@@ -1194,7 +1194,9 @@ final readonly class Query
         $this->assertRowsWritten('update()');
         $this->assertOffsetLimited();
 
-        $set = Fields::row($this->meta, $values, inserting: false);
+        // Every row it reaches takes updatedAt, as save() stamps it, unless
+        // $values sets it.
+        $set = Fields::row($this->meta, $values, inserting: false, now: $this->orm->now());
         if ($set === []) {
             throw new \InvalidArgumentException('update() sets at least one field.');
         }
@@ -1331,7 +1333,9 @@ final readonly class Query
      * Inserts $rows, and where one shares a #[Unique] key with a row there
      * already, updates that row instead: its $update fields -- every field
      * the rows set but the key's, by default; none to leave it as it was.
-     * Answers how many rows it inserted.
+     * Answers how many rows it inserted. A createdAt the ORM stamps is a
+     * new row's alone, and an updatedAt it stamps moves with each row
+     * updated, as save() treats them.
      *
      * The conflict target is the metadata's: $uniqueBy has to be the
      * columns of a key the model declares with #[Unique], in any order --
@@ -1417,7 +1421,7 @@ final readonly class Query
             $stored[] = $one;
         }
 
-        [$target, $set] = $uniqueBy === null ? [null, []] : $this->conflict($what, $stored, $columns, $uniqueBy, $update);
+        [$target, $set] = $uniqueBy === null ? [null, []] : $this->conflict($what, $stored, $columns, $uniqueBy, $update, $this->stamped($rows[array_key_first($rows)]));
 
         return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $tenant, $preset): int {
             // A row an upsert brings its key for may be the very row its
@@ -1480,10 +1484,17 @@ final readonly class Query
      * @param list<array<string, mixed>> $stored
      * @param list<string> $columns
      * @param list<string> $uniqueBy
+     * The ORM's stamps are held to what save() does with them: a createdAt
+     * it stamped is a new row's, so an existing row keeps its own -- never
+     * in the default, and refused by name; an updatedAt it stamped moves
+     * with every row the upsert updates, named or not, and with none where
+     * it updates nothing.
+     *
      * @param list<string>|null $update
+     * @param array{created: string|null, updated: string|null} $stamped the columns the ORM stamped, not the rows
      * @return array{non-empty-list<string>, list<string>}
      */
-    private function conflict(string $what, array $stored, array $columns, array $uniqueBy, ?array $update): array
+    private function conflict(string $what, array $stored, array $columns, array $uniqueBy, ?array $update, array $stamped): array
     {
         $key = array_map(fn (string $name): string => $this->ownColumn($name), $uniqueBy);
         $target = $this->meta->conflictTarget($key) ?? throw new MappingException(
@@ -1506,23 +1517,54 @@ final readonly class Query
         }
 
         $fixed = [...$target, $this->meta->idColumn];
+        $stamps = array_values(array_filter($stamped, \is_string(...)));
         if ($update === null) {
-            return [$target, array_values(array_diff($columns, $fixed))];
+            $set = array_values(array_diff($columns, $fixed, $stamps));
+        } else {
+            $set = [];
+            foreach ($update as $name) {
+                $column = $this->ownColumn($name);
+                if (\in_array($column, $fixed, true) || $column === $this->meta->tenantColumn) {
+                    throw new \InvalidArgumentException("{$what} updates no key: '{$name}' is what the row is found by.");
+                }
+                if (!\in_array($column, $columns, true)) {
+                    throw new \InvalidArgumentException("{$what} updates '{$name}', which the rows do not set.");
+                }
+                if ($column === $stamped['created']) {
+                    throw new \InvalidArgumentException("{$what} updates no createdAt the ORM stamped: '{$name}' is a new row's, and an existing row keeps its own.");
+                }
+                $set[] = $column;
+            }
+            $set = array_values(array_unique($set));
         }
 
-        $set = [];
-        foreach ($update as $name) {
-            $column = $this->ownColumn($name);
-            if (\in_array($column, $fixed, true) || $column === $this->meta->tenantColumn) {
-                throw new \InvalidArgumentException("{$what} updates no key: '{$name}' is what the row is found by.");
-            }
-            if (!\in_array($column, $columns, true)) {
-                throw new \InvalidArgumentException("{$what} updates '{$name}', which the rows do not set.");
-            }
-            $set[] = $column;
+        if ($set !== [] && $stamped['updated'] !== null && !\in_array($stamped['updated'], $set, true)) {
+            $set[] = $stamped['updated'];
         }
 
-        return [$target, array_values(array_unique($set))];
+        return [$target, $set];
+    }
+
+    /**
+     * The timestamp columns Fields::row() stamps on the rows of an insert()
+     * or upsert() -- a createdAt and an updatedAt typed as moments -- that
+     * the rows do not name themselves. Every row names the same fields, so
+     * the first says it for all.
+     *
+     * @param mixed $row the first row, an array writeRows() has checked
+     * @return array{created: string|null, updated: string|null}
+     */
+    private function stamped(mixed $row): array
+    {
+        $named = [];
+        foreach (\is_array($row) ? array_keys($row) : [] as $name) {
+            $named[] = $this->ownColumn((string) $name);
+        }
+        $column = fn (?string $property): ?string => $property === null || \in_array($this->meta->columns[$property], $named, true)
+            ? null
+            : $this->meta->columns[$property];
+
+        return ['created' => $column($this->meta->createdAtProperty), 'updated' => $column($this->meta->updatedAtProperty)];
     }
 
     /** A column of the model's own table, by any name it is known by. */

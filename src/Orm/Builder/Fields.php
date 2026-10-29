@@ -54,7 +54,8 @@ final class Fields
      * @param bool $inserting whether the row is new, and so may name its key, and its tenant
      * @param string|null $tenant the tenant in force, for a new row of a #[TenantScoped] model
      * @param bool $hooks run the model's #[BeforeSave] methods on the new row, as save() runs them on a new model
-     * @param \DateTimeImmutable|null $now the time a new row's createdAt is stamped with (Orm::now()), unless it names one
+     * @param \DateTimeImmutable|null $now the time a new row's createdAt, and any row's updatedAt, is stamped with
+     *        (Orm::now()), unless the row names it
      * @return array<string, mixed> column => stored value, or an Assignment update() writes
      */
     public static function row(ModelMeta $meta, array $values, bool $inserting, ?string $tenant = null, bool $hooks = false, ?\DateTimeImmutable $now = null): array
@@ -160,13 +161,19 @@ final class Fields
             }
         }
 
-        // A new row's createdAt, as save() stamps it (Orm::insert()), unless
-        // the row names one -- which it can only where the model lets anyone
-        // set it: a private(set) one was refused above.
-        $created = $meta->createdAtProperty;
-        if ($inserting && $now !== null && $created !== null && !isset($properties[$created])) {
-            $meta->set($scratch, $created, $now);
-            $properties[$created] = $meta->columns[$created];
+        // A new row's createdAt, and the updatedAt of every row written --
+        // each row a bulk update() reaches -- as save() stamps them
+        // (Orm::insert(), Orm::update()), unless the write names one: which
+        // it can only where the model lets anyone set it, since a
+        // private(set) one was refused above. No copy reads one, or sets
+        // one: a copy is between built-in types, and a moment is a class.
+        if ($now !== null && ($inserting || $stored !== [] || $properties !== [])) {
+            foreach ($inserting ? [$meta->createdAtProperty, $meta->updatedAtProperty] : [$meta->updatedAtProperty] as $stamped) {
+                if ($stamped !== null && !isset($properties[$stamped]) && !\array_key_exists($meta->columns[$stamped], $stored)) {
+                    $meta->set($scratch, $stamped, $now);
+                    $properties[$stamped] = $meta->columns[$stamped];
+                }
+            }
         }
 
         // Each through the model's column reader, as save() stores it.
@@ -296,10 +303,11 @@ final class Fields
     {
         $meta->beforeSave($scratch);
 
-        // After the hooks, as save() stamps it: one a hook set is kept.
-        $created = $meta->createdAtProperty;
-        if ($now !== null && $created !== null && !new \ReflectionProperty($meta->class, $created)->isInitialized($scratch)) {
-            $meta->set($scratch, $created, $now);
+        // After the hooks, as save() stamps them: one a hook set is kept.
+        foreach ([$meta->createdAtProperty, $meta->updatedAtProperty] as $stamped) {
+            if ($now !== null && $stamped !== null && !new \ReflectionProperty($meta->class, $stamped)->isInitialized($scratch)) {
+                $meta->set($scratch, $stamped, $now);
+            }
         }
 
         $row = $meta->columnValues($scratch);

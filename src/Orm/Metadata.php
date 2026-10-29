@@ -108,6 +108,7 @@ final class Metadata
         $relations = [];
         $idProperty = null;
         $createdAt = null;
+        $updatedAt = null;
         /** @var list<array{string, string, (\Closure(mixed): mixed)|null, (\Closure(object): mixed)|null}> $plan */
         $plan = [];
 
@@ -133,6 +134,8 @@ final class Metadata
                 $idProperty = $name;
             } elseif ($name === 'createdAt' && self::isTimestamp($property)) {
                 $createdAt = $name;
+            } elseif ($name === 'updatedAt' && self::isTimestamp($property)) {
+                $updatedAt = $name;
             }
         }
 
@@ -158,13 +161,15 @@ final class Metadata
             beforeSave: self::compileBeforeSave($reflection),
             uniqueKeys: self::compileUniqueKeys($reflection, $columns, $relations, $columns[$idProperty], $tenantColumn),
             createdAtProperty: $createdAt,
+            updatedAtProperty: $updatedAt,
         );
     }
 
     /**
      * Whether a column property holds a moment the ORM can stamp: typed
      * DateTimeImmutable, or the interface it implements, and nothing else --
-     * a string or an int column named createdAt is the model's own to fill.
+     * a string or an int column named createdAt or updatedAt is the model's
+     * own to fill.
      */
     private static function isTimestamp(\ReflectionProperty $property): bool
     {

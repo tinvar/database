@@ -29,6 +29,8 @@ final class ModelMeta
      * @param list<list<string>>           $uniqueKeys each #[Unique] key, as its columns, without the tenant column
      * @param string|null                  $createdAtProperty a `createdAt` column typed as a moment, which
      *        the ORM stamps on insert when nothing has set it (Orm::now())
+     * @param string|null                  $updatedAtProperty an `updatedAt` column typed as a moment, which
+     *        the ORM stamps on insert and on every update unless that write sets it
      */
     public function __construct(
         public readonly string $class,
@@ -47,6 +49,7 @@ final class ModelMeta
         private readonly array $beforeSave = [],
         public readonly array $uniqueKeys = [],
         public readonly ?string $createdAtProperty = null,
+        public readonly ?string $updatedAtProperty = null,
     ) {
         $this->saving = new \WeakMap();
     }
