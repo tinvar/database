@@ -95,8 +95,8 @@ final class MappingException extends \RuntimeException
         return new self("{$class}::\${$property} is the pure enum {$enum}, which has no value to store; give it a string or int backing.");
     }
 
-    public static function unusableHook(string $class, string $method): self
+    public static function unusableHook(string $class, string $method, string $attribute = 'BeforeSave'): self
     {
-        return new self("{$class}: #[BeforeSave] {$method} must be an instance method that takes no arguments.");
+        return new self("{$class}: #[{$attribute}] {$method} must be an instance method that takes no arguments.");
     }
 }

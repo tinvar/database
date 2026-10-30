@@ -13,8 +13,8 @@ namespace Tinvar\Orm;
  */
 final class ModelMeta
 {
-    /** @var \WeakMap<Model, true> the models whose #[BeforeSave] hooks are running */
-    private \WeakMap $saving;
+    /** @var array<string, \WeakMap<Model, true>> by kind of hook, the models whose hooks of it are running */
+    private array $running = [];
 
     /**
      * @param class-string<Model>          $class
@@ -26,6 +26,9 @@ final class ModelMeta
      * @param \Closure(Model, string, mixed): void $write
      * @param \Closure(Model, string): mixed      $read
      * @param list<\Closure(Model): void>  $beforeSave the #[BeforeSave] methods, in the order they run
+     * @param list<\Closure(Model): void>  $afterSave the #[AfterSave] methods, likewise
+     * @param list<\Closure(Model): void>  $beforeDelete the #[BeforeDelete] methods, likewise
+     * @param list<\Closure(Model): void>  $afterDelete the #[AfterDelete] methods, likewise
      * @param list<list<string>>           $uniqueKeys each #[Unique] key, as its columns, without the tenant column
      * @param string|null                  $createdAtProperty a `createdAt` column typed as a moment, which
      *        the ORM stamps on insert when nothing has set it (Orm::now())
@@ -50,9 +53,10 @@ final class ModelMeta
         public readonly array $uniqueKeys = [],
         public readonly ?string $createdAtProperty = null,
         public readonly ?string $updatedAtProperty = null,
-    ) {
-        $this->saving = new \WeakMap();
-    }
+        private readonly array $afterSave = [],
+        private readonly array $beforeDelete = [],
+        private readonly array $afterDelete = [],
+    ) {}
 
     /**
      * Whether a save runs #[BeforeSave] methods: what a write through a
@@ -61,6 +65,18 @@ final class ModelMeta
     public function hasBeforeSave(): bool
     {
         return $this->beforeSave !== [];
+    }
+
+    /** Whether a save runs #[AfterSave] methods once its row is written. */
+    public function hasAfterSave(): bool
+    {
+        return $this->afterSave !== [];
+    }
+
+    /** Whether a delete runs #[BeforeDelete] or #[AfterDelete] methods. */
+    public function hasDeleteHooks(): bool
+    {
+        return $this->beforeDelete !== [] || $this->afterDelete !== [];
     }
 
     /**
@@ -198,20 +214,51 @@ final class ModelMeta
      */
     public function beforeSave(Model $model): void
     {
-        if ($this->beforeSave === []) {
+        $this->run('BeforeSave', $this->beforeSave, $model, 'saved');
+    }
+
+    /** Runs the model's #[AfterSave] methods, refusing one that saves its own model. */
+    public function afterSave(Model $model): void
+    {
+        $this->run('AfterSave', $this->afterSave, $model, 'saved');
+    }
+
+    /** Runs the model's #[BeforeDelete] methods, refusing one that deletes its own model. */
+    public function beforeDelete(Model $model): void
+    {
+        $this->run('BeforeDelete', $this->beforeDelete, $model, 'deleted');
+    }
+
+    /** Runs the model's #[AfterDelete] methods, refusing one that deletes its own model. */
+    public function afterDelete(Model $model): void
+    {
+        $this->run('AfterDelete', $this->afterDelete, $model, 'deleted');
+    }
+
+    /**
+     * Runs one kind of hook on $model in its compiled order, refusing the
+     * model's own save or delete from inside one: it would run the same
+     * hooks again, without end.
+     *
+     * @param list<\Closure(Model): void> $hooks
+     */
+    private function run(string $kind, array $hooks, Model $model, string $did): void
+    {
+        if ($hooks === []) {
             return;
         }
-        if (isset($this->saving[$model])) {
-            throw new \LogicException("A #[BeforeSave] hook of {$this->class} saved its own model, which would run the hooks without end.");
+        $running = $this->running[$kind] ??= new \WeakMap();
+        if (isset($running[$model])) {
+            throw new \LogicException("A #[{$kind}] hook of {$this->class} {$did} its own model, which would run the hooks without end.");
         }
 
-        $this->saving[$model] = true;
+        $running[$model] = true;
         try {
-            foreach ($this->beforeSave as $hook) {
+            foreach ($hooks as $hook) {
                 $hook($model);
             }
         } finally {
-            unset($this->saving[$model]);
+            unset($running[$model]);
         }
     }
 

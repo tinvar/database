@@ -1169,7 +1169,8 @@ final readonly class Query
      * model made of the fields set would show them a row that is not the
      * one stored, and `$this->shippedAt ??= now()` would overwrite a date
      * the row holds -- so update() would write past them. Save such rows
-     * one at a time (ADR 0073).
+     * one at a time (ADR 0073). So, too, on a model with #[AfterSave]
+     * methods, which run on a model of each row saved (ADR 0122).
      *
      * Two statements, in one transaction: the matching keys, locked where
      * the database can (FOR UPDATE on Postgres and MySQL; SQLite's write
@@ -1248,6 +1249,9 @@ final readonly class Query
      * again; refused in a loader or query body. A model the identity map
      * holds for one reads as unsaved afterwards, as after delete(), and
      * leaves every loaded relation it was in.
+     *
+     * Refused on a model with #[BeforeDelete] or #[AfterDelete] methods: a
+     * statement reads no model to run them on (ADR 0122).
      */
     public function delete(): int
     {
@@ -1255,6 +1259,7 @@ final readonly class Query
             return $this->rowsToWrite('delete()')->delete();
         }
         $this->orm->refuseWriteOf('delete()');
+        $this->refuseDeleteHooks();
         $this->assertRowsWritten('delete()');
         $this->assertOffsetLimited();
 
@@ -1328,6 +1333,11 @@ final readonly class Query
      * inserted, and the tenant is stamped after them whatever a hook did.
      * A hook that reads a field the row does not set throws, as it would
      * on a model missing it, and nothing is written (ADR 0073).
+     *
+     * Its #[AfterSave] methods run too, once every row is in: on each row
+     * read back as a model, in the order given, in the insert's
+     * transaction, so a hook that throws takes every row back (ADR 0122).
+     * One statement more, per MAX_VALUES rows, for a model that has them.
      *
      * @param list<array<string, mixed>> $rows each naming the same fields
      */
@@ -1457,9 +1467,15 @@ final readonly class Query
                 );
             }
 
-            return $target === null
-                ? $this->followInserted($stored, $columns)
-                : $this->followUpserted($stored, $columns, $target, $set, $tenant, $existed);
+            if ($target !== null) {
+                return $this->followUpserted($stored, $columns, $target, $set, $tenant, $existed);
+            }
+            $inserted = $this->followInserted($stored, $columns);
+            if ($this->meta->hasAfterSave()) {
+                $this->afterInserted($stored);
+            }
+
+            return $inserted;
         });
     }
 
@@ -1809,7 +1825,11 @@ final readonly class Query
         return $inserted;
     }
 
-    /** Refuses a write through a statement on a model whose saves run #[BeforeSave] methods. */
+    /**
+     * Refuses a write through a statement on a model whose saves run
+     * #[BeforeSave] or #[AfterSave] methods: it writes rows it never read,
+     * whole, so it has no model to run them on (ADR 0073, ADR 0122).
+     */
     private function refuseHooks(string $what): void
     {
         if ($this->meta->hasBeforeSave()) {
@@ -1817,6 +1837,51 @@ final readonly class Query
                 "{$this->class} has #[BeforeSave] methods, which keep what a model must be when it is saved; {$what} "
                 . 'writes rows it never read, whole, to run them on, and would write past them. Save each row, or insert() new ones.',
             );
+        }
+        if ($this->meta->hasAfterSave()) {
+            throw new \LogicException(
+                "{$this->class} has #[AfterSave] methods, which run on each row saved; {$what} "
+                . 'writes rows it never read, whole, to run them on, and would write past them. Save each row, or insert() new ones.',
+            );
+        }
+    }
+
+    /**
+     * Refuses a delete through a statement on a model whose deletes run
+     * #[BeforeDelete] or #[AfterDelete] methods: it deletes rows it never
+     * read, so it has no model to run them on (ADR 0122).
+     */
+    private function refuseDeleteHooks(): void
+    {
+        if ($this->meta->hasDeleteHooks()) {
+            throw new \LogicException(
+                "{$this->class} has #[BeforeDelete] or #[AfterDelete] methods, which run on each row deleted; delete() through a query "
+                . 'deletes rows it never read to run them on, and would delete past them. Delete each model with Orm::delete().',
+            );
+        }
+    }
+
+    /**
+     * After insert(), on a model with #[AfterSave] methods: each row read
+     * back as a model, by the keys just written, and its hooks run in the
+     * order the rows were given -- what save() runs once a new row is in,
+     * inside the same transaction, so a hook that throws takes every row
+     * back (ADR 0122).
+     *
+     * @param list<array<string, mixed>> $stored
+     */
+    private function afterInserted(array $stored): void
+    {
+        $byKey = [];
+        foreach (array_chunk(array_map(fn (array $row): string => (string) $row[$this->meta->idColumn], $stored), self::MAX_VALUES) as $chunk) {
+            foreach (self::of($this->orm, $this->class)->whereIn($this->meta->idProperty, $chunk)->fetch() as $model) {
+                $byKey[$model->primaryKey()] = $model;
+            }
+        }
+        foreach ($stored as $row) {
+            $model = $byKey[(string) $row[$this->meta->idColumn]]
+                ?? throw new \LogicException("{$this->class}: a row insert() wrote could not be read back to run its #[AfterSave] methods on.");
+            $this->meta->afterSave($model);
         }
     }
 

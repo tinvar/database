@@ -1658,6 +1658,12 @@ final class Orm
      * open no transaction of their own, so a hook's writes to other rows are
      * undone by a failed save only when the save runs inside transaction().
      *
+     * A model with #[AfterSave] methods is saved in a transaction of its
+     * own -- a savepoint inside one open already -- with its #[BeforeSave]
+     * methods, the write and those hooks in it, run once the row is written:
+     * a hook that throws takes the row back, and every write the hooks made
+     * with it (ADR 0122). A save that writes nothing runs none.
+     *
      * @template T of Model
      * @param T $model
      * @return T
@@ -1667,11 +1673,21 @@ final class Orm
         $this->refuseWrite('save()');
 
         $meta = Metadata::for($model::class);
-        $meta->beforeSave($model);
+        if (!$meta->hasAfterSave()) {
+            $meta->beforeSave($model);
+            $model->isPersisted() ? $this->update($model, $meta) : $this->insert($model, $meta);
 
-        return $model->isPersisted()
-            ? $this->update($model, $meta)
-            : $this->insert($model, $meta);
+            return $model;
+        }
+
+        $this->transaction(function () use ($model, $meta): void {
+            $meta->beforeSave($model);
+            if ($model->isPersisted() ? $this->update($model, $meta) : $this->insert($model, $meta)) {
+                $meta->afterSave($model);
+            }
+        });
+
+        return $model;
     }
 
     /**
@@ -1683,12 +1699,8 @@ final class Orm
         return $this->clock === null ? new \DateTimeImmutable('now', new \DateTimeZone('UTC')) : ($this->clock)();
     }
 
-    /**
-     * @template T of Model
-     * @param T $model
-     * @return T
-     */
-    private function insert(Model $model, ModelMeta $meta): Model
+    /** @return true a row was written, always */
+    private function insert(Model $model, ModelMeta $meta): bool
     {
         // UUIDv7 is minted here rather than by the database, so the model has
         // its key before the write and the identity map can hold it.
@@ -1746,15 +1758,11 @@ final class Orm
         $this->identityMap->remember($meta->class, $meta->keyOf($model), $model);
         $this->followWrite($meta, $meta->keyOf($model), $values);
 
-        return $model;
+        return true;
     }
 
-    /**
-     * @template T of Model
-     * @param T $model
-     * @return T
-     */
-    private function update(Model $model, ModelMeta $meta): Model
+    /** @return bool whether a row was written: false where nothing had changed */
+    private function update(Model $model, ModelMeta $meta): bool
     {
         $changes = $model->changes();
         unset($changes[$meta->idColumn]);
@@ -1768,7 +1776,7 @@ final class Orm
         }
 
         if ($changes === []) {
-            return $model;   // nothing to write
+            return false;   // nothing to write
         }
 
         // Every update moves updatedAt, unless this save set it itself -- a
@@ -1836,15 +1844,38 @@ final class Orm
         $model->markClean($written);
         $this->followWrite($meta, $meta->keyOf($model), $written);
 
-        return $model;
+        return true;
     }
 
-    /** Deletes a row, scoped to the tenant like every other write. */
+    /**
+     * Deletes a row, scoped to the tenant like every other write.
+     *
+     * A model with #[BeforeDelete] or #[AfterDelete] methods is deleted in a
+     * transaction of its own -- a savepoint inside one open already -- with
+     * the first run before the DELETE and the second after it: a hook that
+     * throws stops the delete, or puts the row back, and takes back what
+     * the hooks wrote with it (ADR 0122).
+     */
     public function delete(Model $model): void
     {
         $this->refuseWrite('delete()');
 
         $meta = Metadata::for($model::class);
+        if (!$meta->hasDeleteHooks()) {
+            $this->deleteRow($model, $meta);
+
+            return;
+        }
+
+        $this->transaction(function () use ($model, $meta): void {
+            $meta->beforeDelete($model);
+            $this->deleteRow($model, $meta);
+            $meta->afterDelete($model);
+        });
+    }
+
+    private function deleteRow(Model $model, ModelMeta $meta): void
+    {
         [$scope, $scopeBindings] = $this->tenantScope($meta);
 
         $sql = sprintf('DELETE FROM "%s" WHERE "%s" = ?', $meta->table, $meta->idColumn);

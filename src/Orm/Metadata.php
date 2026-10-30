@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
+use Tinvar\Orm\Attributes\AfterDelete;
+use Tinvar\Orm\Attributes\AfterSave;
+use Tinvar\Orm\Attributes\BeforeDelete;
 use Tinvar\Orm\Attributes\BeforeSave;
 use Tinvar\Orm\Attributes\BelongsTo;
 use Tinvar\Orm\Attributes\Column;
@@ -158,10 +161,13 @@ final class Metadata
             write: self::compileWriter($class),
             read: self::compileReader($class),
             columnReader: self::compileColumnReader($class, $plan),
-            beforeSave: self::compileBeforeSave($reflection),
+            beforeSave: self::compileHooks($reflection, BeforeSave::class),
             uniqueKeys: self::compileUniqueKeys($reflection, $columns, $relations, $columns[$idProperty], $tenantColumn),
             createdAtProperty: $createdAt,
             updatedAtProperty: $updatedAt,
+            afterSave: self::compileHooks($reflection, AfterSave::class),
+            beforeDelete: self::compileHooks($reflection, BeforeDelete::class),
+            afterDelete: self::compileHooks($reflection, AfterDelete::class),
         );
     }
 
@@ -672,9 +678,11 @@ final class Metadata
     }
 
     /**
-     * The #[BeforeSave] methods, in the order save() calls them -- the
-     * class's own top to bottom, then its traits', in the order it uses
-     * them, then a parent class's by the same rule (see BeforeSave for why).
+     * The methods marked with one hook attribute -- #[BeforeSave],
+     * #[AfterSave], #[BeforeDelete] or #[AfterDelete] -- in the order save()
+     * or delete() calls them: the class's own top to bottom, then its
+     * traits', in the order it uses them, then a parent class's by the same
+     * rule (see BeforeSave for why). A method may carry more than one.
      * Within one class that is the order reflection lists its methods in,
      * and under the names the class gave them, so a trait's method imported
      * under an alias is called by its alias.
@@ -684,9 +692,10 @@ final class Metadata
      * from the model at all.
      *
      * @param \ReflectionClass<Model> $reflection
+     * @param class-string $attribute
      * @return list<\Closure(Model): void>
      */
-    private static function compileBeforeSave(\ReflectionClass $reflection): array
+    private static function compileHooks(\ReflectionClass $reflection, string $attribute): array
     {
         $hooks = [];
         $registered = [];
@@ -695,7 +704,7 @@ final class Metadata
             $scope = $level->getName();
             foreach ($level->getMethods() as $method) {
                 $name = $method->getName();
-                if ($method->getDeclaringClass()->getName() !== $scope || $method->getAttributes(BeforeSave::class, \ReflectionAttribute::IS_INSTANCEOF) === []) {
+                if ($method->getDeclaringClass()->getName() !== $scope || $method->getAttributes($attribute, \ReflectionAttribute::IS_INSTANCEOF) === []) {
                     continue;
                 }
                 // Overridden, it is still one method: called once, from the
@@ -704,7 +713,7 @@ final class Metadata
                     continue;
                 }
                 if ($method->isStatic() || $method->getNumberOfRequiredParameters() > 0) {
-                    throw MappingException::unusableHook($reflection->getName(), "{$scope}::{$name}()");
+                    throw MappingException::unusableHook($reflection->getName(), "{$scope}::{$name}()", Str::shortName($attribute));
                 }
                 if (!$method->isPrivate()) {
                     $registered[$name] = true;
