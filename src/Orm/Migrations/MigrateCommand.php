@@ -15,7 +15,7 @@ use Tinvar\Orm\Model;
  *   tinvar migrate:rollback [--step=N] take back the last batch, or the last N
  *   tinvar migrate:status             each migration, and whether it has run
  *   tinvar migrate:fresh --force      drop every table and migrate from nothing
- *   tinvar make:migration <name> [--blank]
+ *   tinvar make:migration <name> [--blank] [--rename=table.old:new | --rename=old:new ...]
  *                                     write the migration the models' difference
  *                                     from the database calls for, or an empty one
  *   tinvar db:seed [--fresh --force] [the seeder's options]
@@ -38,6 +38,8 @@ final class MigrateCommand
     public const int FAILED = 1;
 
     public const array COMMANDS = ['migrate', 'migrate:rollback', 'migrate:status', 'migrate:fresh', 'make:migration', 'db:seed'];
+
+    private const string MAKE_USAGE = 'tinvar make:migration <name> [--blank] [--rename=TABLE.OLD:NEW | --rename=OLD:NEW ...]';
 
     /** @var \Closure(string): void */
     private readonly \Closure $out;
@@ -258,17 +260,23 @@ final class MigrateCommand
     {
         $blank = false;
         $name = null;
+        $renames = [];
         foreach ($arguments as $argument) {
             if ($argument === '--blank') {
                 $blank = true;
+            } elseif (str_starts_with($argument, '--rename=')) {
+                $renames[] = self::rename(substr($argument, \strlen('--rename=')));
             } elseif ($name === null && !str_starts_with($argument, '-')) {
                 $name = $argument;
             } else {
-                throw new \InvalidArgumentException("Unknown argument '{$argument}'. Usage: tinvar make:migration <name> [--blank]");
+                throw new \InvalidArgumentException("Unknown argument '{$argument}'. Usage: " . self::MAKE_USAGE);
             }
         }
         if ($name === null || preg_match('/^[a-z][a-z0-9_]{0,100}\z/', $name) !== 1) {
-            throw new \InvalidArgumentException('Usage: tinvar make:migration <name> [--blank], the name in snake_case: add_notes_to_orders.');
+            throw new \InvalidArgumentException('Usage: ' . self::MAKE_USAGE . ', the name in snake_case: add_notes_to_orders.');
+        }
+        if ($blank && $renames !== []) {
+            throw new \InvalidArgumentException('--rename says what a generated migration renames; a --blank one is written by hand.');
         }
 
         $now = ($this->clock)();
@@ -293,7 +301,9 @@ final class MigrateCommand
                 ));
             }
 
-            $generator = new MigrationGenerator($migrator->connection(), $migrator->dialect(), $this->ask);
+            // Renames said outright are made; any other that reads as one
+            // is asked about on a terminal, and only named where there is none.
+            $generator = new MigrationGenerator($migrator->connection(), $migrator->dialect(), $this->ask, $renames);
             $source = $generator->generate($this->models, gmdate('Y-m-d', $now));
             foreach ($generator->warnings as $warning) {
                 ($this->err)("warning: {$warning}");
@@ -312,6 +322,22 @@ final class MigrateCommand
         ($this->out)("wrote {$path}");
 
         return 0;
+    }
+
+    /**
+     * One --rename: `table.old:new` a column of the models' table, `old:new`
+     * a table. Plain identifiers only, as a migration names them.
+     *
+     * @return array{table: string|null, from: string, to: string}
+     */
+    private static function rename(string $value): array
+    {
+        $name = '[A-Za-z_][A-Za-z0-9_]{0,62}';
+        if (preg_match("/^(?:({$name})\\.)?({$name}):({$name})\\z/", $value, $m) !== 1 || $m[2] === $m[3]) {
+            throw new \InvalidArgumentException("--rename takes table.old:new for a column or old:new for a table, plain names that differ. Usage: " . self::MAKE_USAGE);
+        }
+
+        return ['table' => $m[1] === '' ? null : $m[1], 'from' => $m[2], 'to' => $m[3]];
     }
 
     /** @param array<string, string> $options */

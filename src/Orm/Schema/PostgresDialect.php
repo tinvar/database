@@ -296,6 +296,37 @@ final class PostgresDialect extends Dialect
         return $indexes;
     }
 
+    public function foreignKeys(Connection $connection, string $table): array
+    {
+        $keys = [];
+        foreach ($connection->select(
+            'SELECT a.attname AS col, cf.relname AS target, af.attname AS target_col FROM pg_constraint c '
+            . 'JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] '
+            . 'JOIN pg_class cf ON cf.oid = c.confrelid '
+            . 'JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = c.confkey[1] '
+            . "WHERE c.contype = 'f' AND c.conrelid = to_regclass(?) AND array_length(c.conkey, 1) = 1 ORDER BY c.conname",
+            [$this->quote($table)],
+        ) as $row) {
+            $keys[] = ['column' => self::text($row, 'col'), 'table' => self::text($row, 'target'), 'references' => self::text($row, 'target_col')];
+        }
+
+        return $keys;
+    }
+
+    /** Each CHECK's expression, as pg_get_constraintdef() spells it without its keyword. */
+    public function checks(Connection $connection, string $table): array
+    {
+        $checks = [];
+        foreach ($connection->select(
+            "SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c WHERE c.contype = 'c' AND c.conrelid = to_regclass(?) ORDER BY c.conname",
+            [$this->quote($table)],
+        ) as $row) {
+            $checks[] = (string) preg_replace('/^CHECK\s*/i', '', self::text($row, 'def'));
+        }
+
+        return $checks;
+    }
+
     /**
      * A session-level advisory lock, which Postgres lets go when the
      * session ends, however it ends. Tried rather than waited on, so the

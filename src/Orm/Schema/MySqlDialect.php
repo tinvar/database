@@ -245,6 +245,36 @@ final class MySqlDialect extends Dialect
         return array_values($indexes);
     }
 
+    public function foreignKeys(Connection $connection, string $table): array
+    {
+        $keys = [];
+        foreach ($connection->select(
+            'SELECT column_name AS col, referenced_table_name AS target, referenced_column_name AS target_col FROM information_schema.key_column_usage '
+            . 'WHERE table_schema = DATABASE() AND table_name = ? AND referenced_table_name IS NOT NULL ORDER BY constraint_name, ordinal_position',
+            [$table],
+        ) as $row) {
+            $keys[] = ['column' => self::text($row, 'col'), 'table' => self::text($row, 'target'), 'references' => self::text($row, 'target_col')];
+        }
+
+        return $keys;
+    }
+
+    /** Each CHECK's expression, as MySQL keeps it. */
+    public function checks(Connection $connection, string $table): array
+    {
+        $checks = [];
+        foreach ($connection->select(
+            'SELECT cc.check_clause AS clause FROM information_schema.check_constraints cc JOIN information_schema.table_constraints tc '
+            . 'ON tc.constraint_schema = cc.constraint_schema AND tc.constraint_name = cc.constraint_name '
+            . "WHERE tc.table_schema = DATABASE() AND tc.table_name = ? AND tc.constraint_type = 'CHECK' ORDER BY cc.constraint_name",
+            [$table],
+        ) as $row) {
+            $checks[] = self::text($row, 'clause');
+        }
+
+        return $checks;
+    }
+
     /**
      * GET_LOCK, which MySQL lets go when the session ends. Named for the
      * database, so two databases on one server migrate side by side; a

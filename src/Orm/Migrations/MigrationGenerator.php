@@ -24,10 +24,13 @@ use Tinvar\Orm\Schema\Index;
  * the foreign keys relations read by and the indexes they load by, and on
  * Postgres the tenant policy of a #[TenantScoped] table. It changes a
  * column whose type, nullability or declared default the model has
- * changed, and renames a column or table where the difference reads as
- * one rename and nothing else could. It never drops: a column the
- * database has and no model maps, or an index no relation loads by any
- * more, is named in a comment, for whoever reviews the file to decide.
+ * changed, or whose width or integer size #[Column] declares otherwise
+ * (ADR 0110), and renames a column or table where the difference reads
+ * as one rename and nothing else could, or where `--rename` says one. It
+ * never drops: a column the database has and no model maps, an index no
+ * relation loads by any more, and a foreign key, check or unique index
+ * the models do not have as the database does, are named in a comment
+ * and a warning, for whoever reviews the file to decide.
  *
  * Builder calls, not SQL, so one migration runs on every dialect: written
  * against the SQLite of a laptop, it runs against production's Postgres.
@@ -62,11 +65,17 @@ final class MigrationGenerator
      *        Without it nothing is renamed, and each such pair is named in a comment instead --
      *        the database cannot tell a rename from a drop and an add, and read wrongly, a rename
      *        would leave the old column's values under the new one's name.
+     * @param list<array{table: string|null, from: string, to: string}> $renames the renames
+     *        whoever runs make:migration says outright (`--rename`): a table's where `table`
+     *        is null, else a column's of the models' table `table`. Each is held to being one:
+     *        `from` in the database and on no model, `to` on a model and not in the database --
+     *        or the migration is refused, naming it.
      */
     public function __construct(
         private readonly Connection $connection,
         private readonly Dialect $dialect,
         ?\Closure $confirmRename = null,
+        private readonly array $renames = [],
     ) {
         $this->confirmRename = $confirmRename ?? static fn (string $question): bool => false;
     }
@@ -81,9 +90,12 @@ final class MigrationGenerator
     {
         $this->warnings = [];
         $wanted = $this->wanted($models);
-        $renamedFrom = [];
+        $renamedFrom = $this->saidTableRenames($wanted);
         $lookAlikes = [];
         foreach ($this->tableRenames($wanted) as $new => $old) {
+            if (isset($renamedFrom[$new]) || \in_array($old, $renamedFrom, true)) {
+                continue;
+            }
             if (($this->confirmRename)("Is the table {$old}, on no model, the models' {$new} renamed? Renamed, it keeps its rows.")) {
                 $renamedFrom[$new] = $old;
             } else {
@@ -270,9 +282,9 @@ final class MigrationGenerator
     private static function columnOf(\ReflectionProperty $property): array
     {
         $type = $property->getType();
-        $declared = $property->getAttributes(ColumnAttribute::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
+        $declared = ($property->getAttributes(ColumnAttribute::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null)?->newInstance();
         $cast = Metadata::castOf($property->getDeclaringClass()->getName(), $property);
-        $storage = $declared?->newInstance()->type ?? ($cast === null ? null : $cast::columnType());
+        $storage = $declared->type ?? ($cast === null ? null : $cast::columnType());
         $typeName = $type instanceof \ReflectionNamedType ? $type->getName() : 'mixed';
 
         $builderType = $storage !== null ? self::storageType($storage) : match (true) {
@@ -287,6 +299,18 @@ final class MigrationGenerator
         };
 
         $column = ['type' => $builderType, 'nullable' => $type?->allowsNull() ?? true];
+        // A width and a check, where the model says one (ADR 0110). A size
+        // is compared only where #[Column] says it: a plain `int` or
+        // `string` is as happy in a bigint or a varchar(100).
+        if ($declared?->length !== null) {
+            $column['length'] = $declared->length;
+        }
+        if ($declared?->length !== null || $declared?->type !== null) {
+            $column['sized'] = true;
+        }
+        if ($declared?->check !== null) {
+            $column['check'] = $declared->check;
+        }
         if ($property->hasDefaultValue()) {
             $default = $property->getDefaultValue();
             if ($default instanceof \BackedEnum) {
@@ -318,6 +342,68 @@ final class MigrationGenerator
             'binary', 'blob', 'bytea' => 'binary',
             default => $type,
         };
+    }
+
+    /**
+     * The table renames said with --rename, each held to being one.
+     *
+     * @param array<string, array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>}> $wanted
+     * @return array<string, string> the wanted name => the database's name
+     * @throws MigrationRefused for a rename that is not one
+     */
+    private function saidTableRenames(array $wanted): array
+    {
+        $renamed = [];
+        foreach ($this->renames as ['table' => $table, 'from' => $from, 'to' => $to]) {
+            if ($table !== null) {
+                continue;
+            }
+            $why = match (true) {
+                !isset($wanted[$to]) => "no model's table is {$to}",
+                $this->dialect->hasTable($this->connection, $to) => "{$to} is in the database already",
+                isset($wanted[$from]) => "{$from} is a model's table",
+                !$this->dialect->hasTable($this->connection, $from) => "the database has no {$from}",
+                isset($renamed[$to]) || \in_array($from, $renamed, true) => 'it names a table another --rename names',
+                default => null,
+            };
+            if ($why !== null) {
+                throw new MigrationRefused("--rename={$from}:{$to} is not a rename here: {$why}.");
+            }
+            $renamed[$to] = $from;
+        }
+
+        return $renamed;
+    }
+
+    /**
+     * The column renames said with --rename for the models' table $table,
+     * each held to being one.
+     *
+     * @param list<string> $missing
+     * @param list<string> $unmapped
+     * @return array<string, string> the wanted name => the database's name
+     * @throws MigrationRefused for a rename that is not one
+     */
+    private function saidColumnRenames(string $table, array $missing, array $unmapped): array
+    {
+        $renamed = [];
+        foreach ($this->renames as ['table' => $of, 'from' => $from, 'to' => $to]) {
+            if ($of !== $table) {
+                continue;
+            }
+            $why = match (true) {
+                !\in_array($to, $missing, true) => "{$table}.{$to} is not on a model, or is in the database already",
+                !\in_array($from, $unmapped, true) => "{$table}.{$from} is not in the database, or is on a model",
+                isset($renamed[$to]) || \in_array($from, $renamed, true) => 'it names a column another --rename names',
+                default => null,
+            };
+            if ($why !== null) {
+                throw new MigrationRefused("--rename={$table}.{$from}:{$to} is not a rename here: {$why}.");
+            }
+            $renamed[$to] = $from;
+        }
+
+        return $renamed;
     }
 
     /**
@@ -378,6 +464,7 @@ final class MigrationGenerator
         $comments = [];
         $renames = [];
         $unrenames = [];
+        $renamedColumns = [];
         $changes = [];
         $unchanges = [];
         $additions = [];
@@ -409,8 +496,18 @@ final class MigrationGenerator
             static fn (string $column): bool => !isset($columns[$column]),
         ));
 
-        foreach ($this->columnRenames($missing, $unmapped, $table['columns'], $columns) as $new => $old) {
-            if (!($this->confirmRename)("Is the column {$name}.{$old}, on no model, the model's {$new} renamed? Renamed, it keeps its values.")) {
+        // Every table's renames said outright -- a table renamed, too, by
+        // the models' name -- then those that read as one, asked about.
+        $said = $this->saidColumnRenames($name, $missing, $unmapped);
+        $guessed = $this->columnRenames(
+            array_values(array_diff($missing, array_keys($said))),
+            array_values(array_diff($unmapped, $said)),
+            $table['columns'],
+            $columns,
+        );
+        foreach ([...$said, ...$guessed] as $new => $old) {
+            $new = (string) $new;
+            if (!isset($said[$new]) && !($this->confirmRename)("Is the column {$name}.{$old}, on no model, the model's {$new} renamed? Renamed, it keeps its values.")) {
                 $comments[] = "{$name}.{$old} is in the database and on no model, and {$name}.{$new}, alike in type and nullability, is "
                     . "on a model and not in the database. If {$new} is {$old} renamed, \$table->renameColumn({$this->php($old)}, "
                     . "{$this->php($new)}) in place of adding it keeps its values; if not, dropping {$old} is yours to decide: "
@@ -422,6 +519,7 @@ final class MigrationGenerator
             $unrenames[] = "            \$table->renameColumn({$this->php($new)}, {$this->php($old)});";
             $columns[$new] = $columns[$old];
             unset($columns[$old]);
+            $renamedColumns[$old] = $new;
             $unmapped = array_values(array_diff($unmapped, [$old]));
             foreach ($liveIndexes as $i => $index) {
                 $liveIndexes[$i]['columns'] = array_map(static fn (string $c): string => $c === $old ? $new : $c, $index['columns']);
@@ -494,6 +592,7 @@ final class MigrationGenerator
         }
 
         $comments = [...$comments, ...$this->staleIndexes($name, $table, $liveIndexes)];
+        $comments = [...$comments, ...$this->keysChecksAndUniques($name, $live, $table, $columns, $liveIndexes, $renamedColumns)];
         foreach ($unmapped as $column) {
             $comments[] = "{$name}.{$column} is in the database and on no model. Dropping it is yours to decide: \$table->dropColumn({$this->php($column)}).";
         }
@@ -579,10 +678,13 @@ final class MigrationGenerator
         $wantedType = \is_string($spec['type'] ?? null) ? $spec['type'] : 'text';
         $nullable = ($spec['nullable'] ?? false) === true;
         $typeChanged = $this->dialect->family($this->sqlType($column, $spec)) !== $this->dialect->family($live['type']);
+        // Within a family: int to bigint, varchar(100) to varchar(40), as
+        // this dialect stores each -- SQLite's TEXT has no width to change.
+        $widthChanged = !$typeChanged && $this->widthChanged($spec, $live['type']);
         $nullChanged = $nullable !== $live['nullable'];
         $declaresDefault = \array_key_exists('default', $spec);
         $defaultChanged = $declaresDefault && !self::sameDefault($wantedType, $spec['default'], $live);
-        if (!$typeChanged && !$nullChanged && !$defaultChanged) {
+        if (!$typeChanged && !$widthChanged && !$nullChanged && !$defaultChanged) {
             return null;
         }
 
@@ -598,11 +700,15 @@ final class MigrationGenerator
             $comments[] = "{$table}.{$column} is {$was} in the database and {$wantedType} on the model. "
                 . 'A change of type converts every value -- on SQLite by rebuilding the table -- and fails on one that does not convert; review it.';
         }
+        if ($widthChanged) {
+            $comments[] = "{$table}.{$column} is " . self::describe($liveType) . ' in the database and ' . self::describe(self::typeOfSpec($spec)) . ' on the model. '
+                . 'Narrowed, a value that no longer fits fails the change -- MySQL outside strict mode cuts it short instead -- so find those first; review it.';
+        }
         if ($nullChanged && !$nullable) {
             $comments[] = "{$table}.{$column} takes NULL in the database and not on the model: a row holding NULL fails this, so backfill those rows first.";
         }
 
-        $upType = $typeChanged ? ['type' => $wantedType, 'length' => null, 'scale' => null] : $liveType;
+        $upType = $typeChanged || $widthChanged ? self::typeOfSpec($spec) : $liveType;
         if ($upType === null) {
             $this->warnings[] = \sprintf(
                 '%s.%s differs from its model in nullability or default, and its type, %s as the database spells it, is not one make:migration writes; change it by hand.',
@@ -683,6 +789,122 @@ final class MigrationGenerator
     }
 
     /**
+     * What the models say of an existing table's foreign keys, checks and
+     * unique keys that the database does not have, or has otherwise --
+     * named for whoever reviews the migration, and warned of, and never
+     * written as a change: the builder adds a key or a check only with
+     * its column, and dropping one is a drop, which stays explicit (ADR
+     * 0110). The database's own text reaches the file only as a plain
+     * identifier, or as comment text that cannot end its comment.
+     *
+     * A table the models declare no check on, or no unique key, is not
+     * compared for those: a check or unique index an application made in a
+     * migration of its own, before the models could say one, is not news.
+     *
+     * @param array{columns: array<string, array<string, mixed>>, indexes: list<list<string>>, tenant: string|null, keys: list<string>, uniques: list<list<string>>} $table
+     * @param array<string, mixed> $columns the database's, by the names this migration leaves them
+     * @param list<array{name: string, columns: list<string>, unique: bool}> $liveIndexes
+     * @param array<string, string> $renamed the database's name of a column this migration renames => the model's
+     * @return list<string>
+     */
+    private function keysChecksAndUniques(string $name, string $live, array $table, array $columns, array $liveIndexes, array $renamed): array
+    {
+        $found = [];
+
+        $keys = $this->dialect->foreignKeys($this->connection, $live);
+        if ($keys !== null) {
+            $byColumn = [];
+            foreach ($keys as $key) {
+                $byColumn[$renamed[$key['column']] ?? $key['column']] = $key;
+            }
+            foreach ($table['columns'] as $column => $spec) {
+                $column = (string) $column;
+                if (!isset($columns[$column])) {
+                    continue; // added by this migration, with its key
+                }
+                $references = $spec['references'] ?? null;
+                $key = $byColumn[$column] ?? null;
+                if (\is_array($references) && \is_string($references[0] ?? null) && \is_string($references[1] ?? null)) {
+                    [$target, $targetColumn] = $references;
+                    if ($key === null) {
+                        $found[] = "{$name}.{$column} references {$target} on the model, and has no foreign key in the database. The builder adds a key only "
+                            . 'with its column: add it by hand, after finding any row that references nothing.';
+                    } elseif ($key['table'] !== $target || ($key['references'] !== '' && $key['references'] !== $targetColumn)) {
+                        $was = preg_match(self::IDENTIFIER, $key['table']) === 1 ? $key['table'] : 'another table';
+                        $found[] = "{$name}.{$column} references {$target} on the model, and {$was} in the database. Changing a key is "
+                            . 'dropping it and adding another: do both by hand, after finding any row that would reference nothing.';
+                    }
+                } elseif ($key !== null && ($spec['primary'] ?? false) !== true) {
+                    $was = preg_match(self::IDENTIFIER, $key['table']) === 1 ? $key['table'] : 'another table';
+                    $found[] = "{$name}.{$column} has a foreign key to {$was} in the database that no relation of the models reads by. Dropping it is yours to decide.";
+                }
+            }
+        }
+
+        $wantedChecks = [];
+        foreach ($table['columns'] as $column => $spec) {
+            if (\is_string($spec['check'] ?? null) && isset($columns[(string) $column])) {
+                $wantedChecks[(string) $column] = $spec['check'];
+            }
+        }
+        $declaresChecks = array_filter(array_column($table['columns'], 'check'), \is_string(...)) !== [];
+        $checks = $declaresChecks ? $this->dialect->checks($this->connection, $live) : null;
+        if ($checks !== null) {
+            $liveChecks = array_map(self::checkText(...), $checks);
+            foreach ($wantedChecks as $column => $check) {
+                if (!\in_array(self::checkText($check), $liveChecks, true)) {
+                    $found[] = "{$name}.{$column} is held to CHECK ({$check}) on the model, and the database has no such check. The builder adds a "
+                        . 'check only with its column -- on SQLite a check is added by rebuilding the table -- so add it by hand, after finding any row it refuses.';
+                }
+            }
+            $modelChecks = array_map(self::checkText(...), array_values(array_filter(array_column($table['columns'], 'check'), \is_string(...))));
+            foreach ($checks as $i => $check) {
+                if (!\in_array($liveChecks[$i], $modelChecks, true)) {
+                    // The database's text, quoted: nothing in it reads as the
+                    // finding's own, in the file or on a terminal.
+                    $found[] = "{$name} has a check in the database that no model declares, " . self::quoted(mb_substr($check, 0, 200)) . '. Dropping it is yours to decide.';
+                }
+            }
+        }
+
+        if ($table['uniques'] !== []) {
+            $primary = array_keys(array_filter($table['columns'], static fn (array $spec): bool => ($spec['primary'] ?? false) === true));
+            $wantedUniques = array_map(static function (array $columns): array {
+                sort($columns);
+
+                return $columns;
+            }, $table['uniques']);
+            foreach ($liveIndexes as $index) {
+                $sorted = $index['columns'];
+                sort($sorted);
+                if (!$index['unique'] || $sorted === [] || $sorted === $primary || \in_array($sorted, $wantedUniques, true)) {
+                    continue;
+                }
+                if (preg_match(self::IDENTIFIER, $index['name']) !== 1 || preg_grep(self::IDENTIFIER, $index['columns'], PREG_GREP_INVERT) !== []) {
+                    continue;
+                }
+                $found[] = "{$name}.{$index['name']} is a unique index over (" . implode(', ', $index['columns']) . ') that no #[Unique] of the models declares. '
+                    . "If it is not wanted any more: \$table->dropIndex({$this->php($index['name'])}).";
+            }
+        }
+
+        foreach ($found as $finding) {
+            $this->warnings[] = $finding;
+        }
+
+        return $found;
+    }
+
+    /** A check's expression as it is compared: no case, spaces, brackets, quotes or casts. */
+    private static function checkText(string $check): string
+    {
+        $text = strtolower($check);
+        $text = (string) preg_replace('/::\s*[a-z_ ]+(\(\d+\))?/', '', $text);
+
+        return (string) preg_replace('/[\s()"`\[\]]+/', '', $text);
+    }
+
+    /**
      * Whether the column's literal default is the one the model declares,
      * read as the column's type: SQLite's 1 is a boolean's true, MySQL's
      * '0' an integer's 0.
@@ -717,6 +939,72 @@ final class MigrationGenerator
                 default => $value,
             },
             default => \is_bool($value) ? ($value ? '1' : '0') : (string) $value,
+        };
+    }
+
+    /**
+     * The builder's type of a column the model describes: its type, and a
+     * string's width where the model says one.
+     *
+     * @param array<string, mixed> $spec
+     * @return array{type: string, length: int|null, scale: int|null}
+     */
+    private static function typeOfSpec(array $spec): array
+    {
+        return [
+            'type' => \is_string($spec['type'] ?? null) ? $spec['type'] : 'text',
+            'length' => \is_int($spec['length'] ?? null) ? $spec['length'] : null,
+            'scale' => null,
+        ];
+    }
+
+    /**
+     * Whether the model's column and the database's, of one family, differ
+     * in their size, where #[Column] says one: read through the dialect, so
+     * what it stores alike -- SQLite's INTEGER for int and bigint -- is no
+     * change. Only the sizes a migration writes are compared: integers and
+     * strings.
+     *
+     * @param array<string, mixed> $spec
+     */
+    private function widthChanged(array $spec, string $liveType): bool
+    {
+        if (($spec['sized'] ?? false) !== true) {
+            return false;
+        }
+        $wanted = self::typeOfSpec($spec);
+        try {
+            $stored = $this->dialect->typeOf(new Column('c', $wanted['type'], $wanted['length']));
+        } catch (\InvalidArgumentException) {
+            return false;
+        }
+        // Stored as the database has it already: SQLite's INTEGER for a
+        // bigint, its TEXT for a varchar of any width.
+        if (self::spelled($stored) === self::spelled($liveType)) {
+            return false;
+        }
+        $live = $this->dialect->builderType($liveType);
+        $sized = ['integer', 'bigInteger', 'string'];
+        if ($live === null || !\in_array($wanted['type'], $sized, true) || !\in_array($live['type'], $sized, true)) {
+            return false;
+        }
+
+        return $wanted['type'] !== $live['type'] || ($wanted['type'] === 'string' && ($wanted['length'] ?? 255) !== ($live['length'] ?? 255));
+    }
+
+    /** A type as compared: no case, no spaces. */
+    private static function spelled(string $type): string
+    {
+        return (string) preg_replace('/\s+/', '', strtolower($type));
+    }
+
+    /** @param array{type: string, length: int|null, scale: int|null}|null $type */
+    private static function describe(?array $type): string
+    {
+        return match (true) {
+            $type === null => 'of a type of its own',
+            $type['type'] === 'string' => 'string(' . ($type['length'] ?? 255) . ')',
+            default => $type['type'],
         };
     }
 
@@ -759,7 +1047,7 @@ final class MigrationGenerator
     /** @param array<string, mixed> $spec */
     private function renderColumn(string $column, array $spec): string
     {
-        $call = $this->renderType($column, ['type' => \is_string($spec['type'] ?? null) ? $spec['type'] : 'text', 'length' => null, 'scale' => null]);
+        $call = $this->renderType($column, self::typeOfSpec($spec));
 
         if (($spec['primary'] ?? false) === true) {
             $call .= '->primary()';
@@ -769,6 +1057,9 @@ final class MigrationGenerator
         }
         if (\array_key_exists('default', $spec)) {
             $call .= '->default(' . var_export($spec['default'], true) . ')';
+        }
+        if (\is_string($spec['check'] ?? null)) {
+            $call .= '->check(' . var_export($spec['check'], true) . ')';
         }
         $references = $spec['references'] ?? null;
         if (\is_array($references) && \is_string($references[0] ?? null) && \is_string($references[1] ?? null)) {

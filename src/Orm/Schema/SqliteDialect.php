@@ -160,6 +160,62 @@ final class SqliteDialect extends Dialect
         return $indexes;
     }
 
+    public function foreignKeys(Connection $connection, string $table): array
+    {
+        $keys = [];
+        foreach ($connection->select('SELECT "from", "table", "to" FROM pragma_foreign_key_list(?) ORDER BY id, seq', [$table]) as $row) {
+            $keys[] = ['column' => self::text($row, 'from'), 'table' => self::text($row, 'table'), 'references' => self::text($row, 'to')];
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Each CHECK in the table's definition, read from the statement that
+     * made it: SQLite keeps no other record of one.
+     */
+    public function checks(Connection $connection, string $table): array
+    {
+        $sql = $connection->select("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [$table])[0]['sql'] ?? null;
+        if (!\is_string($sql)) {
+            return [];
+        }
+
+        $tokens = SqliteTable::tokenize($sql);
+        $checks = [];
+        $count = \count($tokens);
+        for ($i = 0; $i < $count; $i++) {
+            if ($tokens[$i][0] !== 'word' || strtoupper($tokens[$i][1]) !== 'CHECK') {
+                continue;
+            }
+            // The expression: what is between the parenthesis after CHECK
+            // and the one that closes it.
+            $open = $i + 1;
+            while ($open < $count && \in_array($tokens[$open][0], ['ws', 'comment'], true)) {
+                $open++;
+            }
+            if ($open >= $count || $tokens[$open][1] !== '(') {
+                continue;
+            }
+            $depth = 0;
+            $expression = '';
+            for ($j = $open; $j < $count; $j++) {
+                $text = $tokens[$j][1];
+                $depth += $text === '(' ? 1 : ($text === ')' ? -1 : 0);
+                if ($depth === 0) {
+                    break;
+                }
+                if ($j > $open) {
+                    $expression .= $text;
+                }
+            }
+            $checks[] = trim($expression);
+            $i = $j;
+        }
+
+        return $checks;
+    }
+
     /** A column changes by a rebuild, which needs the table as it stands: applyAlter() does it. */
     protected function changeColumn(string $table, Column $column): array
     {

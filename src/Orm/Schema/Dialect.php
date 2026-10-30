@@ -106,6 +106,30 @@ abstract class Dialect
     abstract public function indexes(Connection $connection, string $table): array;
 
     /**
+     * The table's foreign keys, one column each: the column, the table it
+     * references and the column there ('' where the database leaves it to
+     * that table's primary key). Null where this dialect cannot say, which
+     * make:migration takes as nothing to compare.
+     *
+     * @return list<array{column: string, table: string, references: string}>|null
+     */
+    public function foreignKeys(Connection $connection, string $table): ?array
+    {
+        return null;
+    }
+
+    /**
+     * The table's CHECK constraints, each its expression as the database
+     * keeps it. Null where this dialect cannot say.
+     *
+     * @return list<string>|null
+     */
+    public function checks(Connection $connection, string $table): ?array
+    {
+        return null;
+    }
+
+    /**
      * Waits up to $timeout seconds for the migration lock, so two deploys
      * starting together migrate one after the other: the second, once it
      * has the lock, finds nothing left to run.
