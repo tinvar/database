@@ -24,6 +24,7 @@ use Tinvar\Orm\Migrations\MigrationRefused;
 use Tinvar\Orm\Migrations\Migrator;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\PdoConnection;
+use Tinvar\Orm\Schema\MySqlDialect;
 use Tinvar\Orm\Schema\PostgresDialect;
 use Tinvar\Orm\Schema\SqliteDialect;
 use Tinvar\Tests\Orm\Fixtures\Databases;
@@ -51,6 +52,126 @@ final class Bin extends Model
 }
 
 const MODELS = [Shelf::class, Bin::class];
+
+/** Rows deleted with their shelf, and a spare shelf let go of (ADR 0122). */
+#[Table('diff_crates')]
+final class Crate extends Model
+{
+    #[Id] public private(set) string $id;
+
+    #[BelongsTo(onDelete: 'cascade')] public Shelf $shelf;
+
+    #[BelongsTo(foreignKey: 'spare_id', onDelete: 'Set  Null')] public ?Shelf $spare = null;
+}
+
+/** The crates table, whose shelf refuses a delete: RESTRICT, as NO ACTION does. */
+#[Table('diff_crates')]
+final class RefusingCrate extends Model
+{
+    #[Id] public private(set) string $id;
+
+    #[BelongsTo(onDelete: 'restrict')] public Shelf $shelf;
+
+    #[BelongsTo(foreignKey: 'spare_id', onDelete: 'set null')] public ?Shelf $spare = null;
+}
+
+#[Table('diff_crates')]
+final class NeverNullCrate extends Model
+{
+    #[Id] public private(set) string $id;
+
+    #[BelongsTo(onDelete: 'set null')] public Shelf $shelf;
+}
+
+#[Table('diff_crates')]
+final class MisspeltCrate extends Model
+{
+    #[Id] public private(set) string $id;
+
+    #[BelongsTo(onDelete: 'cascades')] public Shelf $shelf;
+}
+
+/**
+ * Writes a relation's delete action on the key it makes, finds nothing
+ * more to do, then finds the action the database has otherwise -- and a
+ * table no model maps -- and names each, writing neither (ADR 0122).
+ *
+ * @param \Closure(string): void $make runs a CREATE TABLE as the database spells it
+ * @param array{string, string} $types the key's type, and the text type
+ */
+function deleteActions(PdoConnection $connection, MigrationFiles $files, \Tinvar\Orm\Schema\Dialect $dialect, \Closure $make, array $types): void
+{
+    $generator = new MigrationGenerator($connection, $dialect);
+    $source = (string) $generator->generate([Shelf::class, Crate::class], '2026-10-30');
+
+    expect($source)->toContain("\$table->uuid('shelf_id')->references('diff_shelves')->onDelete('CASCADE');")
+        ->and($source)->toContain("\$table->uuid('spare_id')->nullable()->references('diff_shelves')->onDelete('SET NULL');");
+    migrate($files, $connection, $source);
+    expect($generator->generate([Shelf::class, Crate::class], '2026-10-30'))->toBeNull()
+        ->and($generator->warnings)->toBe([]);
+
+    // The database's own: a shelf that refuses the delete, a table no
+    // model maps, and one of the framework's, which is not named.
+    [$key, $text] = $types;
+    $make("CREATE TABLE diff_orphans (id {$key} PRIMARY KEY)");
+    $make("CREATE TABLE tinvar_cache_example (id {$key} PRIMARY KEY, note {$text})");
+    $connection->execute('DROP TABLE diff_crates');
+    // Keys as table constraints: MySQL reads a REFERENCES on a column and
+    // makes no key of it.
+    $make("CREATE TABLE diff_crates (id {$key} PRIMARY KEY, shelf_id {$key} NOT NULL, spare_id {$key}, "
+        . 'FOREIGN KEY (shelf_id) REFERENCES diff_shelves (id), FOREIGN KEY (spare_id) REFERENCES diff_shelves (id) ON DELETE SET NULL)');
+    $make('CREATE INDEX diff_crates_shelf_id ON diff_crates (shelf_id)');
+    $make('CREATE INDEX diff_crates_spare_id ON diff_crates (spare_id)');
+
+    expect($generator->generate([Shelf::class, Crate::class], '2026-10-30'))->toBeNull();
+    $warnings = implode("\n", $generator->warnings);
+    expect($warnings)->toContain('diff_crates.shelf_id is deleted with ON DELETE CASCADE on the model, and ')
+        ->and($warnings)->not->toContain('diff_crates.spare_id is deleted')
+        ->and($warnings)->toContain('The database has tables no model maps: diff_orphans.')
+        ->and($warnings)->not->toContain('tinvar_cache_example')
+        ->and($warnings)->not->toContain('diff_bins');
+
+    // RESTRICT and NO ACTION both refuse the delete: no news.
+    expect($generator->generate([Shelf::class, RefusingCrate::class], '2026-10-30'))->toBeNull()
+        ->and(implode("\n", $generator->warnings))->not->toContain('is deleted with');
+
+    // Named in the file too, where there is a migration to write.
+    $source = (string) $generator->generate([Shelf::class, RefusingCrate::class, Bin::class], '2026-10-30');
+    expect(comments($source))->toContain('The database has tables no model maps: diff_orphans. A migration of the models drops none')
+        ->and(strstr($source, 'public function down', true))->not->toContain('drop(');
+}
+
+describe('a relation\'s delete action, and a table no model maps', function () {
+    it('refuses an action the model cannot hold when it compiles', function () {
+        expect(fn () => \Tinvar\Orm\Metadata::for(NeverNullCrate::class))->toThrow(\Tinvar\Orm\MappingException::class, 'is never null')
+            ->and(fn () => \Tinvar\Orm\Metadata::for(MisspeltCrate::class))->toThrow(\Tinvar\Orm\MappingException::class, "'cascades' is no ON DELETE action");
+    });
+
+    it('writes, compares and names them on SQLite', function () {
+        [$files, $connection] = sqlite();
+        deleteActions($connection, $files, new SqliteDialect(), static fn (string $sql): int => $connection->execute($sql), ['TEXT', 'TEXT']);
+    });
+
+    it('writes, compares and names them on Postgres', function () {
+        Databases::inScratchSchema('pgsql', static function (\PDO $pdo, string $schema): void {
+            $pdo->exec("SET search_path TO {$schema}, public");
+            $connection = new PdoConnection($pdo, 'pgsql');
+            deleteActions($connection, new MigrationFiles(), new PostgresDialect(), static fn (string $sql): int => $connection->execute($sql), ['uuid', 'text']);
+        });
+    })->skip(fn () => Databases::postgresMissing() ?? false);
+
+    it('writes, compares and names them on MySQL', function () {
+        Databases::inScratchSchema('mysql', static function (\PDO $pdo): void {
+            $pdo->exec("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')");
+            $connection = new PdoConnection($pdo, 'mysql');
+            // In the collation the builder makes its tables in, which a key
+            // to one of them has to share.
+            deleteActions($connection, new MigrationFiles(), new MySqlDialect(), static fn (string $sql): int => $connection->execute(
+                str_starts_with($sql, 'CREATE TABLE') ? $sql . ' DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin' : $sql,
+            ), ['CHAR(36)', 'TEXT']);
+        });
+    })->skip(fn () => Databases::mysqlMissing() ?? false);
+});
 
 /** @return array{MigrationFiles, PdoConnection} */
 function sqlite(): array

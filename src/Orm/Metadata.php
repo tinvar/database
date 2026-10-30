@@ -457,10 +457,41 @@ final class Metadata
                 property: $property->getName(),
                 target: $target,
                 foreignKey: $attribute->foreignKey ?? Str::snake(Str::shortName($target)) . '_id',
+                onDelete: self::deleteAction($class, $property, $attribute->onDelete),
             );
         }
 
         return null;
+    }
+
+    /**
+     * A #[BelongsTo]'s delete action, as SQL spells it -- any case, any
+     * spacing -- or null for none. SET NULL on a property that is never
+     * null would leave a row the model cannot read: refused.
+     *
+     * @param class-string<Model> $class
+     * @return value-of<RelationMeta::DELETE_ACTIONS>|null
+     */
+    private static function deleteAction(string $class, \ReflectionProperty $property, ?string $onDelete): ?string
+    {
+        if ($onDelete === null) {
+            return null;
+        }
+        $action = strtoupper(trim((string) preg_replace('/\s+/', ' ', $onDelete)));
+        foreach (RelationMeta::DELETE_ACTIONS as $known) {
+            if ($action !== $known) {
+                continue;
+            }
+            if ($known === 'SET NULL' && !($property->getType()?->allowsNull() ?? false)) {
+                throw new MappingException("{$class}::\${$property->getName()} is never null, so its #[BelongsTo] cannot be set to null on delete.");
+            }
+
+            return $known;
+        }
+
+        throw new MappingException(
+            "{$class}::\${$property->getName()}: '{$onDelete}' is no ON DELETE action; name one of " . implode(', ', array_map(strtolower(...), RelationMeta::DELETE_ACTIONS)) . '.',
+        );
     }
 
     /** @return class-string|null */

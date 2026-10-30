@@ -163,8 +163,13 @@ final class SqliteDialect extends Dialect
     public function foreignKeys(Connection $connection, string $table): array
     {
         $keys = [];
-        foreach ($connection->select('SELECT "from", "table", "to" FROM pragma_foreign_key_list(?) ORDER BY id, seq', [$table]) as $row) {
-            $keys[] = ['column' => self::text($row, 'from'), 'table' => self::text($row, 'table'), 'references' => self::text($row, 'to')];
+        foreach ($connection->select('SELECT "from", "table", "to", "on_delete" FROM pragma_foreign_key_list(?) ORDER BY id, seq', [$table]) as $row) {
+            $keys[] = [
+                'column' => self::text($row, 'from'),
+                'table' => self::text($row, 'table'),
+                'references' => self::text($row, 'to'),
+                'onDelete' => strtoupper(self::text($row, 'on_delete')),
+            ];
         }
 
         return $keys;

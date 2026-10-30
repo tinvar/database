@@ -108,10 +108,12 @@ abstract class Dialect
     /**
      * The table's foreign keys, one column each: the column, the table it
      * references and the column there ('' where the database leaves it to
-     * that table's primary key). Null where this dialect cannot say, which
-     * make:migration takes as nothing to compare.
+     * that table's primary key), and what a delete of the row it references
+     * does, as SQL spells it -- CASCADE, SET NULL, SET DEFAULT, RESTRICT or
+     * NO ACTION. Null where this dialect cannot say, which make:migration
+     * takes as nothing to compare.
      *
-     * @return list<array{column: string, table: string, references: string}>|null
+     * @return list<array{column: string, table: string, references: string, onDelete: string}>|null
      */
     public function foreignKeys(Connection $connection, string $table): ?array
     {

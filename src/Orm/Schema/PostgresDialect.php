@@ -300,14 +300,26 @@ final class PostgresDialect extends Dialect
     {
         $keys = [];
         foreach ($connection->select(
-            'SELECT a.attname AS col, cf.relname AS target, af.attname AS target_col FROM pg_constraint c '
+            'SELECT a.attname AS col, cf.relname AS target, af.attname AS target_col, c.confdeltype AS on_delete FROM pg_constraint c '
             . 'JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] '
             . 'JOIN pg_class cf ON cf.oid = c.confrelid '
             . 'JOIN pg_attribute af ON af.attrelid = c.confrelid AND af.attnum = c.confkey[1] '
             . "WHERE c.contype = 'f' AND c.conrelid = to_regclass(?) AND array_length(c.conkey, 1) = 1 ORDER BY c.conname",
             [$this->quote($table)],
         ) as $row) {
-            $keys[] = ['column' => self::text($row, 'col'), 'table' => self::text($row, 'target'), 'references' => self::text($row, 'target_col')];
+            $keys[] = [
+                'column' => self::text($row, 'col'),
+                'table' => self::text($row, 'target'),
+                'references' => self::text($row, 'target_col'),
+                // pg_constraint keeps the action as a letter.
+                'onDelete' => match (self::text($row, 'on_delete')) {
+                    'c' => 'CASCADE',
+                    'n' => 'SET NULL',
+                    'd' => 'SET DEFAULT',
+                    'r' => 'RESTRICT',
+                    default => 'NO ACTION',
+                },
+            ];
         }
 
         return $keys;

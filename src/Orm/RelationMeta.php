@@ -6,9 +6,13 @@ namespace Tinvar\Orm;
 
 final readonly class RelationMeta
 {
+    /** The delete actions a #[BelongsTo] may name, as SQL spells them. */
+    public const array DELETE_ACTIONS = ['CASCADE', 'SET NULL', 'RESTRICT', 'NO ACTION'];
+
     /**
      * @param class-string<Model> $owner
      * @param class-string<Model> $target
+     * @param value-of<self::DELETE_ACTIONS>|null $onDelete a #[BelongsTo]'s foreign key's ON DELETE, where it names one
      */
     public function __construct(
         public RelationKind $kind,
@@ -17,6 +21,7 @@ final readonly class RelationMeta
         public string $target,
         public string $foreignKey,
         public ?string $orderBy = null,
+        public ?string $onDelete = null,
     ) {}
 
     /** Groups pending loads in the scheduler: one query per owner-relation pair. */

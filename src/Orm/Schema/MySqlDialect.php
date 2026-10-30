@@ -249,11 +249,18 @@ final class MySqlDialect extends Dialect
     {
         $keys = [];
         foreach ($connection->select(
-            'SELECT column_name AS col, referenced_table_name AS target, referenced_column_name AS target_col FROM information_schema.key_column_usage '
-            . 'WHERE table_schema = DATABASE() AND table_name = ? AND referenced_table_name IS NOT NULL ORDER BY constraint_name, ordinal_position',
+            'SELECT k.column_name AS col, k.referenced_table_name AS target, k.referenced_column_name AS target_col, r.delete_rule AS on_delete '
+            . 'FROM information_schema.key_column_usage k JOIN information_schema.referential_constraints r '
+            . 'ON r.constraint_schema = k.constraint_schema AND r.constraint_name = k.constraint_name AND r.table_name = k.table_name '
+            . 'WHERE k.table_schema = DATABASE() AND k.table_name = ? AND k.referenced_table_name IS NOT NULL ORDER BY k.constraint_name, k.ordinal_position',
             [$table],
         ) as $row) {
-            $keys[] = ['column' => self::text($row, 'col'), 'table' => self::text($row, 'target'), 'references' => self::text($row, 'target_col')];
+            $keys[] = [
+                'column' => self::text($row, 'col'),
+                'table' => self::text($row, 'target'),
+                'references' => self::text($row, 'target_col'),
+                'onDelete' => strtoupper(self::text($row, 'on_delete')),
+            ];
         }
 
         return $keys;

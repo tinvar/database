@@ -9,6 +9,7 @@ use Tinvar\Orm\Connection;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\RelationKind;
+use Tinvar\Orm\RelationMeta;
 use Tinvar\Orm\Schema\Column;
 use Tinvar\Orm\Schema\Dialect;
 use Tinvar\Orm\Schema\Index;
@@ -137,7 +138,14 @@ final class MigrationGenerator
             $changed = $changed || $changesTable;
         }
 
-        // Comments alone -- a column no model maps -- are not a migration.
+        $unmapped = $this->unmappedTables($wanted, [...array_values($renamedFrom), ...array_values($lookAlikes)]);
+        if ($unmapped !== null) {
+            $this->warnings[] = $unmapped;
+            array_unshift($up, self::comment($unmapped));
+        }
+
+        // Comments alone -- a column or a table no model maps -- are not a
+        // migration.
         if (!$changed) {
             return null;
         }
@@ -149,6 +157,41 @@ final class MigrationGenerator
             implode("\n\n", $up),
             implode("\n", $down),
         );
+    }
+
+    /**
+     * The tables the database has that no model maps, named and never
+     * dropped (ADR 0122): a table a migration made for something no model
+     * reads -- sessions, a counter -- or one a removed model left behind is
+     * the same to the database, and only whoever reviews the file can tell
+     * them apart. Not the framework's own (`tinvar_`), not one this
+     * migration renames or names as a look-alike, and by name only where
+     * the name is a plain identifier; the rest are counted.
+     *
+     * @param array<string, mixed> $wanted the models' tables
+     * @param list<string> $accounted tables the migration names already
+     */
+    private function unmappedTables(array $wanted, array $accounted): ?string
+    {
+        $named = [];
+        $unnamed = 0;
+        foreach ($this->dialect->tables($this->connection) as $table) {
+            if (isset($wanted[$table]) || \in_array($table, $accounted, true) || str_starts_with($table, 'tinvar_')) {
+                continue;
+            }
+            if (preg_match(self::IDENTIFIER, $table) === 1) {
+                $named[] = $table;
+            } else {
+                $unnamed++;
+            }
+        }
+        if ($named === [] && $unnamed === 0) {
+            return null;
+        }
+
+        $list = implode(', ', $named) . ($unnamed === 0 ? '' : ($named === [] ? '' : ', and ') . "{$unnamed} more whose names are not plain identifiers");
+
+        return "The database has tables no model maps: {$list}. A migration of the models drops none; dropping one is yours to decide.";
     }
 
     /** A migration with nothing in it yet: for a backfill, or what the models cannot say. */
@@ -222,6 +265,7 @@ final class MigrationGenerator
                     'type' => 'uuid',
                     'nullable' => new \ReflectionProperty($model, $property)->getType()?->allowsNull() ?? false,
                     'references' => [$target->table, $target->idColumn],
+                    'onDelete' => $relation->onDelete,
                 ];
                 $table['indexes'][] = [$relation->foreignKey];
                 $table['keys'][] = $relation->foreignKey;
@@ -833,6 +877,14 @@ final class MigrationGenerator
                         $was = preg_match(self::IDENTIFIER, $key['table']) === 1 ? $key['table'] : 'another table';
                         $found[] = "{$name}.{$column} references {$target} on the model, and {$was} in the database. Changing a key is "
                             . 'dropping it and adding another: do both by hand, after finding any row that would reference nothing.';
+                    } elseif (\is_string($spec['onDelete'] ?? null) && !self::sameDeleteAction($spec['onDelete'], $key['onDelete'])) {
+                        // Only where the model names one: an action written
+                        // in a migration before the models could say one is
+                        // not news. The database's, written only if it is one
+                        // SQL spells (ADR 0122).
+                        $was = \in_array($key['onDelete'], [...RelationMeta::DELETE_ACTIONS, 'SET DEFAULT'], true) ? $key['onDelete'] : 'another action';
+                        $found[] = "{$name}.{$column} is deleted with ON DELETE {$spec['onDelete']} on the model, and {$was} in the database. "
+                            . 'Changing a key\'s action is dropping the key and adding it again: do both by hand.';
                     }
                 } elseif ($key !== null && ($spec['primary'] ?? false) !== true) {
                     $was = preg_match(self::IDENTIFIER, $key['table']) === 1 ? $key['table'] : 'another table';
@@ -893,6 +945,18 @@ final class MigrationGenerator
         }
 
         return $found;
+    }
+
+    /**
+     * Whether two delete actions are one: RESTRICT and NO ACTION both
+     * refuse the delete, and differ only in whether a deferred check could
+     * let it through, which no key the builder makes is.
+     */
+    private static function sameDeleteAction(string $model, string $live): bool
+    {
+        $refuses = ['RESTRICT', 'NO ACTION'];
+
+        return $model === $live || (\in_array($model, $refuses, true) && \in_array($live, $refuses, true));
     }
 
     /** A check's expression as it is compared: no case, spaces, brackets, quotes or casts. */
@@ -1066,6 +1130,9 @@ final class MigrationGenerator
             $call .= $references[1] === 'id'
                 ? "->references({$this->php($references[0])})"
                 : "->references({$this->php($references[0])}, {$this->php($references[1])})";
+            if (\is_string($spec['onDelete'] ?? null)) {
+                $call .= "->onDelete({$this->php($spec['onDelete'])})";
+            }
         }
 
         return $call;
