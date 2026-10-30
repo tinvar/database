@@ -24,16 +24,19 @@ final readonly class Assignment
     /**
      * The right-hand side of `"column" = ...`, and its bindings in order.
      *
+     * @param string|null $table the table to name each column read by: an upsert's, where the row there
+     *        is read beside the new one -- Postgres finds a bare column ambiguous between them (ADR 0123)
      * @return array{string, list<int|float>}
      */
-    public function sql(string $column, Compiler $compiler): array
+    public function sql(string $column, Compiler $compiler, ?string $table = null): array
     {
         $change = $this->change;
-        $quoted = Identifiers::quote($column);
+        $of = $table === null ? '' : Identifiers::quote($table) . '.';
+        $quoted = $of . Identifiers::quote($column);
         [$sql, $bindings] = match ($change->kind) {
             Change::ADD => ["{$quoted} + " . $compiler->placeholder($change->operand), [$change->operand ?? 0]],
             Change::MULTIPLY => ["{$quoted} * " . $compiler->placeholder($change->operand), [$change->operand ?? 1]],
-            Change::COPY => [Identifiers::quote($this->source ?? throw new \LogicException('A copy names the column it reads.')), []],
+            Change::COPY => [$of . Identifiers::quote($this->source ?? throw new \LogicException('A copy names the column it reads.')), []],
         };
 
         // A bound reads what it bounds twice, so binds its values twice: no

@@ -45,13 +45,15 @@ use Tinvar\Orm\RelationKind;
  *
  *   - a column: where() and its kin -- a #[HasMany]'s column too, which
  *     they read as an EXISTS -- orderBy(), pluck(), sum(), min(), max(),
- *     every column groupBy() names, and the column of having(), orHaving() and
- *     orderByAggregate();
+ *     every column groupBy() names, the column of having(), orHaving() and
+ *     orderByAggregate(), and of havingColumn() and orHavingColumn() (ADR
+ *     0123);
  *   - a column of the model's own table: increment(), decrement(), each
  *     key of the fields update() is given as a constant array, each field
  *     of each constant row insert() and upsert() are given, and the fields
- *     of upsert()'s uniqueBy and update -- uniqueBy held, besides, to a
- *     key the model declares with #[Unique] (ADR 0073);
+ *     of upsert()'s uniqueBy and update, listed or keyed to a Change --
+ *     uniqueBy held, besides, to a key the model declares with #[Unique]
+ *     (ADR 0073, ADR 0123);
  *   - a relation: with(), whereHas() and its kin, and a relation or a
  *     path of them for withCount(), withSum() and the rest and
  *     orderByRelation(), whose column is the last related model's;
@@ -70,7 +72,7 @@ final class QueryIdentifierRule implements Rule
     ];
 
     /** Methods whose first argument is a column of the model or a #[BelongsTo] it reaches. */
-    private const array COLUMNS = ['orderby', 'pluck', 'sum', 'min', 'max'];
+    private const array COLUMNS = ['orderby', 'pluck', 'sum', 'min', 'max', 'havingcolumn', 'orhavingcolumn'];
 
     /** Methods whose first argument is a column of the model's own table. */
     private const array OWN = ['increment', 'decrement'];
@@ -237,7 +239,16 @@ final class QueryIdentifierRule implements Rule
 
                     return $found;
                 };
-                foreach ($listed($this->argument($args, 2, 'update')) as $name) {
+                // Each field update lists, or keys to a Change (ADR 0123).
+                $update = $this->argument($args, 2, 'update');
+                $updated = $names($update);
+                foreach ($this->constantArrays($scope, $update) as [$keys, $values]) {
+                    foreach ($values as $i => $value) {
+                        $key = $keys[$i] ?? null;
+                        $updated = [...$updated, ...($key !== null && $key->isString()->yes() ? $this->names($key) : $this->names($value))];
+                    }
+                }
+                foreach ($updated as $name) {
                     $checks[] = static fn (): mixed => self::own($meta, $name);
                 }
                 // The key, whole, where PHPStan reads it as one: a single

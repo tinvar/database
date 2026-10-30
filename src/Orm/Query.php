@@ -71,6 +71,9 @@ final readonly class Query
     /** What a unionAll()'s arms are read as, together. */
     private const string UNION = 'u';
 
+    /** What a unionAll()'s arms each name their position as, for a cursor over it. */
+    private const string ARM = 'tinvar_arm';
+
     /** What fetchAggregated() names each aggregate in its select list, with its position: never a name a caller gave. */
     private const string MEASURE = 'tinvar_aggregate_';
 
@@ -87,7 +90,8 @@ final readonly class Query
      *        aggregate over the rows (a report's), or by one over each row's related rows
      * @param list<string> $with relation paths to load with the rows
      * @param list<ColumnRef> $groups what a report groups by
-     * @param list<array{Measure, string, int|float|string, bool}> $havings a report's conditions on its groups, each ORed or ANDed with those before
+     * @param list<array{Measure|ColumnRef, string, int|float|string, bool}> $havings a report's conditions on its groups -- an
+     *        aggregate, or a column it groups by -- each ORed or ANDed with those before
      * @param list<RelationMeasure> $measures the aggregates over related rows fetchAggregated() reads
      * @param list<list<Condition>>|null $unionAll each arm's conditions, once unionAll() joined them
      */
@@ -371,6 +375,10 @@ final readonly class Query
      *
      * fetch() reads each row once already: every join is to one row, and a
      * collection is filtered with EXISTS, so no row is repeated to remove.
+     * The one query that repeats rows is a unionAll(), and on one,
+     * distinct() reads each row once -- fetch(), first(), count(),
+     * exists(), the paginators, sum(), min() and max() read the union() of
+     * its arms, by key, as union() would (ADR 0123).
      *
      * @return static
      */
@@ -438,6 +446,40 @@ final readonly class Query
         }
 
         return $this->keeping(true, $function, $column, $operator, $value);
+    }
+
+    /**
+     * Keeps the groups whose value of a column the report groups by
+     * compares with $value: `groupBy('status')->having(Aggregate::Count,
+     * null, '>', 10)->orHavingColumn('status', '=', 'vip')`. Only a column
+     * grouped by, which is one value in each group -- any other holds many,
+     * and which of them a database compared would be its own choice --
+     * checked when report() runs, since groupBy() may come after. The
+     * column is the metadata's and the value bound, as where() has them
+     * (ADR 0123).
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function havingColumn(string|\BackedEnum $column, string $operator, mixed $value): self
+    {
+        return $this->keepingColumn(false, $column, $operator, $value);
+    }
+
+    /**
+     * havingColumn(), as an alternative to the conditions before it, with
+     * SQL's precedence, as orHaving() has it.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function orHavingColumn(string|\BackedEnum $column, string $operator, mixed $value): self
+    {
+        if ($this->havings === []) {
+            throw new \LogicException('orHavingColumn() is an alternative to a having() before it.');
+        }
+
+        return $this->keepingColumn(true, $column, $operator, $value);
     }
 
     /**
@@ -648,10 +690,13 @@ final readonly class Query
      * read twice: UNION ALL of whole rows, read from as one table. Each arm
      * is a statement of its own under the model's tenant predicate.
      *
-     * Read by fetch(), first(), count(), exists() and paginate(); sorted by
-     * the model's own columns alone, since what is sorted is the arms'
-     * result. A condition added after it would be no arm's, so it is
-     * refused: narrow each arm before joining them.
+     * Read by fetch(), first(), count(), exists(), paginate() and
+     * cursorPaginate() -- whose cursor names a row by its key and the arm
+     * that read it, so a row read twice is two places in the order (ADR
+     * 0123); sorted by the model's own columns alone, since what is sorted
+     * is the arms' result. A condition added after it would be no arm's,
+     * so it is refused: narrow each arm before joining them. distinct()
+     * reads each row once.
      *
      * @param self<T> $other
      * @return static
@@ -676,6 +721,9 @@ final readonly class Query
     {
         $this->assertModelsRead('fetch()');
         $this->assertOffsetLimited();
+        if ($this->distinctUnionAll()) {
+            return $this->asUnion()->fetch();
+        }
 
         [$sql, $bindings] = $this->select($this->readScope(new Compiler($this->orm)), limit: $this->limit, offset: $this->offset);
 
@@ -817,6 +865,11 @@ final readonly class Query
                 throw new \LogicException("A report reads '{$name}', which it does not group by: a group holds many of its values.");
             }
         }
+        foreach ($this->havings as [$kept]) {
+            if ($kept instanceof ColumnRef && !self::among($kept, $groups)) {
+                throw new \LogicException("havingColumn() compares '{$kept->column}', which the report does not group by: a group holds many of its values.");
+            }
+        }
 
         // Each row a group's, or the one row of aggregates: what it sorts by
         // is one value for it.
@@ -838,7 +891,9 @@ final readonly class Query
         $compiler = new Compiler($this->orm);
         $also = [...$groups, ...$plainRefs];
         foreach ([...$measures, ...array_column($this->havings, 0)] as $measure) {
-            if ($measure->column !== null) {
+            if ($measure instanceof ColumnRef) {
+                $also[] = $measure;
+            } elseif ($measure->column !== null) {
                 $also[] = $measure->column;
             }
         }
@@ -864,7 +919,9 @@ final readonly class Query
         if ($this->havings !== []) {
             $terms = '';
             foreach ($this->havings as $i => [$measure, $operator, $value, $or]) {
-                [$expression, $expressionBindings] = $compiler->measure($this->meta, $scope, $measure);
+                [$expression, $expressionBindings] = $measure instanceof ColumnRef
+                    ? [$scope->expression($measure), []]
+                    : $compiler->measure($this->meta, $scope, $measure);
                 $terms .= ($i === 0 ? '' : ($or ? ' OR ' : ' AND ')) . $expression . " {$operator} " . $compiler->placeholder($value);
                 array_push($havingBindings, ...$expressionBindings);
                 $havingBindings[] = $value;
@@ -926,6 +983,9 @@ final readonly class Query
     public function count(): int
     {
         $this->assertModelsRead('count()', aggregates: true);
+        if ($this->distinctUnionAll()) {
+            return $this->asUnion()->count();
+        }
         [$body, $bindings] = $this->readScope(new Compiler($this->orm), orders: false)->body();
 
         return (int) ($this->orm->statements()->select('SELECT COUNT(*) AS "aggregate"' . $body, $bindings)[0]['aggregate'] ?? 0);
@@ -936,6 +996,9 @@ final readonly class Query
     public function exists(): bool
     {
         $this->assertModelsRead('exists()', aggregates: true);
+        if ($this->distinctUnionAll()) {
+            return $this->asUnion()->exists();
+        }
         [$body, $bindings] = $this->readScope(new Compiler($this->orm), orders: false)->body();
 
         return $this->orm->statements()->select('SELECT 1 AS "found"' . $body . ' LIMIT ?', [...$bindings, 1]) !== [];
@@ -1069,11 +1132,8 @@ final readonly class Query
         self::assertPerPage($perPage);
         $this->assertUnlimited('cursorPaginate()');
         $this->assertModelsRead('cursorPaginate()');
-        // A cursor names its row by key, and a unionAll() may read one row
-        // twice: the anchor would be two places in the order at once, and
-        // a page after it would skip or repeat the other (ADR 0073).
-        if ($this->unionAll !== null) {
-            throw new \LogicException('cursorPaginate() names a row by its key, and a unionAll() may read a row twice: page it by number with paginate(), or cursor-page a union().');
+        if ($this->distinctUnionAll()) {
+            return $this->asUnion()->cursorPaginate($perPage, $cursor, $cursors);
         }
 
         $orders = [];
@@ -1096,32 +1156,69 @@ final readonly class Query
             $orders[] = [new ColumnRef([], $this->meta->idColumn), $last, null];
         }
 
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $orders);
+        // A unionAll() may read one row twice, from two arms: the key alone
+        // would be two places in the order at once. Each arm reads its own
+        // position beside the row, sorted by last, and a cursor names the
+        // row by key and arm -- the arm in what the cursor is sealed for,
+        // so it is as signed as the key (ADR 0123).
+        $armed = $this->unionAll !== null;
+        $scope = $armed
+            ? (clone($this, ['orders' => $orders]))->readScope(new Compiler($this->orm), armed: true)
+            : new Compiler($this->orm)->scope($this->meta, $this->conditions, $orders);
         [$body, $bindings] = $scope->body();
         $fingerprint = $this->class . "\n" . $body . $scope->orderBy() . "\n" . serialize($bindings);
+        $sealedFor = static fn (int $arm): string => $armed ? "{$fingerprint}\narm:{$arm}" : $fingerprint;
 
         $after = true;
         $keyset = '';
         $keysetBindings = [];
         if ($cursor !== null && $cursor !== '') {
-            [$anchor, $after] = $cursors->open($fingerprint, $cursor) ?? throw InvalidCursor::unopened();
-            [$keyset, $keysetBindings] = self::keyset($scope, $this->anchorValues($orders, $anchor), $after);
+            $opened = null;
+            $arm = 0;
+            foreach ($armed ? array_keys($this->unionAll ?? []) : [0] as $arm) {
+                $opened = $cursors->open($sealedFor($arm), $cursor);
+                if ($opened !== null) {
+                    break;
+                }
+            }
+            [$anchor, $after] = $opened ?? throw InvalidCursor::unopened();
+            $values = $this->anchorValues($orders, $anchor);
+            if ($armed) {
+                $values[] = $arm;
+            }
+            [$keyset, $keysetBindings] = self::keyset($scope, $values, $after);
         }
 
-        [$sql, $selectBindings] = $this->select($scope, $keyset, $keysetBindings, reversed: !$after, limit: $perPage + 1);
-        $models = $this->hydrate($this->orm->statements()->select($sql, $selectBindings));
+        $armColumn = Identifiers::quote(self::ARM);
+        [$sql, $selectBindings] = $this->select(
+            $scope,
+            $keyset,
+            $keysetBindings,
+            reversed: !$after,
+            limit: $perPage + 1,
+            list: $armed ? ', ' . Identifiers::quote(self::UNION) . ".{$armColumn} AS {$armColumn}" : '',
+        );
+        $rows = $this->orm->statements()->select($sql, $selectBindings);
+        $arms = [];
+        foreach ($rows as $r => $row) {
+            $arms[$r] = (int) ($row[self::ARM] ?? 0);
+            unset($rows[$r][self::ARM]);
+        }
+        $models = $this->hydrate($rows);
 
         $more = \count($models) > $perPage;
         $models = \array_slice($models, 0, $perPage);
+        $arms = \array_slice($arms, 0, $perPage);
         if (!$after) {
             $models = array_reverse($models);
+            $arms = array_reverse($arms);
         }
 
-        $first = $models[0] ?? null;
-        $last = $models === [] ? null : $models[\count($models) - 1];
-        $seal = static fn (?Model $model, bool $forward): ?string => $model === null
+        $first = $models === [] ? null : 0;
+        $last = $models === [] ? null : \count($models) - 1;
+        $seal = static fn (?int $at, bool $forward): ?string => $at === null
             ? null
-            : $cursors->seal($fingerprint, $model->primaryKey(), $forward);
+            : $cursors->seal($sealedFor($arms[$at]), $models[$at]->primaryKey(), $forward);
 
         // The cursor the page was read at, only once it has opened: the
         // caller's own string handed back, never one this did not verify.
@@ -1130,6 +1227,23 @@ final readonly class Query
         return $after
             ? new CursorPage($models, $perPage, $more ? $seal($last, true) : null, $keyset === '' ? null : $seal($first, false), $at)
             : new CursorPage($models, $perPage, $seal($last, true), $more ? $seal($first, false) : null, $at);
+    }
+
+    /** Whether this is a unionAll() that distinct() asked to read each row of once. */
+    private function distinctUnionAll(): bool
+    {
+        return $this->distinct && $this->unionAll !== null;
+    }
+
+    /**
+     * A distinct unionAll() as the union() of its arms -- each row once,
+     * by key -- with its order, limit and offset (ADR 0123).
+     *
+     * @return static
+     */
+    private function asUnion(): self
+    {
+        return clone($this, ['conditions' => [Condition::union(false, $this->unionAll ?? [])], 'unionAll' => null, 'distinct' => false]);
     }
 
     /**
@@ -1143,6 +1257,9 @@ final readonly class Query
     public function toSql(): array
     {
         $this->assertModelsRead('toSql()', aggregates: true);
+        if ($this->distinctUnionAll()) {
+            return $this->asUnion()->toSql();
+        }
 
         return $this->select($this->readScope(new Compiler($this->orm)), limit: $this->limit, offset: $this->offset);
     }
@@ -1368,17 +1485,23 @@ final readonly class Query
      * follow. Two rows with one key are refused: Postgres refuses to update
      * a row twice in one statement, and the others would keep the last.
      *
+     * An $update field keyed to a Change -- `['hits' => Change::add(1)]`,
+     * a multiple, a copy, bounded or not -- is worked out by the database
+     * from the row there, as update() works one out; the rows need not set
+     * it, and a copy is never from a column the upsert sets (ADR 0123).
+     *
      * MySQL has no conflict target: ON DUPLICATE KEY UPDATE answers to any
      * unique index the table has. The target is still checked against the
-     * metadata; and on a #[TenantScoped] model it is not used at all, since
-     * a collision on an index the tenant column does not lead would update
-     * another tenant's row: the tenant's rows with the keys are read and
-     * locked, updated by their primary keys, and the rest inserted
-     * (upsertLocked(), ADR 0073).
+     * metadata; and on a #[TenantScoped] model the update is guarded, so a
+     * collision with any row but the tenant's own by the key -- another
+     * tenant's, through an index the tenant column does not lead or a
+     * primary key a row brings -- is an error, and nothing is written: one
+     * statement still (onConflict(), ADR 0123; ADR 0073 made it three).
      *
      * @param list<array<string, mixed>> $rows each naming the same fields
      * @param string|list<string> $uniqueBy the key's fields
-     * @param list<string>|null $update the fields an existing row takes from its new one
+     * @param array<array-key, string|Change|Increment>|null $update the fields an existing row takes from its new
+     *        one, listed; or keyed to a Change it works out from what the row holds
      */
     public function upsert(array $rows, string|array $uniqueBy, ?array $update = null): int
     {
@@ -1392,7 +1515,7 @@ final readonly class Query
      *
      * @param array<mixed> $rows
      * @param list<string>|null $uniqueBy null for a plain insert
-     * @param list<string>|null $update
+     * @param array<array-key, string|Change|Increment>|null $update
      */
     private function writeRows(string $what, array $rows, ?array $uniqueBy, ?array $update): int
     {
@@ -1438,23 +1561,30 @@ final readonly class Query
             $stored[] = $one;
         }
 
-        [$target, $set] = $uniqueBy === null ? [null, []] : $this->conflict($what, $stored, $columns, $uniqueBy, $update, $this->stamped($rows[array_key_first($rows)]));
+        [$target, $set, $changes] = $uniqueBy === null
+            ? [null, [], []]
+            : $this->conflict($what, $stored, $columns, $uniqueBy, $update, $this->stamped($rows[array_key_first($rows)]));
 
-        return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $tenant, $preset): int {
+        return $this->orm->transaction(function () use ($stored, $columns, $target, $set, $changes, $tenant, $preset): int {
             // A row an upsert brings its key for may be the very row its
             // unique key finds: updated, not inserted, though its key is
             // one written. Which of them were there is asked first.
             $existed = $target === null ? [] : array_flip(array_column($this->rowsByKey($preset), $this->meta->idColumn));
+
+            // A tenant's upsert on MySQL guards the row it finds, by the
+            // tenant, the key and the keys this upsert mints (onConflict()).
+            $minted = null;
             if ($target !== null && $tenant !== null && $this->onMySql()) {
-                return $this->upsertLocked($stored, $columns, $target, $set, $tenant, $existed);
+                $minted = array_values(array_diff(array_map(fn (array $row): string => (string) $row[$this->meta->idColumn], $stored), $preset));
             }
+            [$conflict, $conflictBindings] = $target === null ? ['', []] : $this->onConflict($target, $set, $changes, $minted);
 
             $table = Identifiers::quote($this->meta->table);
             $list = implode(', ', array_map(Identifiers::quote(...), $columns));
             $tuple = '(' . Compiler::placeholders(\count($columns)) . ')';
-            $conflict = $target === null ? '' : $this->onConflict($target, $set);
+            $perStatement = max(1, intdiv(max(1, self::MAX_BINDINGS - \count($conflictBindings)), \count($columns)));
 
-            foreach (array_chunk($stored, max(1, intdiv(self::MAX_BINDINGS, \count($columns)))) as $chunk) {
+            foreach (array_chunk($stored, $perStatement) as $chunk) {
                 $bindings = [];
                 foreach ($chunk as $row) {
                     foreach ($columns as $column) {
@@ -1463,7 +1593,7 @@ final readonly class Query
                 }
                 $this->orm->statements()->execute(
                     "INSERT INTO {$table} ({$list}) VALUES " . implode(', ', array_fill(0, \count($chunk), $tuple)) . $conflict,
-                    $bindings,
+                    [...$bindings, ...$conflictBindings],
                 );
             }
 
@@ -1513,9 +1643,9 @@ final readonly class Query
      * with every row the upsert updates, named or not, and with none where
      * it updates nothing.
      *
-     * @param list<string>|null $update
+     * @param array<array-key, mixed>|null $update
      * @param array{created: string|null, updated: string|null} $stamped the columns the ORM stamped, not the rows
-     * @return array{non-empty-list<string>, list<string>}
+     * @return array{non-empty-list<string>, list<string>, array<string, Assignment>}
      */
     private function conflict(string $what, array $stored, array $columns, array $uniqueBy, ?array $update, array $stamped): array
     {
@@ -1541,16 +1671,36 @@ final readonly class Query
 
         $fixed = [...$target, $this->meta->idColumn];
         $stamps = array_values(array_filter($stamped, \is_string(...)));
+        $changes = [];
         if ($update === null) {
             $set = array_values(array_diff($columns, $fixed, $stamps));
         } else {
             $set = [];
-            foreach ($update as $name) {
+            foreach ($update as $key => $entry) {
+                // A field by itself takes the new row's value; one keyed to
+                // a Change takes what the database works out from the row
+                // there (ADR 0123).
+                $name = \is_string($key) ? $key : $entry;
+                if (!\is_string($name)) {
+                    throw new \InvalidArgumentException("{$what} updates fields, each named, or named and given a Change.");
+                }
+                if (\is_string($key) && !$entry instanceof Change && !$entry instanceof Increment) {
+                    throw new \InvalidArgumentException("{$what} updates '{$name}' with the new row's value, or with a Change: list it, or give it one.");
+                }
                 $column = $this->ownColumn($name);
                 if (\in_array($column, $fixed, true) || $column === $this->meta->tenantColumn) {
                     throw new \InvalidArgumentException("{$what} updates no key: '{$name}' is what the row is found by.");
                 }
-                if (!\in_array($column, $columns, true)) {
+                if (\in_array($column, $set, true)) {
+                    throw new \InvalidArgumentException("{$what} updates '{$name}' once.");
+                }
+                if (\is_string($key)) {
+                    $assignment = Fields::row($this->meta, [$name => $entry], inserting: false)[$column] ?? null;
+                    if (!$assignment instanceof Assignment) {
+                        throw new \LogicException("'{$name}' resolved to no change of its own column.");
+                    }
+                    $changes[$column] = $assignment;
+                } elseif (!\in_array($column, $columns, true)) {
                     throw new \InvalidArgumentException("{$what} updates '{$name}', which the rows do not set.");
                 }
                 if ($column === $stamped['created']) {
@@ -1558,14 +1708,24 @@ final readonly class Query
                 }
                 $set[] = $column;
             }
-            $set = array_values(array_unique($set));
+        }
+
+        // A copy reads the row as it is written, and MySQL works the
+        // assignments out left to right, each seeing those before it, where
+        // Postgres and SQLite read each from the row as it was: a copy from
+        // a column the same upsert sets would store one value on MySQL and
+        // another elsewhere, so it is refused, as update() refuses it.
+        foreach ($changes as $column => $assignment) {
+            if ($assignment->source !== null && \in_array($assignment->source, $set, true)) {
+                throw new \InvalidArgumentException("{$what} copies '{$assignment->source}' into {$column}, and sets '{$assignment->source}' too: copy it in an update() of its own.");
+            }
         }
 
         if ($set !== [] && $stamped['updated'] !== null && !\in_array($stamped['updated'], $set, true)) {
             $set[] = $stamped['updated'];
         }
 
-        return [$target, $set];
+        return [$target, $set, $changes];
     }
 
     /**
@@ -1602,27 +1762,89 @@ final readonly class Query
     }
 
     /**
-     * ON CONFLICT, as each database spells it.
+     * ON CONFLICT, as each database spells it, and what it binds: a column
+     * an existing row takes from its new one, or works out with a Change
+     * from what it holds, its columns named by the table's name.
+     *
+     * A #[TenantScoped] model's on MySQL ($minted not null) is guarded.
+     * ON DUPLICATE KEY UPDATE answers to whichever unique index a new row
+     * collides with first, whatever the statement names: the primary key
+     * a row brings, or an index the tenant column does not lead -- an
+     * email unique across every tenant -- would have it update another
+     * tenant's row. So its first assignment checks the row it found, the
+     * existing row as the database holds it: the tenant's, by the target's
+     * key as the database compares it -- its collation decides what is one
+     * key, as its unique index does -- and not a row this upsert inserted
+     * itself, which is two new rows the collation takes for one key, and
+     * refused as Postgres refuses to update a row twice. Any other row is an
+     * error that rolls the statement back before it changes anything: not a
+     * NULL into a NOT NULL column, which a server outside strict mode turns
+     * into a warning and a write, but invalid JSON, an error under every SQL
+     * mode, made of the row's key so no server can work it out before it is
+     * asked for (ADR 0123). Postgres and SQLite name their conflict target,
+     * so a collision on any other index is an error there already.
      *
      * @param non-empty-list<string> $target
      * @param list<string> $set
+     * @param array<string, Assignment> $changes by column, those $set works out from the row there
+     * @param list<string>|null $minted the keys this upsert mints, for a tenant's on MySQL; null for any other
+     * @return array{string, list<int|float|string>}
      */
-    private function onConflict(array $target, array $set): string
+    private function onConflict(array $target, array $set, array $changes, ?array $minted): array
     {
-        $connection = $this->orm->statements();
-        if ($connection instanceof NamesDriver && $connection->driver() === 'mysql') {
-            $id = Identifiers::quote($this->meta->idColumn);
+        $compiler = new Compiler($this->orm);
+        $table = $this->meta->table;
+        $existing = Identifiers::quote($table) . '.';
+        $bindings = [];
+        $assign = static function (string $column, string $incoming) use ($changes, $compiler, $table, &$bindings): string {
+            if (!isset($changes[$column])) {
+                return Identifiers::quote($column) . " = {$incoming}";
+            }
+            [$sql, $values] = $changes[$column]->sql($column, $compiler, $table);
+            array_push($bindings, ...$values);
 
-            return ' ON DUPLICATE KEY UPDATE ' . ($set === []
-                ? "{$id} = {$id}"
-                : implode(', ', array_map(static fn (string $c): string => Identifiers::quote($c) . ' = VALUES(' . Identifiers::quote($c) . ')', $set)));
+            return Identifiers::quote($column) . " = {$sql}";
+        };
+
+        if ($this->onMySql()) {
+            $terms = [];
+            if ($minted !== null) {
+                $tenant = Identifiers::quote($this->meta->tenantColumn ?? throw new \LogicException("{$this->class} has no tenant column."));
+                $id = Identifiers::quote($this->meta->idColumn);
+                $same = ["{$existing}{$tenant} = VALUES({$tenant})"];
+                foreach ($target as $column) {
+                    if ($column !== $this->meta->tenantColumn) {
+                        $same[] = $existing . Identifiers::quote($column) . ' = VALUES(' . Identifiers::quote($column) . ')';
+                    }
+                }
+                if ($minted !== []) {
+                    $same[] = "{$existing}{$id} NOT IN (" . Compiler::placeholders(\count($minted)) . ')';
+                    array_push($bindings, ...$minted);
+                }
+                $terms[] = "{$tenant} = IF(" . implode(' AND ', $same) . ", {$existing}{$tenant}, "
+                    . "JSON_EXTRACT(CONCAT('tinvar: an upsert reached a row that is not its tenant''s by its key ', {$existing}{$id}), '\$'))";
+            }
+            foreach ($set as $column) {
+                $terms[] = $assign($column, 'VALUES(' . Identifiers::quote($column) . ')');
+            }
+            if ($terms === []) {
+                $id = Identifiers::quote($this->meta->idColumn);
+                $terms[] = "{$id} = {$id}";
+            }
+
+            return [' ON DUPLICATE KEY UPDATE ' . implode(', ', $terms), $bindings];
         }
 
         $clause = ' ON CONFLICT (' . implode(', ', array_map(Identifiers::quote(...), $target)) . ')';
+        if ($set === []) {
+            return [$clause . ' DO NOTHING', []];
+        }
+        $terms = [];
+        foreach ($set as $column) {
+            $terms[] = $assign($column, 'excluded.' . Identifiers::quote($column));
+        }
 
-        return $set === []
-            ? $clause . ' DO NOTHING'
-            : $clause . ' DO UPDATE SET ' . implode(', ', array_map(static fn (string $c): string => Identifiers::quote($c) . ' = excluded.' . Identifiers::quote($c), $set));
+        return [$clause . ' DO UPDATE SET ' . implode(', ', $terms), $bindings];
     }
 
     private function onMySql(): bool
@@ -1630,125 +1852,6 @@ final readonly class Query
         $connection = $this->orm->statements();
 
         return $connection instanceof NamesDriver && $connection->driver() === 'mysql';
-    }
-
-    /**
-     * upsert() on a #[TenantScoped] model on MySQL, with no ON DUPLICATE KEY
-     * UPDATE (ADR 0073).
-     *
-     * MySQL's ON DUPLICATE KEY UPDATE answers to whichever unique index a
-     * row collides with, whatever the statement names: the primary key a
-     * row brings, or an index the tenant column does not lead -- an email
-     * unique across every tenant -- would have it update another tenant's
-     * row. So the conflict is found, not left to the database: three
-     * statements, each of which can reach the tenant's rows alone.
-     *
-     * - The rows there already, read by the target -- the tenant column and
-     *   the key, compared by the database against a derived table of the
-     *   new rows, so its collation decides what is one key as its unique
-     *   index does -- and locked FOR UPDATE. A key not there is held by the
-     *   index's gap lock; were it inserted between, the INSERT below fails.
-     * - Those rows updated by their primary keys, read just now, AND the
-     *   tenant column, from the new rows joined by key: a row of another
-     *   tenant is named by neither.
-     * - The rest inserted with a plain INSERT, which updates nothing: a row
-     *   colliding with any row on any unique index is an error, as it is on
-     *   Postgres for an index the conflict target does not name.
-     *
-     * @param list<array<string, mixed>> $stored
-     * @param list<string> $columns
-     * @param non-empty-list<string> $target
-     * @param list<string> $set
-     * @param array<array-key, int> $existed the keys rows brought that were there already
-     */
-    private function upsertLocked(array $stored, array $columns, array $target, array $set, string $tenant, array $existed): int
-    {
-        $tenantColumn = $this->meta->tenantColumn ?? throw new \LogicException("{$this->class} has no tenant column.");
-        $table = Identifiers::quote($this->meta->table);
-        $id = Identifiers::quote($this->meta->idColumn);
-        $key = array_values(array_diff($target, [$tenantColumn]));
-
-        // Each new row's position, by the existing row's key it found.
-        $existing = [];
-        foreach (array_chunk($stored, max(1, intdiv(self::MAX_BINDINGS, \count($key) + 1)), true) as $chunk) {
-            $rows = [];
-            foreach ($chunk as $n => $row) {
-                $rows[] = [$n, ...array_map(static fn (string $column): mixed => $row[$column], $key)];
-            }
-            [$derived, $bindings] = self::derivedTable(['n', ...$key], $rows);
-            $on = implode(' AND ', array_map(static fn (string $c): string => 't.' . Identifiers::quote($c) . ' = v.' . Identifiers::quote($c), $key));
-            $found = $this->orm->statements()->select(
-                "SELECT v.\"n\" AS \"n\", t.{$id} AS \"id\" FROM {$derived} AS v JOIN {$table} AS t "
-                . 'ON t.' . Identifiers::quote($tenantColumn) . " = ? AND {$on} FOR UPDATE OF t",
-                [...$bindings, $tenant],
-            );
-            foreach ($found as $row) {
-                $existing[(int) $row['n']] = (string) $row['id'];
-            }
-        }
-        // Two new rows the collation takes for one key ('abc' and 'ABC'):
-        // refused, as two rows with one key are, and as Postgres refuses to
-        // update one row twice.
-        if (\count(array_unique($existing)) !== \count($existing)) {
-            throw new \InvalidArgumentException('Two rows upsert() writes share a key as the database compares it; write each once.');
-        }
-
-        if ($set !== [] && $existing !== []) {
-            $assign = implode(', ', array_map(static fn (string $c): string => 't.' . Identifiers::quote($c) . ' = v.' . Identifiers::quote($c), $set));
-            foreach (array_chunk($existing, max(1, intdiv(self::MAX_BINDINGS, \count($set) + 1)), true) as $chunk) {
-                $rows = [];
-                foreach ($chunk as $n => $existingId) {
-                    $rows[] = [$existingId, ...array_map(static fn (string $column): mixed => $stored[$n][$column], $set)];
-                }
-                [$derived, $bindings] = self::derivedTable([$this->meta->idColumn, ...$set], $rows);
-                $this->orm->statements()->execute(
-                    "UPDATE {$table} AS t JOIN {$derived} AS v ON t.{$id} = v.{$id} SET {$assign} WHERE t." . Identifiers::quote($tenantColumn) . ' = ?',
-                    [...$bindings, $tenant],
-                );
-            }
-        }
-
-        $new = array_values(array_diff_key($stored, $existing));
-        if ($new !== []) {
-            $list = implode(', ', array_map(Identifiers::quote(...), $columns));
-            $tuple = '(' . Compiler::placeholders(\count($columns)) . ')';
-            foreach (array_chunk($new, max(1, intdiv(self::MAX_BINDINGS, \count($columns)))) as $chunk) {
-                $bindings = [];
-                foreach ($chunk as $row) {
-                    foreach ($columns as $column) {
-                        $bindings[] = $row[$column];
-                    }
-                }
-                $this->orm->statements()->execute(
-                    "INSERT INTO {$table} ({$list}) VALUES " . implode(', ', array_fill(0, \count($chunk), $tuple)),
-                    $bindings,
-                );
-            }
-        }
-
-        return $this->followUpserted($stored, $columns, $target, $set, $tenant, $existed);
-    }
-
-    /**
-     * `(SELECT ? AS "a", ? AS "b" UNION ALL SELECT ?, ? ...)`: rows as a
-     * table a statement can join, every value bound.
-     *
-     * @param non-empty-list<string> $names
-     * @param non-empty-list<list<mixed>> $rows
-     * @return array{string, list<mixed>}
-     */
-    private static function derivedTable(array $names, array $rows): array
-    {
-        $first = 'SELECT ' . implode(', ', array_map(static fn (string $name): string => '? AS ' . Identifiers::quote($name), $names));
-        $rest = 'SELECT ' . Compiler::placeholders(\count($names));
-        $bindings = [];
-        foreach ($rows as $row) {
-            foreach ($row as $value) {
-                $bindings[] = $value;
-            }
-        }
-
-        return ['(' . $first . str_repeat(' UNION ALL ' . $rest, \count($rows) - 1) . ')', $bindings];
     }
 
     /**
@@ -1793,6 +1896,7 @@ final readonly class Query
         ));
 
         $inserted = 0;
+        $found = [];
         foreach (array_chunk($stored, max(1, intdiv(self::MAX_VALUES, \count($key)))) as $chunk) {
             $alternatives = [];
             $bindings = [];
@@ -1811,14 +1915,32 @@ final readonly class Query
                 $bindings[] = $tenant;
             }
 
-            foreach ($this->orm->statements()->select("SELECT {$select} FROM {$table} WHERE {$where}", $bindings) as $found) {
-                $id = (string) $found[$this->meta->idColumn];
+            foreach ($this->orm->statements()->select("SELECT {$select} FROM {$table} WHERE {$where}", $bindings) as $row) {
+                $id = (string) $row[$this->meta->idColumn];
+                if (isset($found[$id])) {
+                    continue;   // found again by a row of another chunk: see below
+                }
+                $found[$id] = true;
                 if (isset($byId[$id]) && !isset($existed[$id])) {
                     $inserted++;
                     $this->orm->followStatementWrite($this->meta, $id, $byId[$id], $columns);
                 } elseif ($set !== []) {
-                    $this->orm->followStatementWrite($this->meta, $id, $found, $set);
+                    $this->orm->followStatementWrite($this->meta, $id, $row, $set);
                 }
+            }
+        }
+
+        // On MySQL, two new rows its collation takes for one key ('alpha',
+        // 'ALPHA') are written to one row, the second updating what the
+        // first wrote: found here as fewer rows than were written, each key
+        // naming one row of the tenant's. Refused, inside the upsert's
+        // transaction, so neither is kept -- as two rows with one key are,
+        // and as Postgres refuses to update one row twice (ADR 0073). A key
+        // holding a NULL conflicts with nothing and is found by nothing.
+        if ($this->onMySql()) {
+            $keyed = array_filter($stored, static fn (array $row): bool => array_filter($key, static fn (string $c): bool => $row[$c] === null) === []);
+            if (\count($found) < \count($keyed)) {
+                throw new \InvalidArgumentException('Two rows upsert() writes share a key as the database compares it; write each once.');
             }
         }
 
@@ -2040,6 +2162,27 @@ final readonly class Query
         return clone($this, ['havings' => [...$this->havings, [$this->measure($function, $column), $sql, self::value($value), $or]]]);
     }
 
+    /** @return static */
+    private function keepingColumn(bool $or, string|\BackedEnum $column, string $operator, mixed $value): self
+    {
+        $sql = self::OPERATORS[strtolower($operator)] ?? null;
+        if ($sql === null) {
+            throw new \InvalidArgumentException('A group\'s column compares with ' . implode(', ', array_keys(self::OPERATORS)) . '.');
+        }
+        if ($value === null) {
+            throw new \InvalidArgumentException('A comparison with NULL matches no group in SQL; narrow the rows with whereNull() instead.');
+        }
+
+        $ref = Identifiers::column($this->meta, $column);
+        // A key groups one row, or none: narrow those with where(), which
+        // answers a malformed key without asking the database.
+        if ($this->isKey($ref)) {
+            throw new \LogicException("havingColumn() compares a group's column, and '{$ref->column}' is a key: narrow the rows with where().");
+        }
+
+        return clone($this, ['havings' => [...$this->havings, [$ref, $sql, self::value($value), $or]]]);
+    }
+
     private function measure(Aggregate $function, string|\BackedEnum|null $column): Measure
     {
         if ($column === null) {
@@ -2171,8 +2314,10 @@ final readonly class Query
      * predicate, UNION ALL'd, sorted by the model's own columns alone.
      *
      * @param list<ColumnRef> $also further columns the statement reads
+     * @param bool $armed whether a unionAll()'s arms each read their own position too, sorted by
+     *        last: what a cursor over one tells a row two arms read apart by (ADR 0123)
      */
-    private function readScope(Compiler $compiler, bool $orders = true, array $also = []): Scope
+    private function readScope(Compiler $compiler, bool $orders = true, array $also = [], bool $armed = false): Scope
     {
         if ($this->unionAll === null) {
             return $compiler->scope($this->meta, $this->conditions, $orders ? $this->orders : [], $also);
@@ -2187,10 +2332,13 @@ final readonly class Query
 
         $arms = [];
         $bindings = [];
-        foreach ($this->unionAll as $arm) {
+        foreach ($this->unionAll as $i => $arm) {
             $scope = $compiler->scope($this->meta, $arm, []);
             [$body, $armBindings] = $scope->body();
-            $arms[] = 'SELECT ' . $this->columnList($scope->alias) . $body;
+            // Which arm read the row, for a cursor: a row two arms read is
+            // two places in the order, told apart by it. The position is
+            // the builder's own number, never a caller's.
+            $arms[] = 'SELECT ' . $this->columnList($scope->alias) . ($armed ? ", {$i} AS " . Identifiers::quote(self::ARM) : '') . $body;
             array_push($bindings, ...$armBindings);
         }
 
@@ -2200,6 +2348,10 @@ final readonly class Query
                 throw new \LogicException('A unionAll() sorts by the model\'s own columns: what it sorts is its arms\' rows, which hold no join and no aggregate.');
             }
             $resolved[] = [Identifiers::quote(self::UNION) . '.' . Identifiers::quote($by->column), $direction, $nulls, []];
+        }
+        if ($armed) {
+            $last = $resolved === [] ? Direction::Asc : $resolved[\count($resolved) - 1][1];
+            $resolved[] = [Identifiers::quote(self::UNION) . '.' . Identifiers::quote(self::ARM), $last, null, []];
         }
 
         return new Scope(
@@ -2564,6 +2716,9 @@ final readonly class Query
     private function aggregate(string $function, string|\BackedEnum $column): mixed
     {
         $this->assertModelsRead(strtolower($function) . '()', aggregates: true);
+        if ($this->distinctUnionAll()) {
+            return $this->asUnion()->aggregate($function, $column);
+        }
         $ref = Identifiers::column($this->meta, $column);
         $scope = $this->unionAll === null
             ? new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref])

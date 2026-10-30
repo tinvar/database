@@ -6,9 +6,9 @@ declare(strict_types=1);
  * upsert() on a #[TenantScoped] model, alike on SQLite, Postgres (under
  * row-level security) and MySQL (ADR 0073). MySQL's ON DUPLICATE KEY UPDATE
  * answers to any unique index a row collides with, so there the builder
- * finds the conflict itself: these tests give the table a primary key and a
- * unique index the tenant column does not lead, and try to reach globex's
- * rows as acme through each.
+ * guards the row it finds, in the one statement (ADR 0123): these tests
+ * give the table a primary key and a unique index the tenant column does
+ * not lead, and try to reach globex's rows as acme through each.
  */
 
 namespace Tinvar\Tests\Orm\QueryTenantUpsert;
@@ -126,7 +126,7 @@ describe('a tenant\'s upsert', function () {
         }, indexes(...));
     })->skip(Databases::postgresMissing() !== null, Databases::postgresMissing() ?? '');
 
-    it('does the same on MySQL, which finds the conflict without ON DUPLICATE KEY UPDATE', function () {
+    it('does the same on MySQL, whose ON DUPLICATE KEY UPDATE is guarded to the tenant\'s row by its key', function () {
         Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
             upsertsWithinTheTenant($fixture->orm(connection: $connection), $fixture);
         }, indexes(...));

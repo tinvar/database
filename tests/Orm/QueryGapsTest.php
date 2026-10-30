@@ -234,7 +234,8 @@ function readsAlike(Orm $orm): void
         ->and($acme(static fn (): array => $both->distinct()->orderBy('name')->pluck('name')))->toBe(['Alpha', 'Bravo'])
         ->and($across(static fn (): array => $both->orderBy('name')->pluck('name')))->toBe(['Alpha', 'Alpha', 'Bravo', 'Delta', 'Delta', 'Echo'])
         ->and(fn () => $both->pluck('name'))->toThrow(NoTenantContext::class)
-        ->and(fn () => $acme(static fn (): mixed => $both->cursorPaginate(2, null, $cursors)))->toThrow(\LogicException::class, 'read a row twice');
+        // A cursor names a row by its key and the arm that read it (ADR 0123).
+        ->and(names($acme(static fn (): mixed => $both->orderBy('name')->cursorPaginate(2, null, $cursors))->items))->toBe(['Alpha', 'Alpha']);
 }
 
 /** Writes: through intersect() and a unionAll(), with a Change, and insert() running hooks. */

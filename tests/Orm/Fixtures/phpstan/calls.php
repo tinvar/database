@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Tests\Orm\PHPStanFixture;
 
 use Tinvar\Orm\Aggregate;
+use Tinvar\Orm\Change;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\Query;
@@ -89,6 +90,11 @@ function calls(Orm $orm, string $fromRuntime): void
     $query->upsert([['label' => 'x', 'weightKg' => 3]], uniqueBy: ['lable']); // refused
     $query->upsert([['label' => 'x', 'weightKg' => 3]], 'label', ['wieghtKg']); // refused
     $query->upsert([['label' => 'x']], $fromRuntime);
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], 'label', update: ['weightKg' => Change::add(1)]);
+    $query->upsert([['label' => 'x', 'weightKg' => 3]], 'label', update: ['label', 'wieghtKg' => Change::add(1)]); // refused
+    $_ = $query->groupBy('label')->havingColumn('label', '=', 'x')->orHavingColumn('pallet.code', '=', 'y');
+    $_ = $query->groupBy('label')->havingColumn('lable', '=', 'x'); // refused
+    $_ = $query->groupBy('label')->having(Aggregate::Count, null, '>', 1)->orHavingColumn('pallet.cod', '=', 'y'); // refused
 
     // Known only at runtime: the builder's to check when it runs.
     $_ = $query->where($fromRuntime, 'x');
