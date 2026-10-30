@@ -2580,8 +2580,14 @@ final class Orm
      * resolveHasMany()'s retry. Each is a statement per parent when it is
      * read in a loop.
      *
+     * The one row a statement returned is told apart (LazyLoad::ONE_ROW):
+     * batched as far as it can be by itself, it is a statement per row when
+     * the statement is in a loop -- a find() for each of N keys -- which the
+     * testing layer reads off how often one relation loads that way (ADR
+     * 0122).
+     *
      * @param list<Model> $parents
-     * @return LazyLoad::RESULT_SET|LazyLoad::ALONE
+     * @return LazyLoad::RESULT_SET|LazyLoad::ONE_ROW|LazyLoad::ALONE
      */
     private static function batchOf(array $parents): string
     {
@@ -2591,7 +2597,7 @@ final class Orm
 
         $set = $parents[0]->resultSet();
 
-        return $set !== null && !$set->alone && $set->models === $parents ? LazyLoad::RESULT_SET : LazyLoad::ALONE;
+        return $set !== null && !$set->alone && $set->models === $parents ? LazyLoad::ONE_ROW : LazyLoad::ALONE;
     }
 
     /** @internal for the Orm's relation loading and the batch scheduler's */

@@ -35,12 +35,14 @@ final class LazyLoads
     }
 
     /**
-     * The loads from the $from'th on that ran for one parent alone.
+     * The loads from the $from'th on that ran outside a batch: for one
+     * parent alone, or for the one row of a statement run more than once
+     * (LazyLoad::outsideBatch()).
      *
      * @return list<LazyLoad>
      */
     public function outsideBatch(int $from = 0): array
     {
-        return array_values(array_filter($this->since($from), static fn (LazyLoad $load): bool => !$load->inBatch()));
+        return LazyLoad::outsideBatch($this->since($from));
     }
 }
