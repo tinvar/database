@@ -8,10 +8,10 @@ namespace Tinvar\Tests\Orm\Fixtures;
  * The servers a database test can reach, beside the SQLite every test has:
  * Postgres and MySQL.
  *
- * The database package's copy of the framework suite's finder
- * (packages/framework/tests/Support/Fixtures/databases.php), so its tests
- * run with nothing of the framework's installed (ADR 0055); it leaves out
- * Redis, which only the framework's tests use.
+ * The one finder for both: this package's suite uses it with nothing of
+ * the framework's installed (ADR 0055), and the framework's loads it
+ * through the path Composer installed tinvar/database at and adds Redis,
+ * which only the framework's tests use (ADR 0115).
  *
  * Tests that need one run when it is there and are skipped, saying why, when
  * it is not: the suite has to pass on a machine with PHP alone, and a test
