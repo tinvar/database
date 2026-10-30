@@ -47,7 +47,7 @@ use function Amp\async;
  * cleared -- and the request waits for the clearing. The pool and its
  * sessions outlive the request; nothing the request told them does.
  */
-final class AsyncConnection implements ConcurrentConnection, TenantSetting
+final class AsyncConnection implements ConcurrentConnection, TenantSetting, ObservesStatements
 {
     /** The most statements the log keeps between resets, as PdoConnection's. */
     public const int MAX_LOGGED = PdoConnection::MAX_LOGGED;
@@ -74,6 +74,9 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
     private array $log = [];
 
     private bool $logSql = true;
+
+    /** @var (\Closure(string, int, int, ?\Throwable): void)|null told of each statement once it is answered (ObservesStatements) */
+    private ?\Closure $observer = null;
 
     private readonly Pool $pool;
 
@@ -180,7 +183,7 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
         $this->record($sql);
 
         /** @var list<array<string, mixed>> $rows */
-        $rows = $this->run(fn (PostgresConnection|MysqlConnection $link): array => self::rows($this->driver->execute($link, $sql, $bindings)));
+        $rows = $this->observed($sql, fn (): mixed => $this->run(fn (PostgresConnection|MysqlConnection $link): array => self::rows($this->driver->execute($link, $sql, $bindings))));
 
         return $rows;
     }
@@ -190,7 +193,7 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
         $this->record($sql);
 
         /** @var int $affected */
-        $affected = $this->run(fn (PostgresConnection|MysqlConnection $link): int => self::affected($this->driver->execute($link, $sql, $bindings)));
+        $affected = $this->observed($sql, fn (): mixed => $this->run(fn (PostgresConnection|MysqlConnection $link): int => self::affected($this->driver->execute($link, $sql, $bindings))));
 
         return $affected;
     }
@@ -847,6 +850,40 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting
         }
 
         return $count;
+    }
+
+    /** @param (\Closure(string, int, int, ?\Throwable): void)|null $observer */
+    public function observeStatements(?\Closure $observer): void
+    {
+        $this->observer = $observer;
+    }
+
+    /**
+     * $statement, timed and told to the observer, when there is one: the
+     * text alone, as the log keeps it, never what was bound to it.
+     *
+     * @template T
+     * @param \Closure(): T $statement
+     * @return T
+     */
+    private function observed(string $sql, \Closure $statement): mixed
+    {
+        $observer = $this->observer;
+        if ($observer === null) {
+            return $statement();
+        }
+
+        $started = hrtime(true);
+        $failure = null;
+        try {
+            return $statement();
+        } catch (\Throwable $e) {
+            $failure = $e;
+
+            throw $e;
+        } finally {
+            $observer($sql, $started, hrtime(true), $failure);
+        }
     }
 
     private function record(string $sql): void

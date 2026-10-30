@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
-final class PdoConnection implements Connection, TenantSetting, NamesDriver
+final class PdoConnection implements Connection, TenantSetting, NamesDriver, ObservesStatements
 {
     /**
      * The most statements the log keeps between resets; the count goes on.
@@ -22,6 +22,9 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver
     private array $log = [];
 
     private bool $logSql = true;
+
+    /** @var (\Closure(string, int, int, ?\Throwable): void)|null told of each statement once it is answered (ObservesStatements) */
+    private ?\Closure $observer = null;
 
     /** Savepoints open inside the outermost transaction; names the next one. */
     private int $savepoints = 0;
@@ -287,14 +290,14 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver
         $this->record($sql);
 
         /** @var list<array<string, mixed>> $rows */
-        $rows = $this->run(function () use ($sql, $bindings): array {
+        $rows = $this->observed($sql, fn (): array => $this->run(function () use ($sql, $bindings): array {
             $this->applyTenantSetting();
             $statement = $this->pdo->prepare($sql);
             $this->bind($statement, $bindings);
             $statement->execute();
 
             return $statement->fetchAll();
-        });
+        }));
 
         return $rows;
     }
@@ -316,9 +319,9 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver
         // itself. Inside one -- begun IMMEDIATE, holding the lock already --
         // or in a read-only scope, where a write is refused, there is no lock
         // to wait for.
-        return $this->pdo->inTransaction() || $this->readOnlyMode !== null
+        return $this->observed($sql, fn (): int => $this->pdo->inTransaction() || $this->readOnlyMode !== null
             ? $statement()
-            : $this->untilWriteLock($statement);
+            : $this->untilWriteLock($statement));
     }
 
     /**
@@ -909,6 +912,40 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver
                 $value === null => \PDO::PARAM_NULL,
                 default => \PDO::PARAM_STR,
             });
+        }
+    }
+
+    /** @param (\Closure(string, int, int, ?\Throwable): void)|null $observer */
+    public function observeStatements(?\Closure $observer): void
+    {
+        $this->observer = $observer;
+    }
+
+    /**
+     * $statement, timed and told to the observer, when there is one: the
+     * text alone, as the log keeps it, never what was bound to it.
+     *
+     * @template T
+     * @param \Closure(): T $statement
+     * @return T
+     */
+    private function observed(string $sql, \Closure $statement): mixed
+    {
+        $observer = $this->observer;
+        if ($observer === null) {
+            return $statement();
+        }
+
+        $started = hrtime(true);
+        $failure = null;
+        try {
+            return $statement();
+        } catch (\Throwable $e) {
+            $failure = $e;
+
+            throw $e;
+        } finally {
+            $observer($sql, $started, hrtime(true), $failure);
         }
     }
 
