@@ -16,6 +16,9 @@ use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Connection;
 use Tinvar\Orm\Migrations\DatabaseSeeder;
 use Tinvar\Orm\Migrations\MigrateCommand;
+use Tinvar\Orm\Migrations\MigrationRefused;
+use Tinvar\Orm\Migrations\Migrator;
+use Tinvar\Orm\Migrations\ProductionMarker;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Support\DevMode;
@@ -437,5 +440,73 @@ describe('db:seed', function () {
             ->and($run->out)->toContain('Dropped every table and ran 1 migration(s).')
             // The flag is the command's, not an option handed to the seeder.
             ->and($seeder->given)->toBe([['notes' => '2'], ['notes' => '1']]);
+    });
+});
+
+// The environment says what the machine is, not what the database is: a
+// laptop at TINVAR_ENV=local pointed at production's database passed the
+// check. Production's database carries a mark of its own (ADR 0103).
+describe('the production mark', function () {
+    it('is written by migrate where the environment says production, once', function () {
+        $run = run();
+        $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+        $run->environment = ['TINVAR_ENV' => 'production'];
+
+        expect($run('migrate'))->toBe(0)
+            ->and(end($run->out))->toBe("Marked this database production's, as TINVAR_ENV says.")
+            ->and(ProductionMarker::isMarked(PdoConnection::sqlite($run->files->database())))->toBeTrue()
+            ->and($run('migrate'))->toBe(0)
+            ->and($run->out)->toBe(['Nothing to migrate.']);
+    });
+
+    it('is not written where the environment says nothing, or not production', function (?string $environment) {
+        $run = run();
+        $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+        $run->environment = ['TINVAR_ENV' => $environment];
+
+        expect($run('migrate'))->toBe(0)
+            ->and(ProductionMarker::isMarked(PdoConnection::sqlite($run->files->database())))->toBeFalse();
+    })->with([null, 'local', 'staging']);
+
+    it('refuses migrate:fresh and db:seed on a marked database, whatever the environment and the flag say', function () {
+        $run = run();
+        $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+        $run->seeder = $seeder = new Notes();
+        expect($run('migrate'))->toBe(0)
+            ->and($run('db:mark-production'))->toBe(0)
+            ->and($run->out)->toBe(["Marked this database production's: migrate:fresh and db:seed are refused on it from now on."])
+            ->and($run('db:mark-production'))->toBe(0)
+            ->and($run->out)->toBe(["This database is marked production's already."]);
+
+        $run->environment = ['TINVAR_ENV' => 'local'];
+        expect($run('migrate:fresh', ['--force', '--non-production']))->toBe(MigrateCommand::FAILED)
+            ->and($run->err[0])->toContain("this database is marked production's")
+            ->and($run('db:seed', ['--non-production']))->toBe(MigrateCommand::FAILED)
+            ->and($run->err[0])->toContain("this database is marked production's")
+            ->and($run('db:seed', ['--fresh', '--force']))->toBe(MigrateCommand::FAILED)
+            ->and($seeder->given)->toBe([])
+            ->and(PdoConnection::sqlite($run->files->database())->select('SELECT COUNT(*) AS n FROM notes'))->toBe([['n' => 0]]);
+    });
+
+    it('is held by Migrator::fresh() itself, for code that drops tables without the command', function () {
+        $run = run();
+        $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+        $connection = PdoConnection::sqlite($run->files->database());
+        ProductionMarker::mark($connection);
+
+        expect(fn () => new Migrator($connection, $run->files->directory)->fresh())
+            ->toThrow(MigrationRefused::class, "marked production's")
+            ->and(ProductionMarker::isMarked($connection))->toBeTrue();
+    });
+
+    it('is taken away only by hand: an emptied mark table marks nothing', function () {
+        $run = run();
+        $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+        $connection = PdoConnection::sqlite($run->files->database());
+        ProductionMarker::mark($connection);
+        $connection->execute('DELETE FROM ' . ProductionMarker::TABLE);
+
+        expect(ProductionMarker::isMarked($connection))->toBeFalse()
+            ->and($run('migrate:fresh', ['--force']))->toBe(0, implode("\n", $run->err));
     });
 });

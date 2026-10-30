@@ -208,13 +208,16 @@ final class Migrator
     /**
      * Drops every table -- the current schema's, on Postgres -- and runs
      * every migration: a database as the migrations alone make it, for
-     * development and tests. Whatever the tables held is gone.
+     * development and tests. Whatever the tables held is gone. Refused for
+     * a database marked production's (ProductionMarker).
      *
      * @return list<string> the migrations run
      */
     public function fresh(): array
     {
         return $this->locked(function (): array {
+            // Under the lock, so a `migrate` marking it cannot slip between.
+            ProductionMarker::refuse($this->connection, 'A fresh migration', 'drops every table', $this->dialect);
             foreach ($this->dialect->dropAllTables($this->connection) as $table) {
                 ($this->log)("dropped   {$table}");
             }

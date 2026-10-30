@@ -7,6 +7,7 @@ namespace Tinvar\Orm\Migrations;
 use Tinvar\Orm\Connection;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\Model;
+use Tinvar\Support\DevMode;
 
 /**
  * The migration commands.
@@ -21,10 +22,13 @@ use Tinvar\Orm\Model;
  *   tinvar db:seed [--fresh --force] [the seeder's options]
  *                                     migrate, then fill the database with the
  *                                     application's DatabaseSeeder; never in production
+ *   tinvar db:mark-production         mark the database production's
  *
  * migrate:fresh and db:seed run only where something says this is not
  * production -- TINVAR_ENV local, development or testing, or
- * --non-production -- and nothing says it is (NonProduction).
+ * --non-production -- and nothing says it is (NonProduction): neither the
+ * environment nor the database, which `migrate` marks production's
+ * wherever the environment says production (ProductionMarker).
  *
  * migrate, rollback, fresh and db:seed wait up to --lock-timeout seconds
  * (60 by default) for another run to finish.
@@ -37,7 +41,7 @@ final class MigrateCommand
     /** Exit status for a run that failed or was refused. */
     public const int FAILED = 1;
 
-    public const array COMMANDS = ['migrate', 'migrate:rollback', 'migrate:status', 'migrate:fresh', 'make:migration', 'db:seed'];
+    public const array COMMANDS = ['migrate', 'migrate:rollback', 'migrate:status', 'migrate:fresh', 'make:migration', 'db:seed', 'db:mark-production'];
 
     private const string MAKE_USAGE = 'tinvar make:migration <name> [--blank] [--rename=TABLE.OLD:NEW | --rename=OLD:NEW ...]';
 
@@ -113,6 +117,7 @@ final class MigrateCommand
                 ),
                 'make:migration' => $this->make($arguments),
                 'db:seed' => $this->seed($arguments),
+                'db:mark-production' => $this->markProduction(self::options($command, $arguments, [])),
                 default => throw new \InvalidArgumentException("Unknown command '{$command}'."),
             };
         } catch (\InvalidArgumentException $e) {
@@ -130,11 +135,39 @@ final class MigrateCommand
         }
     }
 
-    /** @param array<string, string> $options */
+    /**
+     * Runs what is pending; and where the environment says production,
+     * marks the database production's, so a command run later from a
+     * machine that says otherwise is still refused it (ProductionMarker).
+     *
+     * @param array<string, string> $options
+     */
     private function migrate(array $options): int
     {
-        $ran = $this->migrator(true, $options)->migrate();
+        $migrator = $this->migrator(true, $options);
+        $ran = $migrator->migrate();
         ($this->out)($ran === [] ? 'Nothing to migrate.' : \sprintf('Ran %d migration(s).', \count($ran)));
+
+        $production = DevMode::productionMarker($this->environment);
+        if ($production !== null && ProductionMarker::mark($migrator->connection(), $migrator->dialect(), ($this->clock)())) {
+            ($this->out)("Marked this database production's, as {$production} says.");
+        }
+
+        return 0;
+    }
+
+    /**
+     * Marks the database production's by hand: one migrated before the mark
+     * existed, or by a deploy whose environment said nothing.
+     *
+     * @param array<string, string> $options
+     */
+    private function markProduction(array $options): int
+    {
+        $migrator = $this->migrator(false, $options);
+        ($this->out)(ProductionMarker::mark($migrator->connection(), $migrator->dialect(), ($this->clock)())
+            ? 'Marked this database production\'s: migrate:fresh and db:seed are refused on it from now on.'
+            : 'This database is marked production\'s already.');
 
         return 0;
     }
@@ -243,6 +276,7 @@ final class MigrateCommand
         }
 
         $migrator = $this->migrator(true, array_intersect_key($given, ['lock-timeout' => true]));
+        ProductionMarker::refuse($migrator->connection(), 'db:seed', 'fills a database with demo data', $migrator->dialect());
         $ran = $fresh ? $migrator->fresh() : $migrator->migrate();
         ($this->out)(match (true) {
             $fresh => \sprintf('Dropped every table and ran %d migration(s).', \count($ran)),
