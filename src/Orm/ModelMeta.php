@@ -13,8 +13,8 @@ namespace Tinvar\Orm;
  */
 final class ModelMeta
 {
-    /** @var array<string, \WeakMap<Model, true>> by kind of hook, the models whose hooks of it are running */
-    private array $running = [];
+    /** @var \WeakMap<Model, array<string, true>> the models whose hooks are running, with the kinds of hook */
+    private \WeakMap $running;
 
     /**
      * @param class-string<Model>          $class
@@ -56,7 +56,9 @@ final class ModelMeta
         private readonly array $afterSave = [],
         private readonly array $beforeDelete = [],
         private readonly array $afterDelete = [],
-    ) {}
+    ) {
+        $this->running = new \WeakMap();
+    }
 
     /**
      * Whether a save runs #[BeforeSave] methods: what a write through a
@@ -247,18 +249,24 @@ final class ModelMeta
         if ($hooks === []) {
             return;
         }
-        $running = $this->running[$kind] ??= new \WeakMap();
-        if (isset($running[$model])) {
+        $kinds = $this->running[$model] ?? [];
+        if (isset($kinds[$kind])) {
             throw new \LogicException("A #[{$kind}] hook of {$this->class} {$did} its own model, which would run the hooks without end.");
         }
 
-        $running[$model] = true;
+        $this->running[$model] = [...$kinds, $kind => true];
         try {
             foreach ($hooks as $hook) {
                 $hook($model);
             }
         } finally {
-            unset($running[$model]);
+            $left = $this->running[$model] ?? [];
+            unset($left[$kind]);
+            if ($left === []) {
+                unset($this->running[$model]);
+            } else {
+                $this->running[$model] = $left;
+            }
         }
     }
 
