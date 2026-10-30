@@ -12,6 +12,11 @@ namespace Tinvar\Orm;
  * bound -- and name a row by its key, never its values (ADR 0057). Null
  * where there is no page that way.
  *
+ * `cursor` is the one the page was read at: a cursor that opened, as the
+ * caller passed it, or null for the first page -- what a list loading its
+ * pages one at a time tells this page apart by (ADR 0120). Never one that
+ * did not open: that is InvalidCursor, and no page.
+ *
  * @template T
  */
 final readonly class CursorPage
@@ -22,6 +27,7 @@ final readonly class CursorPage
         public int $perPage,
         public ?string $next,
         public ?string $previous,
+        public ?string $cursor = null,
     ) {}
 
     /**
@@ -33,6 +39,6 @@ final readonly class CursorPage
      */
     public function map(\Closure $map): self
     {
-        return new self(array_map($map, $this->items), $this->perPage, $this->next, $this->previous);
+        return new self(array_map($map, $this->items), $this->perPage, $this->next, $this->previous, $this->cursor);
     }
 }

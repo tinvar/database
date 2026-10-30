@@ -1123,9 +1123,13 @@ final readonly class Query
             ? null
             : $cursors->seal($fingerprint, $model->primaryKey(), $forward);
 
+        // The cursor the page was read at, only once it has opened: the
+        // caller's own string handed back, never one this did not verify.
+        $at = $keyset === '' ? null : $cursor;
+
         return $after
-            ? new CursorPage($models, $perPage, $more ? $seal($last, true) : null, $keyset === '' ? null : $seal($first, false))
-            : new CursorPage($models, $perPage, $seal($last, true), $more ? $seal($first, false) : null);
+            ? new CursorPage($models, $perPage, $more ? $seal($last, true) : null, $keyset === '' ? null : $seal($first, false), $at)
+            : new CursorPage($models, $perPage, $seal($last, true), $more ? $seal($first, false) : null, $at);
     }
 
     /**

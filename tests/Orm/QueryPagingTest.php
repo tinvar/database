@@ -97,6 +97,24 @@ describe('cursorPaginate', function () {
             ->and(names($page($back->next)))->toBe(['Bravo', 'Alpha']);
     });
 
+    // What a list loading pages one at a time places each by (ADR 0120):
+    // only a cursor that opened, as the caller passed it.
+    it('says which cursor each page was read at, and none for the first', function () {
+        $orm = Shelves::sqlite()->orm();
+        $cursors = cursors();
+        $query = $orm->query(Shelf::class)->orderBy('position', 'desc');
+        $page = static fn (?string $cursor): CursorPage => acme($orm, static fn (): CursorPage => $query->cursorPaginate(2, $cursor, $cursors));
+
+        $first = $page(null);
+        $second = $page($first->next);
+
+        expect($first->cursor)->toBeNull()
+            ->and($page('')->cursor)->toBeNull()
+            ->and($second->cursor)->toBe($first->next)
+            ->and($page($second->previous)->cursor)->toBe($second->previous)
+            ->and($second->map(static fn (Shelf $shelf): string => $shelf->name)->cursor)->toBe($first->next);
+    });
+
     it('breaks ties by the key, so no row is read twice or skipped', function () {
         $fixture = Shelves::sqlite();
         $fixture->pdo->exec("UPDATE shelves SET position = 1 WHERE tenant_id = 'acme'");
