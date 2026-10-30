@@ -28,15 +28,21 @@ final class Metadata
     /** @var array<class-string<Model>, ModelMeta> */
     private static array $compiled = [];
 
+    /** Classes of PHP's own that never change once made: their state is no property reflection sees. */
+    private const array IMMUTABLE_CLASSES = [\DateTimeImmutable::class, \DateTimeZone::class, 'BcMath\Number'];
+
+    /** How deep a value object's own values are followed before it is refused. */
+    private const int IMMUTABLE_DEPTH = 32;
+
     /**
-     * By value class, the first instance property it or a class it extends
-     * declares that is not readonly -- what makes it mutable -- or false for
-     * none. Shallow, as PHP's readonly is: a readonly property may still
-     * hold a mutable object.
+     * By value class, why it is mutable -- a property it or a class it holds
+     * declares that is not readonly, at any depth -- or false; and the
+     * properties whose types cannot vouch for what they hold, checked on
+     * each value (immutability()).
      *
-     * @var array<string, string|false>
+     * @var array<string, array{string|false, list<array{class-string, string}>}>
      */
-    private static array $mutable = [];
+    private static array $immutability = [];
 
     /** @param class-string<Model> $class */
     public static function for(string $class): ModelMeta
@@ -546,9 +552,10 @@ final class Metadata
     private static function throughCast(string $class, string $property, string $column, string $cast, string $type, bool $nullable): array
     {
         self::assertImmutable($class, $property, $type);
+        $loose = self::immutability($type)[1] !== [];
         $json = \in_array(strtolower($cast::columnType()), ['json', 'jsonb'], true);
 
-        $read = static function (mixed $stored) use ($class, $property, $column, $cast, $type, $nullable, $json): ?object {
+        $read = static function (mixed $stored) use ($class, $property, $column, $cast, $type, $nullable, $json, $loose): ?object {
             // A row put together in PHP rather than read, as hydrateAll()
             // can be handed: the object is already there.
             if ($stored instanceof $type) {
@@ -576,19 +583,21 @@ final class Metadata
             if (!$value instanceof $type) {
                 throw MappingException::undecodable($class, $property, $column, $type, get_debug_type($value));
             }
-            if ($value::class !== $type) {
-                self::assertImmutable($class, $property, $value::class);
+            if ($loose || $value::class !== $type) {
+                self::assertImmutableValue($class, $property, $value);
             }
 
             return $value;
         };
 
         // Given what the property holds, never null: of the property's type.
-        $store = static function (object $value) use ($class, $property, $cast, $type, $json): mixed {
-            // A subclass of the declared type is held to it as well: checked
-            // here, once per class, since the type alone cannot say.
-            if ($value::class !== $type) {
-                self::assertImmutable($class, $property, $value::class);
+        $store = static function (object $value) use ($class, $property, $cast, $type, $json, $loose): mixed {
+            // A subclass of the declared type is held to it as well, and so
+            // is what a property its type cannot vouch for holds -- an array,
+            // an interface, a class that may be extended: checked here, since
+            // the types alone cannot say.
+            if ($loose || $value::class !== $type) {
+                self::assertImmutableValue($class, $property, $value);
             }
             $stored = $cast::toColumn($value);
 
@@ -652,29 +661,196 @@ final class Metadata
      * changes only by assignment to the model, which is what the model's
      * changes() then describe.
      *
+     * All the way down, not one level as PHP's readonly is: a readonly
+     * property holding a mutable object -- a DateTime, a class with a
+     * property that is not readonly -- is a value that changes in place as
+     * surely as one of its own (ADR 0122). What the types settle is settled
+     * once per class; what they cannot is checked on each value
+     * (assertImmutableValue()).
+     *
      * @param class-string<Model> $class
      * @param class-string $valueClass
      */
     private static function assertImmutable(string $class, string $property, string $valueClass): void
     {
-        if (!\array_key_exists($valueClass, self::$mutable)) {
-            self::$mutable[$valueClass] = false;
-            for ($level = new \ReflectionClass($valueClass); $level !== false; $level = $level->getParentClass()) {
-                foreach ($level->getProperties() as $declared) {
-                    if ($declared->getDeclaringClass()->getName() !== $level->getName()
-                        || $declared->isStatic() || $declared->isReadOnly() || $declared->isVirtual()) {
+        $mutable = self::immutability($valueClass)[0];
+        if ($mutable !== false) {
+            throw MappingException::mutableValue($class, $property, $valueClass, $mutable);
+        }
+    }
+
+    /**
+     * Refuses a value that can change after it is made: its class, by
+     * assertImmutable()'s rule, and then what its loose properties hold --
+     * each object held to its own class, each array walked, and an array
+     * element held by reference refused, since writing the variable it
+     * shares changes the array.
+     *
+     * @param class-string<Model> $class
+     */
+    private static function assertImmutableValue(string $class, string $property, object $value): void
+    {
+        $why = self::mutableIn($value, 0);
+        if ($why !== null) {
+            throw MappingException::mutableValue($class, $property, $value::class, $why);
+        }
+    }
+
+    /** Why $value can change, or null where it cannot. */
+    private static function mutableIn(mixed $value, int $depth): ?string
+    {
+        // Deeper than any value a column holds: a structure built to make
+        // this walk forever is refused, not followed.
+        if ($depth > self::IMMUTABLE_DEPTH) {
+            return 'it nests deeper than ' . self::IMMUTABLE_DEPTH . ' levels, past what is checked';
+        }
+
+        if (\is_array($value)) {
+            foreach ($value as $key => $item) {
+                if (\ReflectionReference::fromArrayElement($value, $key) !== null) {
+                    return 'an array in it holds an element by reference, which changes with the variable it shares';
+                }
+                $why = self::mutableIn($item, $depth + 1);
+                if ($why !== null) {
+                    return $why;
+                }
+            }
+
+            return null;
+        }
+        if (!\is_object($value)) {
+            return null;
+        }
+
+        [$mutable, $loose] = self::immutability($value::class);
+        if ($mutable !== false) {
+            return $depth === 0 ? $mutable : 'it holds a ' . $value::class . ", and {$mutable}";
+        }
+        foreach ($loose as [$declaring, $name]) {
+            $held = new \ReflectionProperty($declaring, $name);
+            if (!$held->isInitialized($value)) {
+                continue;
+            }
+            $why = self::mutableIn($held->getValue($value), $depth + 1);
+            if ($why !== null) {
+                return $why;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * What a class's types say of its immutability, worked out once: why it
+     * is mutable -- a property that is not readonly, or one whose type is a
+     * mutable class, at any depth -- or false; and its loose properties,
+     * whose types cannot vouch for what they hold: an array, an object or
+     * mixed, an interface or a class that may be extended, or a class with
+     * loose properties of its own. Those are checked on each value.
+     *
+     * A class PHP declares is immutable only by name (IMMUTABLE_CLASSES):
+     * its state is no property reflection can see. A class that refers to
+     * itself, at any depth, is judged where the walk began.
+     *
+     * @param class-string $valueClass
+     * @param array<string, true> $visiting the classes the walk is inside
+     * @return array{string|false, list<array{class-string, string}>}
+     */
+    private static function immutability(string $valueClass, array $visiting = []): array
+    {
+        if (isset(self::$immutability[$valueClass])) {
+            return self::$immutability[$valueClass];
+        }
+        if (isset($visiting[$valueClass])) {
+            return [false, []];
+        }
+        $visiting[$valueClass] = true;
+
+        $reflection = new \ReflectionClass($valueClass);
+        $judged = [false, []];
+        if (!$reflection->isEnum() && !\in_array($valueClass, self::IMMUTABLE_CLASSES, true)) {
+            $judged = self::judge($reflection, $visiting);
+        }
+
+        // Only a walk that began here is kept: one inside a cycle may have
+        // passed over a class the walk had not finished with.
+        if (\count($visiting) === 1) {
+            self::$immutability[$valueClass] = $judged;
+        }
+
+        return $judged;
+    }
+
+    /**
+     * @param \ReflectionClass<object> $reflection
+     * @param array<string, true> $visiting
+     * @return array{string|false, list<array{class-string, string}>}
+     */
+    private static function judge(\ReflectionClass $reflection, array $visiting): array
+    {
+        $loose = [];
+        for ($level = $reflection; $level !== false; $level = $level->getParentClass()) {
+            $name = $level->getName();
+            if (\in_array($name, self::IMMUTABLE_CLASSES, true)) {
+                break;
+            }
+            if ($level->isInternal()) {
+                return ["{$name}, a class of PHP's own whose state is out of reflection's sight, may change in place", []];
+            }
+            foreach ($level->getProperties() as $declared) {
+                if ($declared->getDeclaringClass()->getName() !== $name || $declared->isStatic() || $declared->isVirtual()) {
+                    continue;
+                }
+                $at = "{$name}::\${$declared->getName()}";
+                if (!$declared->isReadOnly()) {
+                    return ["{$at} is not readonly", []];
+                }
+                foreach (self::typesOf($declared->getType()) as $type) {
+                    if ($type->isBuiltin()) {
+                        if (\in_array($type->getName(), ['array', 'iterable', 'object', 'mixed'], true)) {
+                            $loose[] = [$name, $declared->getName()];
+                        }
                         continue;
                     }
-                    self::$mutable[$valueClass] = "{$level->getName()}::\${$declared->getName()}";
-                    break 2;
+                    $held = match ($type->getName()) {
+                        'self', 'static' => $reflection->getName(),
+                        'parent' => $level->getParentClass() === false ? $name : $level->getParentClass()->getName(),
+                        default => $type->getName(),
+                    };
+                    if (!class_exists($held) && !interface_exists($held) && !enum_exists($held)) {
+                        return ["{$at} is typed {$held}, which is no class", []];
+                    }
+                    [$mutable, $heldLoose] = self::immutability($held, $visiting);
+                    if ($mutable !== false) {
+                        return ["{$at} holds {$held}, and {$mutable}", []];
+                    }
+                    $class = new \ReflectionClass($held);
+                    if ($heldLoose !== [] || (!$class->isFinal() && !$class->isEnum())) {
+                        $loose[] = [$name, $declared->getName()];
+                    }
                 }
             }
         }
 
-        $mutable = self::$mutable[$valueClass];
-        if ($mutable !== false) {
-            throw MappingException::mutableValue($class, $property, $valueClass, $mutable);
+        return [false, array_values(array_unique($loose, SORT_REGULAR))];
+    }
+
+    /** @return list<\ReflectionNamedType> every type a property's declaration names */
+    private static function typesOf(?\ReflectionType $type): array
+    {
+        if ($type instanceof \ReflectionNamedType) {
+            return [$type];
         }
+        if ($type instanceof \ReflectionUnionType || $type instanceof \ReflectionIntersectionType) {
+            $named = [];
+            foreach ($type->getTypes() as $member) {
+                array_push($named, ...self::typesOf($member));
+            }
+
+            return $named;
+        }
+
+        return [];
     }
 
     /**

@@ -85,7 +85,7 @@ final class MappingException extends \RuntimeException
     public static function mutableValue(string $class, string $property, string $valueClass, string $mutable): self
     {
         return new self(
-            "{$class}::\${$property} holds {$valueClass}, which is mutable: {$mutable} is not readonly. "
+            "{$class}::\${$property} holds {$valueClass}, which is mutable: {$mutable}. "
             . 'A value-object column holds an immutable object, so a column changes only by assignment.',
         );
     }
