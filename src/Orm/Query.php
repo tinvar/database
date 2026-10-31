@@ -1175,9 +1175,10 @@ final readonly class Query
         $after = true;
         $keyset = '';
         $keysetBindings = [];
+        $anchor = null;
+        $arm = 0;
         if ($cursor !== null && $cursor !== '') {
             $opened = null;
-            $arm = 0;
             foreach ($armed ? array_keys($this->unionAll ?? []) : [0] as $arm) {
                 $opened = $cursors->open($sealedFor($arm), $cursor);
                 if ($opened !== null) {
@@ -1226,6 +1227,17 @@ final readonly class Query
         // The cursor the page was read at, only once it has opened: the
         // caller's own string handed back, never one this did not verify.
         $at = $keyset === '' ? null : $cursor;
+
+        // A page read from a cursor that came back empty -- the rows past
+        // its anchor gone since -- has no row to seal the way back from:
+        // sealed from the anchor, which marks the place it was read at.
+        if ($models === [] && $anchor !== null) {
+            $back = $cursors->seal($sealedFor($arm), $anchor, !$after);
+
+            return $after
+                ? new CursorPage([], $perPage, null, $back, $at)
+                : new CursorPage([], $perPage, $back, null, $at);
+        }
 
         return $after
             ? new CursorPage($models, $perPage, $more ? $seal($last, true) : null, $keyset === '' ? null : $seal($first, false), $at)

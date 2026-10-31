@@ -297,3 +297,22 @@ describe('a signed cursor', function () {
             ->and(fn () => new SignedCursors(new Signer('k', SignedCursors::PURPOSE), 'b', 86_401))->toThrow(\InvalidArgumentException::class);
     });
 });
+
+// A page after its cursor that has come back empty -- the rows past the
+// anchor deleted since -- had no previous cursor, so a reader there had no
+// way back but the first page.
+it('gives an empty page a cursor back from where it was read', function () {
+    $shelves = Shelves::sqlite();
+    $orm = $shelves->orm();
+    $query = $orm->query(Shelf::class)->orderBy('position');
+    $first = acme($orm, static fn (): CursorPage => $query->cursorPaginate(3, null, cursors()));
+    $shelves->pdo->exec("DELETE FROM shelves WHERE name = 'Foxtrot'");
+
+    $empty = acme($orm, static fn (): CursorPage => $query->cursorPaginate(3, $first->next, cursors()));
+    $back = acme($orm, static fn (): ?CursorPage => $empty->previous === null ? null : $query->cursorPaginate(3, $empty->previous, cursors()));
+
+    expect(names($empty))->toBe([])
+        ->and($empty->next)->toBeNull()
+        ->and($empty->previous)->not->toBeNull()
+        ->and($back === null ? null : names($back))->toBe(['Alpha', 'Bravo']);
+});
