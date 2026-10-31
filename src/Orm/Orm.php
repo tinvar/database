@@ -16,6 +16,13 @@ use Tinvar\Support\Uuid;
  */
 final class Orm
 {
+    /**
+     * The classes whose own statements name the tenants of what they write
+     * (noteRowTenants()), and so are not held to guardStatement(): every
+     * statement the ORM builds is sent from one of these.
+     */
+    private const array ORM_WRITERS = [self::class, Query::class];
+
     /** @var array<string, array<string, mixed>> relation key => group key => rows */
     private array $relationRows = [];
 
@@ -265,8 +272,11 @@ final class Orm
 
     /**
      * Whether the statement the guard is shown was sent by the ORM itself
-     * -- the Orm, its query builder, its scheduler -- which names the
-     * tenants of what it writes: read off who called the connection's
+     * -- the Orm, whose scheduler's loads it runs, and its query builder,
+     * named in ORM_WRITERS -- which names the tenants of what it writes.
+     * Not by namespace: Schema and the migrations are the ORM's package and
+     * pass on SQL their caller wrote, so they are guarded as any caller is.
+     * Read off who called the connection's
      * select() or execute(), the outermost connection called (RawStatements
      * is one, over the Orm's). Asked only inside a widened read with an
      * announcement open, so the walk costs nothing elsewhere. Code of the
@@ -284,7 +294,7 @@ final class Orm
             }
         }
 
-        return $caller !== null && str_starts_with($caller, __NAMESPACE__ . '\\') && !is_a($caller, Connection::class, true);
+        return $caller !== null && \in_array($caller, self::ORM_WRITERS, true);
     }
 
     /**
