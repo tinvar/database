@@ -41,6 +41,19 @@ function acme(Orm $orm, \Closure $read): mixed
 }
 
 describe('paginate', function () {
+    // withCount() and the rest are read by fetchAggregated(), which pages
+    // by limit() and offset(): paginate() counted first, a statement for
+    // nothing, then failed in fetch() with a message naming fetch().
+    it('refuses a query that reads aggregates beside its rows, naming itself, before it counts', function () {
+        $shelves = Shelves::sqlite();
+        $connection = $shelves->connection();
+        $orm = $shelves->orm(connection: $connection);
+
+        expect(fn () => acme($orm, static fn (): Page => $orm->query(Shelf::class)->withCount('items')->paginate(1, 3)))
+            ->toThrow(\LogicException::class, 'paginate() reads models alone')
+            ->and($connection->statementCount())->toBe(0);
+    });
+
     it('reads a page by number, with the total', function () {
         $orm = Shelves::sqlite()->orm();
         $query = $orm->query(Shelf::class)->orderBy('position');

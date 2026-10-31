@@ -1095,6 +1095,9 @@ final readonly class Query
             throw new \InvalidArgumentException('Pages count from 1.');
         }
         $this->assertUnlimited('paginate()');
+        // Before the count, which reads what withCount() asks for as well,
+        // so the refusal names this rather than the fetch() after it.
+        $this->assertModelsRead('paginate()');
 
         $total = $this->count();
 
@@ -2390,7 +2393,7 @@ final readonly class Query
             throw new \LogicException("{$what} reads rows, and a grouped query reads groups: call report().");
         }
         if (!$aggregates && $this->measures !== []) {
-            throw new \LogicException("{$what} reads models alone: read what withCount() and the rest ask for with fetchAggregated().");
+            throw new \LogicException("{$what} reads models alone: read what withCount() and the rest ask for with fetchAggregated(), paged by limit() and offset().");
         }
         foreach ($this->orders as [$by]) {
             if ($by instanceof Measure) {
