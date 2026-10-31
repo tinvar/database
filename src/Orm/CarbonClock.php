@@ -19,7 +19,7 @@ use Carbon\CarbonInterface;
  * clock again, so a clock moved later moves Carbon with it, and the time
  * comes back in UTC.
  *
- *     CarbonClock::follow($clock->dates());   // Testing::use() does this
+ *     CarbonClock::follow($clock->dates());   // a test's clock
  *     CarbonClock::follow(null);              // the system's time again
  *
  * Carbon keeps the hook process-wide, so this is for a test, or a test
