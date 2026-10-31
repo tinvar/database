@@ -11,6 +11,14 @@ final class MappingException extends \RuntimeException
         return new self("{$class} has no #[Table] attribute.");
     }
 
+    public static function conflictingTenantScope(string $class, string $first, string $firstColumn, string $second, string $secondColumn): self
+    {
+        return new self(
+            "{$class} is #[TenantScoped] by two columns: '{$firstColumn}' on {$first} and '{$secondColumn}' on {$second}. "
+            . 'A tenant-scoped model has one tenant column; declare the same one everywhere, or only once.',
+        );
+    }
+
     public static function noId(string $class): self
     {
         return new self("{$class} has no #[Id] property.");

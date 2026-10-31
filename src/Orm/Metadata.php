@@ -111,7 +111,9 @@ final class Metadata
         if ($table === null) {
             throw MappingException::noTable($class);
         }
-        $tenant = $reflection->getAttributes(TenantScoped::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
+        // Read through the whole hierarchy: written on an abstract base or a
+        // trait, the attribute holds the model as surely as on the model.
+        $tenant = TenantScoped::on($reflection);
 
         $columns = [];
         $relations = [];
@@ -151,7 +153,7 @@ final class Metadata
         if ($idProperty === null) {
             throw MappingException::noId($class);
         }
-        $tenantColumn = $tenant?->newInstance()->column;
+        $tenantColumn = $tenant?->column;
 
         return new ModelMeta(
             class: $class,
