@@ -301,3 +301,60 @@ describe('a relation never answers empty by accident', function () {
             ->toBe($direct->all(Site::class)[0]->racks->count());
     });
 });
+
+/**
+ * Every id went in one IN list, however many parents the result set held:
+ * past SQLite's 32,766 bound values, or Postgres's and MySQL's 65,535, the
+ * statement failed, and a result set of that size read a relation not at
+ * all. The ids go MAX_VALUES at a time now, and the rows are merged.
+ */
+describe('a load for more ids than one IN list binds', function () {
+    function manyRacks(int $count): Fixture
+    {
+        $fixture = new Fixture(racks: 0, unitsPerRack: 0, sites: 1);
+        $pdo = $fixture->connection->pdo();
+        $pdo->beginTransaction();
+        $rack = $pdo->prepare('INSERT INTO racks VALUES (?, ?, 42, ?)');
+        $unit = $pdo->prepare('INSERT INTO units VALUES (?, 1, ?, ?)');
+        for ($i = 0; $i < $count; $i++) {
+            $id = Tinvar\Support\Uuid::v7();
+            $fixture->ids['racks'][] = $id;
+            $rack->execute([$id, "r{$i}", $fixture->ids['sites'][0]]);
+            if ($i % 1000 === 0) {
+                $unit->execute([Tinvar\Support\Uuid::v7(), "u{$i}", $id]);
+            }
+        }
+        $pdo->commit();
+        $fixture->connection->resetStatementCount();
+
+        return $fixture;
+    }
+
+    it('loads a relation in chunks, eagerly and lazily', function () {
+        $fixture = manyRacks(33_000);
+
+        $eager = new Orm($fixture->connection, new IdentityMap('test'));
+        $racks = $eager->query(Rack::class)->with('units')->fetch();
+        $units = array_sum(array_map(static fn (Rack $rack): int => $rack->units->count(), $racks));
+
+        $lazy = new Orm($fixture->connection, new IdentityMap('test'));
+        $all = $lazy->all(Rack::class);
+        $fixture->connection->resetStatementCount();
+
+        expect($units)->toBe(33)
+            ->and($all[32_000]->units->count())->toBe(1)
+            ->and($fixture->connection->statementCount())->toBe(4, '33,000 ids, 10,000 at a time');
+    });
+
+    it('reads every value whereIn() is handed, in chunks', function () {
+        $fixture = manyRacks(33_000);
+        $orm = new Orm($fixture->connection, new IdentityMap('test'));
+
+        $racks = $orm->whereIn(Rack::class, 'id', [...$fixture->ids['racks'], $fixture->ids['racks'][0]]);
+
+        expect($racks)->toHaveCount(33_000)
+            ->and($fixture->connection->statementCount())->toBe(4)
+            ->and(fn () => $orm->whereIn(Rack::class, 'id', $fixture->ids['racks'], 'name'))
+            ->toThrow(LengthException::class, 'whereIn() orders at most 10000 values');
+    });
+});

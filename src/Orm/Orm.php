@@ -1364,10 +1364,25 @@ final class Orm
             }
         }
 
-        $rows = $this->connection->select(
-            $this->selectSql($meta, $column, \count($values), $orderBy, scope: $scope),
-            [...$values, ...$scopeBindings],
-        );
+        // Query::MAX_VALUES at a time, so no list outgrows what a driver
+        // binds -- SQLite's 32,766 values, Postgres's and MySQL's 65,535 --
+        // and each value once, or a value in two chunks came back twice. An
+        // order is the database's, which only one statement keeps.
+        $values = array_values(array_unique($values, \SORT_REGULAR));
+        if ($orderBy !== null && \count($values) > Query::MAX_VALUES) {
+            throw new \LengthException(
+                'whereIn() orders at most ' . Query::MAX_VALUES . ' values, which one statement reads in the database\'s order: '
+                . 'read more unordered, or page through them with query()->whereIn()->orderBy().',
+            );
+        }
+
+        $rows = [];
+        foreach (array_chunk($values, Query::MAX_VALUES) as $chunk) {
+            array_push($rows, ...$this->connection->select(
+                $this->selectSql($meta, $column, \count($chunk), $orderBy, scope: $scope),
+                [...$chunk, ...$scopeBindings],
+            ));
+        }
 
         return $this->hydrateAll($class, $rows);
     }
@@ -2704,16 +2719,22 @@ final class Orm
 
         [$scope, $scopeBindings] = $this->tenantScope($targetMeta);
 
-        $rows = $this->connection->select(
-            // The join column has to come back even when the child does not
-            // declare it: it is what the rows are grouped by.
-            $this->selectSql($targetMeta, $childColumn, \count($ids), $relation->orderBy, [$childColumn], $scope),
-            [...$ids, ...$scopeBindings],
-        );
-
+        // Query::MAX_VALUES ids at a time, so a result set of any size loads:
+        // one list of them all outgrew what a driver binds. Each group's
+        // rows come from the one statement its id was in, so a relation's
+        // order holds within it.
         $grouped = [];
-        foreach ($rows as $row) {
-            $grouped[(string) ($row[$childColumn] ?? '')][] = $row;
+        foreach (array_chunk($ids, Query::MAX_VALUES) as $chunk) {
+            $rows = $this->connection->select(
+                // The join column has to come back even when the child does
+                // not declare it: it is what the rows are grouped by.
+                $this->selectSql($targetMeta, $childColumn, \count($chunk), $relation->orderBy, [$childColumn], $scope),
+                [...$chunk, ...$scopeBindings],
+            );
+
+            foreach ($rows as $row) {
+                $grouped[(string) ($row[$childColumn] ?? '')][] = $row;
+            }
         }
 
         // Not cached while unscoped, for the same reason the identity map is
