@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace Tinvar\Orm\Async;
 
 use Amp\Mysql\MysqlConnection;
+use Amp\Postgres\Internal\PgSqlHandle;
+use Amp\Postgres\Internal\PostgresHandleConnection;
 use Amp\Postgres\PostgresConfig;
 use Amp\Postgres\PostgresQueryError;
 use Amp\Postgres\PostgresConnection;
 use Amp\Sql\SqlResult;
+use Revolt\EventLoop;
 use Tinvar\Orm\RowLevelSecurity;
 
 use function Amp\Postgres\connect;
@@ -42,7 +45,64 @@ final readonly class PostgresDriver implements Driver
 
     public function connect(): PostgresConnection
     {
-        return connect($this->config);
+        $link = connect($this->config);
+        self::closeOnceEnded($link);
+
+        return $link;
+    }
+
+    /**
+     * Closes the session as soon as libpq says the server ended it.
+     *
+     * When the server ends a session -- a restart, pg_terminate_backend(),
+     * a proxy's timeout -- libpq reads its goodbye and closes the socket,
+     * and amphp/postgres 2.2.1 can leave its readable watcher on that
+     * socket: it reads the goodbye without asking the connection's status
+     * after. The next time the event loop waits, stream_select() cannot use
+     * the closed socket, and Revolt fails the whole loop -- every statement
+     * of every fiber after it, in that process, until it restarts.
+     *
+     * So a second watcher on the same socket, registered after amphp's and
+     * so run after it in the same tick, asks libpq's status each time the
+     * socket is readable, and closes the session -- amphp's watchers with
+     * it, its pending statement failed -- before the loop waits again. It
+     * reaches the connection through amphp's private properties, which the
+     * exact version the package requires holds still; a release that moves
+     * them leaves the session unguarded, as it was before this.
+     */
+    private static function closeOnceEnded(PostgresConnection $link): void
+    {
+        try {
+            $handle = new \ReflectionProperty(PostgresHandleConnection::class, 'handle')->getValue($link);
+            $pgsql = $handle instanceof PgSqlHandle ? new \ReflectionProperty(PgSqlHandle::class, 'handle')->getValue($handle) : null;
+        } catch (\ReflectionException|\TypeError) {
+            return;
+        }
+        if (!$pgsql instanceof \PgSql\Connection) {
+            return;
+        }
+        $socket = @pg_socket($pgsql);
+        if ($socket === false) {
+            return;
+        }
+
+        $session = \WeakReference::create($link);
+        $watcher = EventLoop::onReadable($socket, static function (string $watcher) use ($pgsql, $session): void {
+            if (pg_connection_status($pgsql) === \PGSQL_CONNECTION_OK) {
+                return;
+            }
+            EventLoop::cancel($watcher);
+            $link = $session->get();
+            if ($link !== null && !$link->isClosed()) {
+                $link->close();
+            }
+        });
+        EventLoop::unreference($watcher);
+        // Held until the session closes, so the connection -- and the
+        // socket the watcher waits on -- outlives the watcher.
+        $link->onClose(static function () use ($watcher): void {
+            EventLoop::cancel($watcher);
+        });
     }
 
     public function backend(PostgresConnection|MysqlConnection $link): int

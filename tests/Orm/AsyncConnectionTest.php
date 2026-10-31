@@ -426,6 +426,26 @@ describe('on Postgres, with row-level security', function () {
         });
     });
 
+    // libpq closes the socket once it has read the server's goodbye, and
+    // amphp/postgres left its watcher on it: the next wait failed the event
+    // loop itself, and every statement in the process after it.
+    it('closes a session the server ended while it sat idle, before the event loop waits on its socket again', function () {
+        $driver = new \Tinvar\Orm\Async\PostgresDriver(Databases::asyncPostgres(''));
+        $link = $driver->connect();
+        $other = $driver->connect();
+        try {
+            terminate($driver->backend($link));
+            delay(0.05);
+            delay(0.05);
+
+            expect($link->isClosed())->toBeTrue()
+                ->and($other->query('SELECT 1 AS one')->fetchRow())->toBe(['one' => 1]);
+        } finally {
+            $link->close();
+            $other->close();
+        }
+    })->skip(Databases::asyncPostgresMissing() !== null, Databases::asyncPostgresMissing() ?? '');
+
     it('lends a session idle less than checkAfter without asking it', function () {
         $now = 1000.0;
         Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection) use (&$now): void {
