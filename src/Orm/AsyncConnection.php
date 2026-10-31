@@ -270,7 +270,14 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
             );
         } catch (\Throwable $e) {
             $error = $this->driver->error($e);
-            if ($error instanceof QueryError && !$error->sessionFailed) {
+            if ($error instanceof QueryError && $error->sessionFailed) {
+                // Gone, or closed under the statement: nothing on it to
+                // cancel, and it is closed now rather than after a cancel
+                // sent from a helper. Its socket may be closed already, and
+                // the event loop must not wait on it for a moment longer.
+                $session->busy = false;
+                $this->pool->discard($session);
+            } elseif ($error instanceof QueryError) {
                 // The statement failed and the session answered: it is fine.
                 $session->busy = false;
 
