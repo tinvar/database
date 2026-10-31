@@ -49,9 +49,13 @@ interface TenantSubtrees
      * Every tenant above $tenant, its parent first and its root last; none
      * for a root, and for a tenant there is no record of.
      *
-     * @return list<string>
+     * A list, or a generator that walks up as it is read: the Orm reads it
+     * only as far as a question needs -- contains() stops at the root it
+     * asks about -- and never past its own limits.
+     *
+     * @return iterable<string>
      */
-    public function ancestors(string $tenant): array;
+    public function ancestors(string $tenant): iterable;
 
     /**
      * $root and every tenant below it, at any depth: one recursive query,

@@ -46,6 +46,10 @@ final readonly class TenantBounds
     /**
      * Whether $tenant is $root or below it: $root is the tenant itself, or
      * one of the first MAX_DEPTH tenants above it before any repeats.
+     *
+     * The port's ancestors read up to $root and no further, so a port that
+     * walks as it is read is asked the tenant's depth below $root, never
+     * the rest of the chain.
      */
     public function contains(string $root, string $tenant): bool
     {
@@ -53,7 +57,7 @@ final readonly class TenantBounds
             return false;
         }
 
-        return $root === $tenant || \in_array($root, $this->ancestors($tenant), true);
+        return $root === $tenant || \in_array($root, $this->walk($tenant, $root), true);
     }
 
     /**
@@ -71,6 +75,16 @@ final readonly class TenantBounds
      */
     public function ancestors(string $tenant): array
     {
+        return $this->walk($tenant, null);
+    }
+
+    /**
+     * ancestors(), read no further than $stopAt once it is met.
+     *
+     * @return list<string>
+     */
+    private function walk(string $tenant, ?string $stopAt): array
+    {
         if ($tenant === '') {
             return [];
         }
@@ -83,6 +97,9 @@ final readonly class TenantBounds
             }
             $seen[$parent] = true;
             $above[] = $parent;
+            if ($parent === $stopAt) {
+                break;
+            }
         }
 
         return $above;
