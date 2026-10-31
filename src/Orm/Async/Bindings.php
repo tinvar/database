@@ -20,8 +20,10 @@ final class Bindings
      * The clients would send an integer as an integer. On MySQL that brings
      * back what PdoConnection::bind() keeps out: a text column compared with
      * an integer numerically, so `'abc' = 0` holds and a key compared with a
-     * number matches rows it does not name. A boolean is '1' or '', and a
-     * float is written to `precision` significant digits, as PDO writes them.
+     * number matches rows it does not name. A boolean is '1' or '0', as
+     * PdoConnection::bind() binds one -- not PDO's '' for false, which
+     * Postgres refuses for a boolean -- and a float is written to
+     * `precision` significant digits, as PDO writes them.
      *
      * @param list<mixed> $bindings
      * @return list<?string>
@@ -34,7 +36,7 @@ final class Bindings
             $text[] = match (true) {
                 $value === null => null,
                 \is_string($value) => $value,
-                \is_bool($value) => $value ? '1' : '',
+                \is_bool($value) => $value ? '1' : '0',
                 \is_int($value) => (string) $value,
                 \is_float($value) => $precision > 0 ? \sprintf("%.{$precision}G", $value) : (string) $value,
                 $value instanceof \Stringable => (string) $value,

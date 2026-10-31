@@ -32,9 +32,9 @@ it('refuses PDO\'s escape for a literal question mark', function () {
         ->toThrow(\InvalidArgumentException::class, '??');
 });
 
-it('binds every value as text, as PDO binds it', function () {
+it('binds every value as text, as PdoConnection binds it', function () {
     expect(Bindings::asText([null, 'abc', 42, -7, true, false, 1.5, 0.1 + 0.2, 1e20]))
-        ->toBe([null, 'abc', '42', '-7', '1', '', '1.5', '0.3', '1.0E+20']);
+        ->toBe([null, 'abc', '42', '-7', '1', '0', '1.5', '0.3', '1.0E+20']);
 });
 
 it('refuses a value PDO could not bind', function () {

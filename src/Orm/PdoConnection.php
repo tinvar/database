@@ -960,11 +960,18 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
      * `'abc' = 0` holds -- a key or a code compared with an integer would
      * match rows it does not name.
      *
+     * A boolean is 1 or 0 first. PDO writes false as '', which Postgres
+     * refuses for a boolean column -- and a boolean read back from one, as
+     * a cursor's anchor is, came back as false.
+     *
      * @param list<mixed> $bindings
      */
     private function bind(\PDOStatement $statement, array $bindings): void
     {
         foreach ($bindings as $i => $value) {
+            if (\is_bool($value)) {
+                $value = (int) $value;
+            }
             $statement->bindValue($i + 1, $value, match (true) {
                 \is_int($value) && $this->driver === 'sqlite' => \PDO::PARAM_INT,
                 $value === null => \PDO::PARAM_NULL,
