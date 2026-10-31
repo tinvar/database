@@ -40,7 +40,7 @@ final class Metadata
      * properties whose types cannot vouch for what they hold, checked on
      * each value (immutability()).
      *
-     * @var array<string, array{string|false, list<array{class-string, string}>}>
+     * @var array<string, array{string|false, list<array{class-string, string}>, int|null}>
      */
     private static array $immutability = [];
 
@@ -583,10 +583,9 @@ final class Metadata
     private static function throughCast(string $class, string $property, string $column, string $cast, string $type, bool $nullable): array
     {
         self::assertImmutable($class, $property, $type);
-        $loose = self::immutability($type)[1] !== [];
         $json = \in_array(strtolower($cast::columnType()), ['json', 'jsonb'], true);
 
-        $read = static function (mixed $stored) use ($class, $property, $column, $cast, $type, $nullable, $json, $loose): ?object {
+        $read = static function (mixed $stored) use ($class, $property, $column, $cast, $type, $nullable, $json): ?object {
             // A row put together in PHP rather than read, as hydrateAll()
             // can be handed: the object is already there.
             if ($stored instanceof $type) {
@@ -614,22 +613,18 @@ final class Metadata
             if (!$value instanceof $type) {
                 throw MappingException::undecodable($class, $property, $column, $type, get_debug_type($value));
             }
-            if ($loose || $value::class !== $type) {
-                self::assertImmutableValue($class, $property, $value);
-            }
+            self::assertImmutableValue($class, $property, $value);
 
             return $value;
         };
 
         // Given what the property holds, never null: of the property's type.
-        $store = static function (object $value) use ($class, $property, $cast, $type, $json, $loose): mixed {
+        $store = static function (object $value) use ($class, $property, $cast, $json): mixed {
             // A subclass of the declared type is held to it as well, and so
-            // is what a property its type cannot vouch for holds -- an array,
-            // an interface, a class that may be extended: checked here, since
-            // the types alone cannot say.
-            if ($loose || $value::class !== $type) {
-                self::assertImmutableValue($class, $property, $value);
-            }
+            // is what a property holds -- an array, an interface, a class
+            // that may be extended -- and whether each is initialized:
+            // checked here, since the types alone cannot say.
+            self::assertImmutableValue($class, $property, $value);
             $stored = $cast::toColumn($value);
 
             if ($json) {
@@ -753,15 +748,21 @@ final class Metadata
             return null;
         }
 
-        [$mutable, $loose] = self::immutability($value::class);
+        [$mutable, $loose, $properties] = self::immutability($value::class);
         if ($mutable !== false) {
             return $depth === 0 ? $mutable : 'it holds a ' . $value::class . ", and {$mutable}";
         }
+        // A readonly property left uninitialized may still be set, once,
+        // from inside its class: the value would change after it was made.
+        // Every property it declares is held, so a count of those it holds
+        // says so -- and one more says it holds one its class does not.
+        if ($properties !== null && \count(get_mangled_object_vars($value)) !== $properties) {
+            $what = \count(get_mangled_object_vars($value)) < $properties ? 'a property of it is not initialized' : 'it holds a property its class does not declare';
+
+            return $depth === 0 ? $what : 'it holds a ' . $value::class . ", and {$what}";
+        }
         foreach ($loose as [$declaring, $name]) {
             $held = new \ReflectionProperty($declaring, $name);
-            if (!$held->isInitialized($value)) {
-                continue;
-            }
             $why = self::mutableIn($held->getValue($value), $depth + 1);
             if ($why !== null) {
                 return $why;
@@ -785,7 +786,7 @@ final class Metadata
      *
      * @param class-string $valueClass
      * @param array<string, true> $visiting the classes the walk is inside
-     * @return array{string|false, list<array{class-string, string}>}
+     * @return array{string|false, list<array{class-string, string}>, int|null}
      */
     private static function immutability(string $valueClass, array $visiting = []): array
     {
@@ -793,12 +794,12 @@ final class Metadata
             return self::$immutability[$valueClass];
         }
         if (isset($visiting[$valueClass])) {
-            return [false, []];
+            return [false, [], null];
         }
         $visiting[$valueClass] = true;
 
         $reflection = new \ReflectionClass($valueClass);
-        $judged = [false, []];
+        $judged = [false, [], null];
         if (!$reflection->isEnum() && !\in_array($valueClass, self::IMMUTABLE_CLASSES, true)) {
             $judged = self::judge($reflection, $visiting);
         }
@@ -815,26 +816,32 @@ final class Metadata
     /**
      * @param \ReflectionClass<object> $reflection
      * @param array<string, true> $visiting
-     * @return array{string|false, list<array{class-string, string}>}
+     * @return array{string|false, list<array{class-string, string}>, int|null}
      */
     private static function judge(\ReflectionClass $reflection, array $visiting): array
     {
         $loose = [];
+        // Every instance property it declares, counted, for the check that
+        // each is initialized; none to count past a class of PHP's own,
+        // whose state is no property.
+        $properties = 0;
         for ($level = $reflection; $level !== false; $level = $level->getParentClass()) {
             $name = $level->getName();
             if (\in_array($name, self::IMMUTABLE_CLASSES, true)) {
+                $properties = null;
                 break;
             }
             if ($level->isInternal()) {
-                return ["{$name}, a class of PHP's own whose state is out of reflection's sight, may change in place", []];
+                return ["{$name}, a class of PHP's own whose state is out of reflection's sight, may change in place", [], null];
             }
             foreach ($level->getProperties() as $declared) {
                 if ($declared->getDeclaringClass()->getName() !== $name || $declared->isStatic() || $declared->isVirtual()) {
                     continue;
                 }
                 $at = "{$name}::\${$declared->getName()}";
+                $properties++;
                 if (!$declared->isReadOnly()) {
-                    return ["{$at} is not readonly", []];
+                    return ["{$at} is not readonly", [], null];
                 }
                 foreach (self::typesOf($declared->getType()) as $type) {
                     if ($type->isBuiltin()) {
@@ -849,21 +856,22 @@ final class Metadata
                         default => $type->getName(),
                     };
                     if (!class_exists($held) && !interface_exists($held) && !enum_exists($held)) {
-                        return ["{$at} is typed {$held}, which is no class", []];
+                        return ["{$at} is typed {$held}, which is no class", [], null];
                     }
-                    [$mutable, $heldLoose] = self::immutability($held, $visiting);
+                    [$mutable] = self::immutability($held, $visiting);
                     if ($mutable !== false) {
-                        return ["{$at} holds {$held}, and {$mutable}", []];
+                        return ["{$at} holds {$held}, and {$mutable}", [], null];
                     }
-                    $class = new \ReflectionClass($held);
-                    if ($heldLoose !== [] || (!$class->isFinal() && !$class->isEnum())) {
+                    // Walked on each value, whatever the class: its own
+                    // properties have to be initialized too.
+                    if (!enum_exists($held)) {
                         $loose[] = [$name, $declared->getName()];
                     }
                 }
             }
         }
 
-        return [false, array_values(array_unique($loose, SORT_REGULAR))];
+        return [false, array_values(array_unique($loose, SORT_REGULAR)), $properties];
     }
 
     /** @return list<\ReflectionNamedType> every type a property's declaration names */
