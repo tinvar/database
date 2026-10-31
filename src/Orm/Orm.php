@@ -1940,6 +1940,14 @@ final class Orm
      * the first run before the DELETE and the second after it: a hook that
      * throws stops the delete, or puts the row back, and takes back what
      * the hooks wrote with it (ADR 0122).
+     *
+     * Such a model is deleted only where it has a row: one never saved, or
+     * deleted already, is refused before any hook runs, and a DELETE that
+     * removed nothing -- the row deleted since it was read, or out of the
+     * tenant's reach, as a child's read inside withinSubtree() is after it
+     * ends -- throws MissingRow inside the transaction, taking back what
+     * #[BeforeDelete] wrote, and runs no #[AfterDelete]: a hook that hears
+     * of a delete hears of one that happened.
      */
     public function delete(Model $model): void
     {
@@ -1952,14 +1960,23 @@ final class Orm
             return;
         }
 
+        if (!$model->isPersisted()) {
+            throw MissingRow::notPersisted($meta->class);
+        }
         $this->transaction(function () use ($model, $meta): void {
             $meta->beforeDelete($model);
-            $this->deleteRow($model, $meta);
+            if ($this->deleteRow($model, $meta, mustMatch: true) === 0) {
+                throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
+            }
             $meta->afterDelete($model);
         });
     }
 
-    private function deleteRow(Model $model, ModelMeta $meta): void
+    /**
+     * @param bool $mustMatch leave the model as it was where the DELETE removed nothing, for the caller to refuse
+     * @return int the rows the DELETE removed
+     */
+    private function deleteRow(Model $model, ModelMeta $meta, bool $mustMatch = false): int
     {
         [$scope, $scopeBindings] = $this->tenantScope($meta);
 
@@ -1971,7 +1988,10 @@ final class Orm
         // Read while the row is there to read.
         $this->noteRowTenants($meta, [$meta->keyOf($model)]);
 
-        $this->connection->execute($sql, [$meta->keyOf($model), ...$scopeBindings]);
+        $deleted = $this->connection->execute($sql, [$meta->keyOf($model), ...$scopeBindings]);
+        if ($deleted === 0 && $mustMatch) {
+            return 0;
+        }
         $this->identityMap->forget($meta->class, $meta->keyOf($model));
 
         // Left marked persisted, a later save() sent an UPDATE for a row that
@@ -1979,6 +1999,8 @@ final class Orm
         $this->journalSnapshot($model);
         $model->markDeleted();
         $this->followWrite($meta, $meta->keyOf($model), null);
+
+        return $deleted;
     }
 
     /**

@@ -28,4 +28,24 @@ final class MissingRow extends \RuntimeException
             $id,
         ));
     }
+
+    /**
+     * A delete() of a model with delete hooks whose DELETE matched no row:
+     * worded as onUpdate() is, for the same reason.
+     */
+    public static function onDelete(string $class, string $id): self
+    {
+        return new self(sprintf(
+            'Deleting %s "%s" matched no row to delete. '
+            . 'The row has been deleted, or belongs to another tenant. Nothing was deleted, and no #[AfterDelete] ran.',
+            $class,
+            $id,
+        ));
+    }
+
+    /** A delete() of a model with delete hooks that was never saved, or is deleted already. */
+    public static function notPersisted(string $class): self
+    {
+        return new self("Deleting a {$class} that has no row: it was never saved, or is deleted already. No hook ran.");
+    }
 }

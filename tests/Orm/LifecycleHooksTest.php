@@ -27,6 +27,8 @@ use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Orm\ReadOnlyViolation;
 
+require_once __DIR__ . '/Fixtures/hierarchy.php';
+
 /** What every hook saw, in order, across the models of a test. */
 final class Journal
 {
@@ -289,6 +291,72 @@ describe('#[AfterSave]', function () {
 
         expect(fn () => $orm->readOnly(fn () => $orm->save(rack('R-01'))))->toThrow(ReadOnlyViolation::class);
         expect(Journal::$lines)->toBe([]);
+    });
+});
+
+/** The scripts table, its deletes heard by hooks, under a tenant tree. */
+#[Table('scripts'), \Tinvar\Orm\Attributes\TenantScoped]
+final class HookedScript extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $name;
+
+    #[BeforeDelete]
+    private function before(): void
+    {
+        Journal::$lines[] = "before delete {$this->name}";
+    }
+
+    #[AfterDelete]
+    private function after(): void
+    {
+        Journal::$lines[] = "after delete {$this->name}";
+    }
+}
+
+// A DELETE that removed nothing ran #[AfterDelete] as though it had: the
+// row gone already, or out of the tenant's reach (review of ADR 0122).
+describe('a delete that reaches no row', function () {
+    it('throws MissingRow and runs no #[AfterDelete] for a row deleted since it was read, taking the #[BeforeDelete] writes back', function () {
+        $orm = orm();
+        $rack = $orm->save(rack('R-01'));
+        $other = $orm->find(Rack::class, $rack->id);
+        \assert($other instanceof Rack);
+        // Another worker deletes it first.
+        $orm->connection()->execute('DELETE FROM racks WHERE id = ?', [$rack->id]);
+        Journal::$lines = [];
+
+        expect(fn () => $orm->delete($other))->toThrow(\Tinvar\Orm\MissingRow::class, 'matched no row to delete');
+        expect(Journal::$lines)->toBe(['before delete R-01'])
+            ->and(audit($orm))->toBe(['saved R-01'])
+            ->and($other->isPersisted())->toBeTrue();
+    });
+
+    it('refuses a second delete of the same model, and one never saved, before any hook runs', function () {
+        $orm = orm();
+        $rack = $orm->save(rack('R-01'));
+        $orm->delete($rack);
+        Journal::$lines = [];
+
+        expect(fn () => $orm->delete($rack))->toThrow(\Tinvar\Orm\MissingRow::class, 'has no row')
+            ->and(fn () => $orm->delete(rack('R-02')))->toThrow(\Tinvar\Orm\MissingRow::class, 'has no row')
+            ->and(Journal::$lines)->toBe([])
+            ->and(audit($orm))->toBe(['saved R-01', 'deleting R-01']);
+    });
+
+    it('throws MissingRow for a child\'s model read inside withinSubtree() and deleted after it ends', function () {
+        $fixture = new \Tinvar\Tests\Orm\Fixtures\Hierarchy\Tenants();
+        $orm = $fixture->orm();
+        Journal::$lines = [];
+
+        $child = $orm->actAs('reseller', static fn (): ?Model => $orm->grantSubtree(
+            static fn (): ?Model => $orm->withinSubtree(static fn (): ?Model => $orm->find(HookedScript::class, $fixture->scripts['acme'])),
+        ));
+        \assert($child instanceof HookedScript);
+
+        expect(fn () => $orm->actAs('reseller', static fn () => $orm->delete($child)))->toThrow(\Tinvar\Orm\MissingRow::class)
+            ->and(Journal::$lines)->toBe(['before delete acme-script'])
+            ->and($fixture->connection->select('SELECT COUNT(*) AS n FROM scripts WHERE id = ?', [$fixture->scripts['acme']])[0]['n'])->toBe(1);
     });
 });
 
