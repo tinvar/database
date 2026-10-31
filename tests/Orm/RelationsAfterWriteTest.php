@@ -29,6 +29,7 @@ use Tinvar\Orm\Model;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
 use Tinvar\Support\Uuid;
+use Tinvar\Tests\Orm\Fixtures\Databases;
 use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 use Tinvar\Tests\Orm\Fixtures\Site;
@@ -37,6 +38,7 @@ use Tinvar\Tests\Orm\Fixtures\Tenancy;
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
 require_once __DIR__ . '/Fixtures/tenancy.php';
+require_once __DIR__ . '/Fixtures/databases.php';
 
 /** @param iterable<Rack> $racks @return list<string> */
 function names(iterable $racks): array
@@ -123,6 +125,59 @@ it('re-sorts a loaded relation when a write changes the column it is ordered by'
 
     expect(names($second->racks))->toBe(['R-02', 'R-99']);
 });
+
+// The re-sort compared with PHP's <=>, which orders numeric strings as
+// numbers: '9' before '10', where the database's order, by the text, puts
+// '10' first. A fresh read and the patched relation disagreed.
+it('re-sorts a loaded relation in the order the database reads it', function () {
+    $fixture = new Fixture(racks: 2, unitsPerRack: 0, sites: 1);
+    $fixture->connection->execute("UPDATE racks SET name = CASE name WHEN 'R-01' THEN '10' ELSE '20' END");
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
+    [$site] = $orm->all(Site::class);
+    expect(names($site->racks))->toBe(['10', '20']);
+
+    $renamed = rack($orm, '20');
+    $renamed->name = '9';
+    $orm->save($renamed);
+    $fixture->connection->resetStatementCount();
+
+    $fresh = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
+
+    expect(names($site->racks))->toBe(['10', '9'])
+        ->and($fixture->connection->statementCount())->toBe(0, 'SQLite orders text by its bytes, as strcmp() does: no reload')
+        ->and(names($fresh->all(Site::class)[0]->racks))->toBe(['10', '9']);
+});
+
+// Postgres and MySQL order text by a collation no comparison in PHP
+// reproduces -- 'a' before 'B' under most, after it under C -- so a
+// re-sort by text there is not guessed: the group is read again.
+it('reads a relation re-sorted by text again on Postgres, in the collation\'s order', function () {
+    Databases::inScratchSchema('pgsql', static function (\PDO $pdo): void {
+        $pdo->exec('CREATE TABLE sites (id TEXT PRIMARY KEY, code TEXT NOT NULL)');
+        $pdo->exec('CREATE TABLE racks (id TEXT PRIMARY KEY, name TEXT NOT NULL, height_u INTEGER NOT NULL, site_id TEXT NOT NULL)');
+        $site = Uuid::v7();
+        $pdo->prepare('INSERT INTO sites VALUES (?, ?)')->execute([$site, 'LAX']);
+        foreach (['a', 'B', 'c'] as $name) {
+            $pdo->prepare('INSERT INTO racks VALUES (?, ?, 42, ?)')->execute([Uuid::v7(), $name, $site]);
+        }
+        $connection = new PdoConnection($pdo, 'pgsql');
+        $orm = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
+        [$read] = $orm->all(Site::class);
+        names($read->racks);
+
+        $renamed = rack($orm, 'c');
+        $renamed->name = 'A';
+        $orm->save($renamed);
+        $kept = rack($orm, 'a');
+        $kept->heightU = 40;
+        $orm->save($kept);
+
+        $fresh = new Orm($connection, new IdentityMap('test'), tenants: Tenancy::flat());
+
+        expect(names($read->racks))->toBe(names($fresh->all(Site::class)[0]->racks))
+            ->and($read->racks->isLoaded())->toBeTrue();
+    });
+})->group('pgsql')->skip(Databases::postgresMissing() !== null, Databases::postgresMissing() ?? '');
 
 // A parent whose relation was batched in but never read has nothing loaded
 // to patch; what it reads later comes from the relation-row cache.

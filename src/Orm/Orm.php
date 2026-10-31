@@ -2311,25 +2311,77 @@ final class Orm
                 $rows = $this->relationRows[$key][$to];
 
                 // Back where it was if it stayed, so a relation with no order
-                // keeps the order the database gave it.
-                if ($to === $from && $at !== null) {
+                // keeps the order the database gave it -- and one whose order
+                // value the write left alone keeps its place in that order.
+                $stayed = $to === $from && $at !== null;
+                if ($stayed) {
                     array_splice($rows, $at, 0, [$written]);
                 } else {
                     $rows[] = $written;
                 }
 
                 $orderBy = $relation->orderBy;
-                if ($orderBy !== null) {
-                    usort($rows, static fn (array $a, array $b): int => ($a[$orderBy] ?? null) <=> ($b[$orderBy] ?? null));
+                if ($orderBy !== null && !($stayed && ($previous[$orderBy] ?? null) === ($written[$orderBy] ?? null))) {
+                    $rows = $this->sortedAsRead($rows, $orderBy);
                 }
 
-                $this->relationRows[$key][$to] = $rows;
+                if ($rows === null) {
+                    unset($this->relationRows[$key][$to]);
+                } else {
+                    $this->relationRows[$key][$to] = $rows;
+                }
             }
         }
 
         foreach (array_unique(array_filter([$from, $to], static fn (?string $p): bool => $p !== null)) as $parentId) {
             $this->refillLoaded($relation, $key, $parentId);
         }
+    }
+
+    /**
+     * $rows in the order the database reads `ORDER BY $orderBy` in, or null
+     * when that order cannot be told here and the rows are to be read again.
+     *
+     * PHP's <=> is not that order: it compares numeric strings as numbers,
+     * '9' before '10', where the database puts '10' first. Numbers compare
+     * alike everywhere, with NULL first ascending on SQLite and MySQL and
+     * last on Postgres. Text SQLite orders by its bytes, as strcmp() does,
+     * under the BINARY collation its columns have unless declared
+     * otherwise. Postgres and MySQL order it by a collation -- the
+     * database's, or the column's -- that no comparison here reproduces,
+     * so a re-sort by text there is not guessed at.
+     *
+     * @param list<array<string, mixed>> $rows
+     * @return list<array<string, mixed>>|null
+     */
+    private function sortedAsRead(array $rows, string $orderBy): ?array
+    {
+        $driver = $this->connection instanceof NamesDriver ? $this->connection->driver() : 'sqlite';
+        foreach ($rows as $row) {
+            $value = $row[$orderBy] ?? null;
+            if (!($value === null || \is_int($value) || \is_float($value) || \is_bool($value) || (\is_string($value) && $driver === 'sqlite'))) {
+                return null;
+            }
+        }
+
+        // SQLite reads NULL, then numbers, then text; the others hold no text here.
+        $rank = static fn (mixed $value): int => match (true) {
+            $value === null => $driver === 'pgsql' ? 2 : 0,
+            \is_string($value) => 3,
+            default => 1,
+        };
+        usort($rows, static function (array $a, array $b) use ($orderBy, $rank): int {
+            $x = $a[$orderBy] ?? null;
+            $y = $b[$orderBy] ?? null;
+            $byRank = $rank($x) <=> $rank($y);
+            if ($byRank !== 0) {
+                return $byRank;
+            }
+
+            return \is_string($x) && \is_string($y) ? strcmp($x, $y) : $x <=> $y;
+        });
+
+        return $rows;
     }
 
     /** Refills one parent's loaded collection from the relation-row cache. */
