@@ -75,6 +75,9 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
 
     private bool $logSql = true;
 
+    /** A tell another backend answered (sameBackend()): every tenant is refused from then on. */
+    private ?SessionMoved $sessionMoved = null;
+
     /** @var (\Closure(string, int, int, ?\Throwable): void)|null told of each statement once it is answered (ObservesStatements) */
     private ?\Closure $observer = null;
 
@@ -367,16 +370,37 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
      * when the scope ends, as PdoConnection holds one; MySQL cannot change a
      * transaction's access mode once begun, and the ORM's check holds it.
      */
+    /**
+     * Refuses a tell another backend than the session's answered: a pooler
+     * in transaction or statement mode between this pool and Postgres, which
+     * may run the next statement on a session told another worker's tenant
+     * (SessionMoved). Every tell after is refused too, on any session.
+     */
+    private function sameBackend(Session $session, ?int $backend): void
+    {
+        if ($backend === null || $backend === $session->backend) {
+            return;
+        }
+
+        $this->sessionMoved = SessionMoved::between($session->backend, $backend);
+
+        throw $this->sessionMoved;
+    }
+
     private function bringIntoLine(Lease $lease): void
     {
         [$tenant, $across, $subtree] = $this->tenantScope !== null ? ($this->tenantScope)() : ['', false, []];
         $readOnly = $this->readOnlyScopes > 0;
         $key = $this->driver->tenantKey($tenant, $across, $subtree);
         $session = $lease->session();
+        if ($this->sessionMoved !== null) {
+            throw $this->sessionMoved;
+        }
 
         if (!$session->inTransaction) {
             if ($session->tenant !== $key || $session->readOnly !== $readOnly) {
-                $this->send($lease, fn (PostgresConnection|MysqlConnection $link) => $this->driver->tell($link, $tenant, $across, $subtree, $readOnly));
+                $session->tenant = null;
+                $this->sameBackend($session, $this->send($lease, fn (PostgresConnection|MysqlConnection $link): ?int => $this->driver->tell($link, $tenant, $across, $subtree, $readOnly)));
                 $session->tenant = $key;
                 $session->readOnly = $readOnly;
             }
@@ -385,7 +409,8 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
         }
 
         if ($session->tenant !== $key) {
-            $this->send($lease, fn (PostgresConnection|MysqlConnection $link) => $this->driver->tellTenant($link, $tenant, $across, $subtree));
+            $session->tenant = null;
+            $this->sameBackend($session, $this->send($lease, fn (PostgresConnection|MysqlConnection $link): ?int => $this->driver->tellTenant($link, $tenant, $across, $subtree)));
             $session->tenant = $key;
         }
 

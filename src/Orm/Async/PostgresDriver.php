@@ -73,29 +73,44 @@ final readonly class PostgresDriver implements Driver
         return $tenant . "\0" . ($across ? 'on' : 'off') . "\0" . RowLevelSecurity::arrayLiteral($subtree);
     }
 
-    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): void
+    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): int
     {
-        $link->execute(
-            'SELECT set_config($1, $2, false), set_config($3, $4, false), set_config($5, $6, false), set_config($7, $8, false)',
+        return self::backendOf($link->execute(
+            'SELECT set_config($1, $2, false), set_config($3, $4, false), set_config($5, $6, false), set_config($7, $8, false), '
+                . 'pg_backend_pid() AS pid',
             [
                 RowLevelSecurity::TENANT_SETTING, $tenant,
                 RowLevelSecurity::ACROSS_SETTING, $across ? 'on' : 'off',
                 RowLevelSecurity::SUBTREE_SETTING, RowLevelSecurity::arrayLiteral($subtree),
                 'default_transaction_read_only', $readOnly ? 'on' : 'off',
             ],
-        );
+        ));
     }
 
-    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): void
+    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): int
     {
-        $link->execute(
-            'SELECT set_config($1, $2, false), set_config($3, $4, false), set_config($5, $6, false)',
+        return self::backendOf($link->execute(
+            'SELECT set_config($1, $2, false), set_config($3, $4, false), set_config($5, $6, false), pg_backend_pid() AS pid',
             [
                 RowLevelSecurity::TENANT_SETTING, $tenant,
                 RowLevelSecurity::ACROSS_SETTING, $across ? 'on' : 'off',
                 RowLevelSecurity::SUBTREE_SETTING, RowLevelSecurity::arrayLiteral($subtree),
             ],
-        );
+        ));
+    }
+
+    /**
+     * The backend a tell's answer names; -1, never a backend, when it
+     * names none.
+     *
+     * @param SqlResult<mixed> $result
+     */
+    private static function backendOf(SqlResult $result): int
+    {
+        $row = $result->fetchRow();
+        $pid = \is_array($row) ? ($row['pid'] ?? null) : null;
+
+        return \is_int($pid) ? $pid : -1;
     }
 
     public function begin(bool $readOnly): string

@@ -52,19 +52,22 @@ interface Driver
 
     /**
      * Tells a session outside a transaction its tenant and whether it
-     * refuses writes, session-wide, in one round trip.
+     * refuses writes, session-wide, in one round trip -- answering which
+     * backend took it, where the tenant is a session setting a pooler could
+     * have handed to another (SessionMoved), and null where it is not.
      *
      * @param list<string> $subtree
      */
-    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): void;
+    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): ?int;
 
     /**
      * Tells a session inside a transaction its tenant alone: whether it
-     * refuses writes is the transaction's to say from inside it.
+     * refuses writes is the transaction's to say from inside it. Answers as
+     * tell() does.
      *
      * @param list<string> $subtree
      */
-    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): void;
+    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): ?int;
 
     /** The statement that begins a transaction, read-only or not. */
     public function begin(bool $readOnly): string;

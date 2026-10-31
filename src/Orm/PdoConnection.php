@@ -92,6 +92,15 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
     private bool $tenantSettingTouched = false;
 
     /**
+     * The Postgres backend that answered the first tenant told, and each
+     * one after must be (SessionMoved); null before any is told.
+     */
+    private ?int $tenantBackend = null;
+
+    /** The backend that answered once was not tenantBackend: every tenant is refused from then on. */
+    private ?SessionMoved $sessionMoved = null;
+
+    /**
      * How long a write waits for SQLite's write lock, in milliseconds, in
      * untilWriteLock()'s steps; null leaves the waiting to SQLite's busy
      * handler, as for a connection sqlite() did not open.
@@ -812,7 +821,9 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
 
     public function clearTenantSetting(): void
     {
-        if ($this->driver !== 'pgsql' || !$this->tenantSettingTouched) {
+        // A session already refused (SessionMoved) runs nothing more, a
+        // clear included: the reset a worker ends a request with goes on.
+        if ($this->driver !== 'pgsql' || !$this->tenantSettingTouched || $this->sessionMoved !== null) {
             return;
         }
 
@@ -832,6 +843,11 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
      *
      * Postgres alone: the variable is what its policies read, and nothing
      * else has them.
+     *
+     * Session-wide holds only while every statement runs on the session
+     * told. Behind a pooler in transaction or statement mode it may not, so
+     * each tell asks which backend answered, in the same round trip, and a
+     * backend other than the first is refused (SessionMoved).
      */
     private function applyTenantSetting(): void
     {
@@ -848,11 +864,17 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
     {
         $tenants = RowLevelSecurity::arrayLiteral($subtree);
         $wanted = $tenant . "\0" . ($across ? 'on' : 'off') . "\0" . $tenants;
+        if ($this->sessionMoved !== null) {
+            throw $this->sessionMoved;
+        }
         if ($wanted === $this->tenantSetting) {
             return;
         }
 
-        $this->pdo->prepare('SELECT set_config(?, ?, false), set_config(?, ?, false), set_config(?, ?, false)')->execute([
+        $statement = $this->pdo->prepare(
+            'SELECT set_config(?, ?, false), set_config(?, ?, false), set_config(?, ?, false), pg_backend_pid()',
+        );
+        $statement->execute([
             RowLevelSecurity::TENANT_SETTING,
             $tenant,
             RowLevelSecurity::ACROSS_SETTING,
@@ -860,6 +882,16 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
             RowLevelSecurity::SUBTREE_SETTING,
             $tenants,
         ]);
+        $backend = $statement->fetchColumn(3);
+        $statement->closeCursor();
+        $backend = is_numeric($backend) ? (int) $backend : -1;
+        $this->tenantBackend ??= $backend;
+        if ($backend !== $this->tenantBackend) {
+            $this->tenantSetting = null;
+            $this->sessionMoved = SessionMoved::between($this->tenantBackend, $backend);
+
+            throw $this->sessionMoved;
+        }
         $this->tenantSetting = $wanted;
         $this->tenantSettingTouched = true;
     }
