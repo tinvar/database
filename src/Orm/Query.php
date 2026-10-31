@@ -1049,19 +1049,17 @@ final readonly class Query
         return $values;
     }
 
-    /** The sum of a column over the matching rows: 0 for none. */
+    /**
+     * The sum of a column over the matching rows: 0 for none. Read as a
+     * report's Sum is (Aggregate::read()), so the two answer alike.
+     */
     #[\NoDiscard]
     public function sum(string|\BackedEnum $column): int|float
     {
-        $sum = $this->aggregate('SUM', $column);
+        $sum = Aggregate::Sum->read($this->aggregate('SUM', $column));
+        \assert(\is_int($sum) || \is_float($sum));
 
-        return match (true) {
-            $sum === null => 0,
-            \is_int($sum), \is_float($sum) => $sum,
-            \is_string($sum) && preg_match('/^-?[0-9]+\z/', $sum) === 1 => (int) $sum,
-            is_numeric($sum) => (float) $sum,
-            default => throw new \UnexpectedValueException("SUM over '{$this->meta->table}' did not answer a number."),
-        };
+        return $sum;
     }
 
     /** The smallest value of a column over the matching rows, as the database returns it; null for none. */

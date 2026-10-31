@@ -74,7 +74,25 @@ function comparesAKey(Orm $orm, Flags $flags): void
         ->toBe(['a', 'b', 'c', 'd']);
 }
 
+/**
+ * A sum past PHP's integers, which Postgres answers as a numeric's text:
+ * sum() read it as the largest integer, cut off, where a report's Sum read
+ * it as a float. Both read it one way now.
+ */
+function sumsPastAnInteger(Orm $orm): void
+{
+    $sum = $orm->query(Flag::class)->sum('weight');
+
+    expect($sum)->toBeFloat()
+        ->and($sum)->toBe((float) \PHP_INT_MAX + 1)
+        ->and($orm->query(Flag::class)->where('name', 'a')->sum('weight'))->toBe(\PHP_INT_MAX);
+}
+
 describe('on Postgres', function () {
+    it('sums past an integer as a report does', function () {
+        Flags::onPostgres(sumsPastAnInteger(...));
+    });
+
     it('pages by a boolean whose anchor is false', function () {
         Flags::onPostgres(pagesByABoolean(...));
     });

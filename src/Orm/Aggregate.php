@@ -85,12 +85,17 @@ enum Aggregate: string
         };
     }
 
+    /**
+     * Every integer PHP holds -- nineteen digits among them -- read as
+     * one: text that comes back the same from an int. A number past them
+     * is not one, rather than cut to the largest.
+     */
     private static function integer(mixed $value): ?int
     {
         if (\is_int($value)) {
             return $value;
         }
-        if (\is_string($value) && preg_match('/^-?[0-9]{1,18}\z/', $value) === 1) {
+        if (\is_string($value) && preg_match('/^-?[0-9]+\z/', $value) === 1 && (string) (int) $value === $value) {
             return (int) $value;
         }
 

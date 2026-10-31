@@ -29,6 +29,7 @@ final class Flag extends Model
     #[Id] public private(set) string $id;
     #[Column] public string $name;
     #[Column] public bool $done;
+    #[Column] public int $weight;
 }
 
 final class Flags
@@ -39,18 +40,21 @@ final class Flags
     public function __construct(public readonly \PDO $pdo, string $driver)
     {
         $pdo->exec(match ($driver) {
-            'pgsql' => 'CREATE TABLE flags (id UUID PRIMARY KEY, name VARCHAR(64) NOT NULL, done BOOLEAN NOT NULL)',
-            'mysql' => 'CREATE TABLE flags (id CHAR(36) PRIMARY KEY, name VARCHAR(64) NOT NULL, done BOOLEAN NOT NULL)',
-            default => 'CREATE TABLE flags (id TEXT PRIMARY KEY, name TEXT NOT NULL, done INTEGER NOT NULL)',
+            'pgsql' => 'CREATE TABLE flags (id UUID PRIMARY KEY, name VARCHAR(64) NOT NULL, done BOOLEAN NOT NULL, weight BIGINT NOT NULL)',
+            'mysql' => 'CREATE TABLE flags (id CHAR(36) PRIMARY KEY, name VARCHAR(64) NOT NULL, done BOOLEAN NOT NULL, weight BIGINT NOT NULL)',
+            default => 'CREATE TABLE flags (id TEXT PRIMARY KEY, name TEXT NOT NULL, done INTEGER NOT NULL, weight INTEGER NOT NULL)',
         });
 
-        foreach (['a' => false, 'b' => false, 'c' => true, 'd' => true] as $name => $done) {
+        // The weights: the largest integer there is, and one more beside it
+        // -- a sum past what PHP holds, which Postgres answers as a numeric.
+        foreach (['a' => [false, \PHP_INT_MAX], 'b' => [false, 1], 'c' => [true, 0], 'd' => [true, 0]] as $name => [$done, $weight]) {
             $id = Uuid::v7();
             $this->ids[$name] = $id;
-            $insert = $pdo->prepare('INSERT INTO flags VALUES (?, ?, ?)');
+            $insert = $pdo->prepare('INSERT INTO flags VALUES (?, ?, ?, ?)');
             $insert->bindValue(1, $id);
             $insert->bindValue(2, $name);
             $insert->bindValue(3, $done, \PDO::PARAM_BOOL);
+            $insert->bindValue(4, $weight, \PDO::PARAM_INT);
             $insert->execute();
         }
     }

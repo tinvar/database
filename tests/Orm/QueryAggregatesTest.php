@@ -491,6 +491,17 @@ describe('unionAll', function () {
     });
 });
 
+// Every integer PHP holds is read as one -- nineteen digits among them --
+// and a number past them as a float, never cut to the largest.
+it('reads a sum as an integer whenever it is one PHP holds', function () {
+    expect(Aggregate::Sum->read('9223372036854775807'))->toBe(\PHP_INT_MAX)
+        ->and(Aggregate::Sum->read('-9223372036854775808'))->toBe(\PHP_INT_MIN)
+        ->and(Aggregate::Sum->read('9223372036854775808'))->toBe(9.2233720368547758E18)
+        ->and(Aggregate::Count->read('1234567890123456789'))->toBe(1234567890123456789)
+        ->and(Aggregate::Sum->read('12.50'))->toBe(12.5)
+        ->and(fn () => Aggregate::Count->read('9223372036854775808'))->toThrow(\UnexpectedValueException::class);
+});
+
 describe('increment and decrement', function () {
     it('adds to the column as the row holds it, on the tenant\'s rows alone', function () {
         $fixture = Shelves::sqlite();
