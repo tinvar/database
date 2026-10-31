@@ -28,9 +28,10 @@ namespace Tinvar\Orm;
  * by a third, a Postgres array of them, empty -- and so matching nothing
  * -- outside one. A policy made before that third variable matches the
  * tenant alone: a read across a subtree there sees the parent's rows and
- * none of its children's until a migration makes the policy again. It is a guard against a forgotten predicate, not against
- * SQL injection: injected SQL can call set_config() as well as this class
- * can.
+ * none of its children's until a migration makes the policy again.
+ *
+ * It is a guard against a forgotten predicate, not against SQL injection:
+ * injected SQL can call set_config() as well as this class can.
  */
 final class RowLevelSecurity
 {

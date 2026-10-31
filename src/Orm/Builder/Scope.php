@@ -94,8 +94,9 @@ final readonly class Scope
 
     /**
      * What orderBy() binds, in its order: each term's own -- twice for one
-     * that sorts its NULLs first, which names its expression twice. The same
-     * either way round, since turning the order round turns no term.
+     * that places its NULLs, first or last, which names its expression
+     * twice. The same either way round, since turning the order round
+     * reorders no term.
      *
      * @return list<mixed>
      */

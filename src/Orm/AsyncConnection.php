@@ -356,21 +356,6 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
     }
 
     /**
-     * Brings the session into line with the calling fiber's tenant and with
-     * whether a read-only scope is open: what PdoConnection does before each
-     * statement, on each fiber's own session.
-     *
-     * Asked of the calling fiber before anything here suspends, so the
-     * answer is that fiber's (TenantSetting).
-     *
-     * Outside a transaction, one round trip tells both, and only when either
-     * differs from what the session was last told. Inside one, the tenant is
-     * told as before, and a read-only scope opened since the transaction
-     * began is held on Postgres by a savepoint set read-only, rolled back to
-     * when the scope ends, as PdoConnection holds one; MySQL cannot change a
-     * transaction's access mode once begun, and the ORM's check holds it.
-     */
-    /**
      * Refuses a tell another backend than the session's answered: a pooler
      * in transaction or statement mode between this pool and Postgres, which
      * may run the next statement on a session told another worker's tenant
@@ -389,6 +374,21 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
         throw $this->sessionMoved;
     }
 
+    /**
+     * Brings the session into line with the calling fiber's tenant and with
+     * whether a read-only scope is open: what PdoConnection does before each
+     * statement, on each fiber's own session.
+     *
+     * Asked of the calling fiber before anything here suspends, so the
+     * answer is that fiber's (TenantSetting).
+     *
+     * Outside a transaction, one round trip tells both, and only when either
+     * differs from what the session was last told. Inside one, the tenant is
+     * told as before, and a read-only scope opened since the transaction
+     * began is held on Postgres by a savepoint set read-only, rolled back to
+     * when the scope ends, as PdoConnection holds one; MySQL cannot change a
+     * transaction's access mode once begun, and the ORM's check holds it.
+     */
     private function bringIntoLine(Lease $lease): void
     {
         [$tenant, $across, $subtree] = $this->tenantScope !== null ? ($this->tenantScope)() : ['', false, []];

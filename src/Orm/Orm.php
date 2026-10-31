@@ -1508,7 +1508,9 @@ final class Orm
      * block, in scoped code that would have been refused them; first read
      * as another tenant, it held that tenant's rows and none of its own.
      * A parent read inside acrossTenants() has no scope to keep ($scope is
-     * null), and its collections read across tenants wherever they are.
+     * null): its collections load under whatever scope is in force when
+     * they are first read -- across tenants inside the block, the tenant's
+     * own after it.
      *
      * @param (\Closure(\Closure(): mixed): mixed)|null $scope
      * @return \Closure(): list<Model>
@@ -2846,15 +2848,6 @@ final class Orm
         return \array_key_exists($groupKey, $this->relationRows[$relationKey] ?? []);
     }
 
-    /**
-     * The relation-row cache key, namespaced by tenant.
-     *
-     * RelationMeta::key() identifies the relation, not whose rows they are.
-     * Unnamespaced, a relation loaded under one tenant answered the same
-     * relation read under another -- and the batch scheduler, which groups by
-     * the same key, would have merged two fibers in different tenants into one
-     * statement under whichever scope happened to be live at flush time.
-     */
     /** Drops every relation-row group belonging to one tenant. */
     private function forgetRelationRows(string $tenant): void
     {
@@ -2867,7 +2860,17 @@ final class Orm
         }
     }
 
-    /** @internal for the Orm's relation loading and the batch scheduler's */
+    /**
+     * The relation-row cache key, namespaced by tenant.
+     *
+     * RelationMeta::key() identifies the relation, not whose rows they are.
+     * Unnamespaced, a relation loaded under one tenant answered the same
+     * relation read under another -- and the batch scheduler, which groups by
+     * the same key, would have merged two fibers in different tenants into one
+     * statement under whichever scope happened to be live at flush time.
+     *
+     * @internal for the Orm's relation loading and the batch scheduler's
+     */
     public function relationCacheKey(RelationMeta $relation): string
     {
         return $this->tenant() . "\0" . $relation->key();
@@ -2875,7 +2878,6 @@ final class Orm
 
     // ------------------------------------------------------------------- sql
 
-    /** @param list<string> $extraColumns */
     /**
      * Vets a column name before it is interpolated into SQL.
      *
@@ -2897,8 +2899,9 @@ final class Orm
      * metadata that somehow is not an identifier cannot reach the query --
      * an injected identifier binds looser than the appended tenant predicate
      * and would defeat tenant scoping as well as read hidden columns.
+     *
+     * @param list<string> $alsoAllowed identifiers compiled elsewhere in the metadata
      */
-    /** @param list<string> $alsoAllowed identifiers compiled elsewhere in the metadata */
     private static function identifier(ModelMeta $meta, string $column, array $alsoAllowed = []): string
     {
         if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*\z/', $column) !== 1) {
