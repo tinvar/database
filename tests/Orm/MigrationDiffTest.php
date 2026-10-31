@@ -104,8 +104,8 @@ function deleteActions(PdoConnection $connection, MigrationFiles $files, \Tinvar
     $generator = new MigrationGenerator($connection, $dialect);
     $source = (string) $generator->generate([Shelf::class, Crate::class], '2026-10-30');
 
-    expect($source)->toContain("\$table->uuid('shelf_id')->references('diff_shelves')->onDelete('CASCADE');")
-        ->and($source)->toContain("\$table->uuid('spare_id')->nullable()->references('diff_shelves')->onDelete('SET NULL');");
+    expect($source)->toContain('$table->foreign(\Tinvar\Tests\Orm\MigrationDiff\Shelf::class)->cascadeOnDelete();')
+        ->and($source)->toContain("\$table->foreign(\\Tinvar\\Tests\\Orm\\MigrationDiff\\Shelf::class, 'spare_id')->nullable()->nullOnDelete();");
     migrate($files, $connection, $source);
     expect($generator->generate([Shelf::class, Crate::class], '2026-10-30'))->toBeNull()
         ->and($generator->warnings)->toBe([]);

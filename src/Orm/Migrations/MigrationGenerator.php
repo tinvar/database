@@ -8,11 +8,13 @@ use Tinvar\Orm\Attributes\Column as ColumnAttribute;
 use Tinvar\Orm\Connection;
 use Tinvar\Orm\Metadata;
 use Tinvar\Orm\Model;
+use Tinvar\Orm\OnDelete;
 use Tinvar\Orm\RelationKind;
 use Tinvar\Orm\RelationMeta;
 use Tinvar\Orm\Schema\Column;
 use Tinvar\Orm\Schema\Dialect;
 use Tinvar\Orm\Schema\Index;
+use Tinvar\Support\Str;
 
 /**
  * What `make:migration` writes: "diffs compiled metadata against the live
@@ -262,10 +264,11 @@ final class MigrationGenerator
                 }
                 $target = Metadata::for($relation->target);
                 $table['columns'][$relation->foreignKey] ??= [
-                    'type' => 'uuid',
+                    'type' => self::keyType($relation->target),
                     'nullable' => new \ReflectionProperty($model, $property)->getType()?->allowsNull() ?? false,
                     'references' => [$target->table, $target->idColumn],
                     'onDelete' => $relation->onDelete,
+                    'model' => $relation->target,
                 ];
                 $table['indexes'][] = [$relation->foreignKey];
                 $table['keys'][] = $relation->foreignKey;
@@ -298,9 +301,10 @@ final class MigrationGenerator
                     continue;
                 }
                 $tables[$target->table]['columns'][$relation->foreignKey] ??= [
-                    'type' => 'uuid',
+                    'type' => self::keyType($model),
                     'nullable' => false,
                     'references' => [$meta->table, $meta->idColumn],
+                    'model' => $model,
                 ];
                 $tables[$target->table]['indexes'][] = array_values(array_filter([$relation->foreignKey, $relation->orderBy]));
                 $tables[$target->table]['keys'][] = $relation->foreignKey;
@@ -336,13 +340,18 @@ final class MigrationGenerator
             $typeName === 'float' => 'float',
             $typeName === 'bool' => 'boolean',
             $typeName === 'array' => 'json',
-            $typeName === \DateTimeImmutable::class => 'timestamp',
+            is_a($typeName, \DateTimeImmutable::class, true) => 'timestamp',
             $typeName === 'string' => 'string',
             is_subclass_of($typeName, \BackedEnum::class) => (new \ReflectionEnum($typeName))->getBackingType()?->getName() === 'int' ? 'integer' : 'string',
             default => 'text',
         };
 
         $column = ['type' => $builderType, 'nullable' => $type?->allowsNull() ?? true];
+        // A backed enum stored as itself, held to its cases' values: written
+        // as enum(), and its check compared case by case (enumChecks()).
+        if ($storage === null && is_subclass_of($typeName, \BackedEnum::class)) {
+            $column['enum'] = $typeName;
+        }
         // A width and a check, where the model says one (ADR 0110). A size
         // is compared only where #[Column] says it: a plain `int` or
         // `string` is as happy in a bigint or a varchar(100).
@@ -366,6 +375,19 @@ final class MigrationGenerator
         }
 
         return $column;
+    }
+
+    /**
+     * The builder's type of a key referencing $model, as foreign() types
+     * one: a bigInteger for an int key, a uuid for any other.
+     *
+     * @param class-string<Model> $model
+     */
+    private static function keyType(string $model): string
+    {
+        $key = new \ReflectionProperty($model, Metadata::for($model)->idProperty)->getType();
+
+        return $key instanceof \ReflectionNamedType && $key->getName() === 'int' ? 'bigInteger' : 'uuid';
     }
 
     /** The builder's type for a #[Column(type:)], or the type itself, written as the database's own. */
@@ -900,8 +922,16 @@ final class MigrationGenerator
             }
         }
         $declaresChecks = array_filter(array_column($table['columns'], 'check'), \is_string(...)) !== [];
-        $checks = $declaresChecks ? $this->dialect->checks($this->connection, $live) : null;
-        if ($checks !== null) {
+        $declaresEnums = array_filter(array_column($table['columns'], 'enum'), \is_string(...)) !== [];
+        $checks = $declaresChecks || $declaresEnums ? $this->dialect->checks($this->connection, $live) : null;
+        $enumChecks = [];
+        if ($checks !== null && $declaresEnums) {
+            [$enumFound, $enumChecks] = self::enumChecks($name, $table['columns'], $columns, $checks);
+            $found = [...$found, ...$enumFound];
+        }
+        if ($checks !== null && $declaresChecks) {
+            // An enum's own check is the enum's, compared above.
+            $checks = array_values(array_diff_key($checks, $enumChecks));
             $liveChecks = array_map(self::checkText(...), $checks);
             foreach ($wantedChecks as $column => $check) {
                 if (!\in_array(self::checkText($check), $liveChecks, true)) {
@@ -945,6 +975,77 @@ final class MigrationGenerator
         }
 
         return $found;
+    }
+
+    /**
+     * Each enum column's check, found among the database's and read case
+     * by case: one naming the column and a value of the enum is its check,
+     * however the database spells it -- SQLite keeps `stage IN ('placed',
+     * ...)` as written, Postgres turns it into `= ANY (ARRAY[...])` -- and
+     * a case whose value it does not name is one the database refuses.
+     * Named for whoever reviews the migration and never written: a check
+     * is widened by a migration of its own (Table::enum()).
+     *
+     * @param array<array-key, array<string, mixed>> $wanted the models' columns
+     * @param array<string, mixed> $columns the database's
+     * @param list<string> $checks the database's checks
+     * @return array{list<string>, array<int, true>} the findings, and which of $checks are enums' checks
+     */
+    private static function enumChecks(string $table, array $wanted, array $columns, array $checks): array
+    {
+        $found = [];
+        $claimed = [];
+        // Words kept apart, unlike checkText(): a column is found as a word.
+        // Postgres casts each value (`'placed'::character varying`); MySQL
+        // escapes its quotes (`_utf8mb4\'placed\'`).
+        $texts = array_map(
+            static fn (string $check): string => (string) preg_replace(
+                ['/::\s*[a-z_ ]+(\(\d+\))?/', '/\\\\\'/', '/["`\[\]()]/'],
+                ['', "'", ' '],
+                strtolower($check),
+            ),
+            $checks,
+        );
+        foreach ($wanted as $column => $spec) {
+            $column = (string) $column;
+            $enum = $spec['enum'] ?? null;
+            if (!\is_string($enum) || !is_subclass_of($enum, \BackedEnum::class) || !isset($columns[$column])) {
+                continue;
+            }
+            $values = array_map(static fn (\BackedEnum $case): int|string => $case->value, $enum::cases());
+            $named = static fn (string $text, int|string $value): bool => \is_int($value)
+                ? preg_match('/(?<![0-9a-z_.])' . $value . '(?![0-9a-z_.])/', $text) === 1
+                : str_contains($text, "'" . str_replace("'", "''", strtolower($value)) . "'");
+
+            $at = null;
+            foreach ($texts as $i => $text) {
+                if (preg_match('/(?<![a-z0-9_])' . preg_quote(strtolower($column), '/') . '(?![a-z0-9_])/', $text) !== 1) {
+                    continue;
+                }
+                foreach ($values as $value) {
+                    if ($named($text, $value)) {
+                        $at = $i;
+                        break 2;
+                    }
+                }
+            }
+
+            $short = Str::shortName($enum);
+            if ($at === null) {
+                $found[] = "{$table}.{$column} holds one of {$short}'s values on the model, and the database has no check holding it to them. "
+                    . 'The builder adds a check only with its column -- on SQLite a check is added by rebuilding the table -- so add it by hand, after finding any row it refuses.';
+                continue;
+            }
+            $claimed[$at] = true;
+            $missing = array_values(array_filter($values, static fn (int|string $value): bool => !$named($texts[$at], $value)));
+            if ($missing !== []) {
+                $list = implode(', ', array_map(static fn (int|string $value): string => \is_int($value) ? (string) $value : var_export($value, true), $missing));
+                $found[] = "{$table}.{$column} holds one of {$short}'s values on the model, and the database's check does not take {$list}. "
+                    . 'Widening a check is dropping it and adding it again -- on SQLite, rebuilding the table -- so do it by hand, in a migration of its own.';
+            }
+        }
+
+        return [$found, $claimed];
     }
 
     /**
@@ -1092,8 +1193,17 @@ final class MigrationGenerator
     private function renderCreate(string $name, array $table): string
     {
         $lines = [];
+        $stamped = self::stampedPair($table['columns']);
         foreach ($table['columns'] as $column => $spec) {
-            $lines[] = '            ' . $this->renderColumn((string) $column, $spec) . ';';
+            $column = (string) $column;
+            if ($stamped && \in_array($column, ['created_at', 'updated_at'], true)) {
+                // The pair the ORM stamps, written once, where the first was.
+                if (!\in_array('            $table->timestamps();', $lines, true)) {
+                    $lines[] = '            $table->timestamps();';
+                }
+                continue;
+            }
+            $lines[] = '            ' . $this->renderColumn($column, $spec) . ';';
         }
         if ($table['tenant'] !== null) {
             $lines[] = "            \$table->tenant({$this->php($table['tenant'])});";
@@ -1108,10 +1218,39 @@ final class MigrationGenerator
         return "        \$schema->create({$this->php($name)}, function (Table \$table): void {\n" . implode("\n", $lines) . "\n        });";
     }
 
+    /**
+     * Whether a table has created_at and updated_at as timestamps() makes
+     * them: both moments, both required, with nothing else said of either.
+     *
+     * @param array<array-key, array<string, mixed>> $columns
+     */
+    private static function stampedPair(array $columns): bool
+    {
+        foreach (['created_at', 'updated_at'] as $name) {
+            $spec = $columns[$name] ?? null;
+            if ($spec === null || ($spec['type'] ?? null) !== 'timestamp' || ($spec['nullable'] ?? false) !== false
+                || array_diff(array_keys($spec), ['type', 'nullable']) !== []) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /** @param array<string, mixed> $spec */
     private function renderColumn(string $column, array $spec): string
     {
-        $call = $this->renderType($column, self::typeOfSpec($spec));
+        $model = \is_string($spec['model'] ?? null) && is_subclass_of($spec['model'], Model::class) ? $spec['model'] : null;
+        $enum = \is_string($spec['enum'] ?? null) ? $spec['enum'] : null;
+        $call = match (true) {
+            // A key from its model: the name, type, table and key are the
+            // model's, and the column is named only where it is not the
+            // one foreign() would name it.
+            $model !== null => '$table->foreign(' . self::className($model)
+                . ($column === Str::snake(Str::shortName($model)) . '_id' ? '' : ", {$this->php($column)}") . ')',
+            $enum !== null => "\$table->enum({$this->php($column)}, " . self::className($enum) . ')',
+            default => $this->renderType($column, self::typeOfSpec($spec)),
+        };
 
         if (($spec['primary'] ?? false) === true) {
             $call .= '->primary()';
@@ -1126,16 +1265,31 @@ final class MigrationGenerator
             $call .= '->check(' . var_export($spec['check'], true) . ')';
         }
         $references = $spec['references'] ?? null;
-        if (\is_array($references) && \is_string($references[0] ?? null) && \is_string($references[1] ?? null)) {
+        if ($model === null && \is_array($references) && \is_string($references[0] ?? null) && \is_string($references[1] ?? null)) {
             $call .= $references[1] === 'id'
                 ? "->references({$this->php($references[0])})"
                 : "->references({$this->php($references[0])}, {$this->php($references[1])})";
-            if (\is_string($spec['onDelete'] ?? null)) {
-                $call .= "->onDelete({$this->php($spec['onDelete'])})";
-            }
+        }
+        if (\is_string($spec['onDelete'] ?? null)) {
+            $call .= match ($spec['onDelete']) {
+                OnDelete::Cascade->value => '->cascadeOnDelete()',
+                OnDelete::SetNull->value => '->nullOnDelete()',
+                OnDelete::Restrict->value => '->restrictOnDelete()',
+                default => '->onDelete(' . self::className(OnDelete::class, '') . '::' . OnDelete::parse($spec['onDelete'])->name . ')',
+            };
         }
 
         return $call;
+    }
+
+    /**
+     * A class's name as the file writes it: fully qualified, so the file
+     * needs no import of it, and with ::class after it unless told not to.
+     * A model's or an enum's, from the code: never the database's.
+     */
+    private static function className(string $class, string $suffix = '::class'): string
+    {
+        return '\\' . ltrim($class, '\\') . $suffix;
     }
 
     /**

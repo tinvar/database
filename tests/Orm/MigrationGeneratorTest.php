@@ -133,8 +133,8 @@ it('writes the tables the models describe, a referenced table before the tables 
                     $table->json('tags');
                     $table->json('layout');
                     $table->timestamp('installed_at');
-                    $table->uuid('site_id')->references('gen_sites');
-                    $table->uuid('backup_site_id')->nullable()->references('gen_sites');
+                    $table->foreign(\Tinvar\Tests\Orm\MigrationGenerator\Site::class);
+                    $table->foreign(\Tinvar\Tests\Orm\MigrationGenerator\Site::class, 'backup_site_id')->nullable();
                     $table->tenant('tenant_id');
                     $table->index(['backup_site_id']);
                     $table->index(['site_id', 'name']);
