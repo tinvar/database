@@ -364,17 +364,22 @@ final class Compiler
                 return ["({$sql})", $bindings];
 
             case Condition::RAW:
-                $parts = [];
+                // A space between tokens, but none between a function and its
+                // parenthesis: MySQL reads a built-in's name followed by a
+                // space as an identifier, so `TRIM (name)` did not parse.
+                $sql = '';
                 $param = 0;
+                $separator = '';
                 foreach ($condition->tokens as [$kind, $text]) {
-                    $parts[] = match (true) {
+                    $sql .= $separator . match (true) {
                         $text instanceof ColumnRef => $expression($text),
                         $kind === 'param' => $this->placeholder($condition->values[$param++] ?? null),
                         default => $text,
                     };
+                    $separator = $kind === 'function' ? '' : ' ';
                 }
 
-                return ['(' . implode(' ', $parts) . ')', $condition->values];
+                return ["({$sql})", $condition->values];
 
             case Condition::NEVER:
                 return ['1 = 0', []];

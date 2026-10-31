@@ -171,6 +171,29 @@ function readsAlike(Orm $orm): void
         ->and(names($back->items))->toBe(['Foxtrot', 'Charlie', 'Bravo']);
 }
 
+/**
+ * Each function a raw condition may call (Expression::FUNCTIONS), as every
+ * database runs it. MySQL reads a built-in function's name followed by a
+ * space as an identifier, so `TRIM (name)` -- which the compiler wrote,
+ * a space between every token -- was a syntax error there.
+ */
+function callsEachFunction(Orm $orm): void
+{
+    $acme = static fn (string $sql, array $bindings): array => $orm->actAs(
+        'acme',
+        static fn (): array => names($orm->query(Shelf::class)->whereRaw($sql, $bindings)->orderBy('name')->fetch()),
+    );
+
+    expect($acme('LOWER(name) = ?', ['alpha']))->toBe(['Alpha'])
+        ->and($acme('UPPER(name) = ?', ['ALPHA']))->toBe(['Alpha'])
+        ->and($acme('COALESCE(note, ?) = ?', ['none', 'none']))->toBe(['Bravo', 'Foxtrot'])
+        ->and($acme('NULLIF(position, ?) IS NULL', [1]))->toBe(['Alpha'])
+        ->and($acme('ABS(position - ?) = ?', [3, 0]))->toBe(['Charlie'])
+        ->and($acme('LENGTH(name) = ?', [5]))->toBe(['Alpha', 'Bravo'])
+        ->and($acme('ROUND(position) = ?', [3]))->toBe(['Charlie'])
+        ->and($acme('TRIM(name) = ?', ['Alpha']))->toBe(['Alpha']);
+}
+
 describe('on Postgres, with row-level security', function () {
     it('reads as SQLite does, under the policy', function () {
         Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
@@ -181,6 +204,12 @@ describe('on Postgres, with row-level security', function () {
     it('groups, aggregates, unions and increments as SQLite does, under the policy', function () {
         Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
             aggregatesAlike($fixture->orm(connection: $connection));
+        });
+    });
+
+    it('calls each function a raw condition may', function () {
+        Shelves::onPostgres(static function (Shelves $fixture, PdoConnection $connection): void {
+            callsEachFunction($fixture->orm(connection: $connection));
         });
     });
 
@@ -293,6 +322,12 @@ describe('on MySQL', function () {
             aggregatesAlike($fixture->orm(connection: $connection));
         });
     });
+
+    it('calls each function a raw condition may', function () {
+        Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
+            callsEachFunction($fixture->orm(connection: $connection));
+        });
+    });
 })->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
 
 describe('on Postgres through the async driver, with row-level security', function () {
@@ -321,6 +356,12 @@ describe('on MySQL through the async driver', function () {
             aggregatesAlike($fixture->orm(connection: $connection));
         });
     });
+
+    it('calls each function a raw condition may', function () {
+        Shelves::onMySqlAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            callsEachFunction($fixture->orm(connection: $connection));
+        });
+    });
 })->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
 
 describe('on SQLite', function () {
@@ -330,5 +371,14 @@ describe('on SQLite', function () {
 
     it('groups, aggregates, unions and increments alike', function () {
         aggregatesAlike(Shelves::sqlite()->orm());
+    });
+
+    it('calls each function a raw condition may, its name against its parenthesis', function () {
+        $shelves = Shelves::sqlite();
+        $connection = $shelves->connection();
+        callsEachFunction($shelves->orm(connection: $connection));
+
+        $log = $connection->statementLog();
+        expect($log[array_key_last($log)])->toContain('TRIM(')->not->toContain('TRIM (');
     });
 });
