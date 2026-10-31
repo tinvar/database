@@ -49,6 +49,9 @@ final class Run
 
     public bool $answer = false;
 
+    /** @var list<array{string, int, int, string}> what each migration's progress said */
+    public array $progress = [];
+
     /**
      * Laid over this process's environment with its production markers
      * taken out, so a TINVAR_ENV or APP_ENV in the shell running the suite
@@ -89,6 +92,9 @@ final class Run
                 [...array_diff_key(getenv(), array_flip(DevMode::PRODUCTION_MARKERS)), ...$this->environment],
                 \is_string(...),
             ),
+            function (string $direction, int $done, int $total, string $name): void {
+                $this->progress[] = [$direction, $done, $total, $name];
+            },
         )->run($command, $arguments);
     }
 }
@@ -211,6 +217,74 @@ it('refuses to drop everything without --force', function () {
     expect($run('migrate:fresh'))->not->toBe(0)
         ->and(implode("\n", $run->err))->toContain('--force')
         ->and($run->out)->not->toContain('dropped   notes');
+});
+
+// Asked, where a person is there, rather than refused for want of a flag;
+// the answer no where nobody is, which is the refusal above.
+it('asks before dropping everything without --force, and drops it at yes', function () {
+    $run = run();
+    $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+    $run('migrate');
+    $run->answer = true;
+
+    expect($run('migrate:fresh'))->toBe(0, implode("\n", $run->err))
+        ->and($run->asked)->toBe(['migrate:fresh: drop every table, and every row in them?'])
+        ->and($run->out)->toContain('dropped   notes');
+
+    $run->seeder = new Notes();
+    expect($run('db:seed', ['--fresh']))->toBe(0)
+        ->and($run->asked[1])->toBe('db:seed --fresh: drop every table, and every row in them?');
+});
+
+it('asks before rolling back where TINVAR_ENV does not say development, and takes back nothing at no', function (?string $environment) {
+    $run = run();
+    $run->environment = ['TINVAR_ENV' => $environment];
+    $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES, "\$schema->drop('notes');");
+    $run('migrate');
+
+    expect($run('migrate:rollback'))->toBe(MigrateCommand::FAILED)
+        ->and($run->asked)->toBe(['Roll back 1 migration(s) (2026_10_24_000001_create_notes), and what their down() drops with them?'])
+        ->and($run->err[0])->toContain('Nothing was rolled back; run it again with --force to do that.')
+        ->and(PdoConnection::sqlite($run->files->database())->select("SELECT name FROM sqlite_master WHERE name = 'notes'"))->toHaveCount(1);
+
+    $run->answer = true;
+    expect($run('migrate:rollback'))->toBe(0)
+        ->and($run->out)->toContain('Rolled back 1 migration(s).');
+})->with(['nothing set' => [null], 'staging' => ['staging']]);
+
+it('rolls back without asking given --force, or where TINVAR_ENV says development, or with nothing to take back', function () {
+    $run = run();
+    $run->environment = ['TINVAR_ENV' => null];
+    $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES, "\$schema->drop('notes');");
+
+    expect($run('migrate:rollback'))->toBe(0)
+        ->and($run->out)->toBe(['Nothing to roll back.']);
+    $run('migrate');
+    expect($run('migrate:rollback', ['--force']))->toBe(0);
+
+    $run->environment = ['TINVAR_ENV' => 'local'];
+    $run('migrate');
+    expect($run('migrate:rollback'))->toBe(0)
+        ->and($run->asked)->toBe([]);
+});
+
+it('tells its progress before the first migration and after each, up and down', function () {
+    $run = run();
+    $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES, "\$schema->drop('notes');");
+    $run->files->add('2026_10_24_000002_backfill', '//', '//');
+
+    $run('migrate');
+    $run('migrate');
+    $run('migrate:rollback');
+
+    expect($run->progress)->toBe([
+        ['up', 0, 2, ''],
+        ['up', 1, 2, '2026_10_24_000001_create_notes'],
+        ['up', 2, 2, '2026_10_24_000002_backfill'],
+        ['down', 0, 2, ''],
+        ['down', 1, 2, '2026_10_24_000002_backfill'],
+        ['down', 2, 2, '2026_10_24_000001_create_notes'],
+    ]);
 });
 
 it('refuses to drop everything in production, even with --force and --non-production', function (string $variable) {

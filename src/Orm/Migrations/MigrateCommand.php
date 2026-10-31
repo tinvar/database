@@ -13,7 +13,8 @@ use Tinvar\Support\DevMode;
  * The migration commands.
  *
  *   tinvar migrate                    run every pending migration, as one batch
- *   tinvar migrate:rollback [--step=N] take back the last batch, or the last N
+ *   tinvar migrate:rollback [--step=N] [--force]
+ *                                     take back the last batch, or the last N
  *   tinvar migrate:status             each migration, and whether it has run
  *   tinvar migrate:fresh --force      drop every table and migrate from nothing
  *   tinvar make:migration <name> [--blank] [--rename=table.old:new | --rename=old:new ...]
@@ -29,6 +30,12 @@ use Tinvar\Support\DevMode;
  * --non-production -- and nothing says it is (NonProduction): neither the
  * environment nor the database, which `migrate` marks production's
  * wherever the environment says production (ProductionMarker).
+ *
+ * What drops or takes back data is asked first ($ask) where it was not
+ * forced: migrate:fresh and db:seed --fresh without --force, and
+ * migrate:rollback without --force wherever TINVAR_ENV does not say
+ * local, development or testing. With nobody there to ask, the answer is
+ * no, and each is refused as it always was without --force.
  *
  * migrate, rollback, fresh and db:seed wait up to --lock-timeout seconds
  * (60 by default) for another run to finish.
@@ -57,6 +64,9 @@ final class MigrateCommand
     /** @var \Closure(string): bool */
     private readonly \Closure $ask;
 
+    /** @var (\Closure(string, int, int, string): void)|null */
+    private readonly ?\Closure $progress;
+
     /** @var array<string, string> */
     private readonly array $environment;
 
@@ -68,10 +78,13 @@ final class MigrateCommand
      * @param (\Closure(string): void)|null $err a line for standard error
      * @param (\Closure(): int)|null $clock the time now, for tests: it names a new migration
      * @param DatabaseSeeder|null $seeder what db:seed fills the database with; db:seed is refused without one
-     * @param (\Closure(string): bool)|null $ask a yes-or-no question for whoever runs make:migration --
-     *        whether a column is another renamed -- answered no where nobody is there to ask:
-     *        by default, unless standard input is a terminal
+     * @param (\Closure(string): bool)|null $ask a yes-or-no question for whoever runs the command --
+     *        whether a column is another renamed, whether to drop every table or take back
+     *        migrations unforced -- answered no where nobody is there to ask: by default,
+     *        unless standard input is a terminal
      * @param array<string, string>|null $environment the environment, for tests; the process's own by default
+     * @param (\Closure(string, int, int, string): void)|null $progress told of each migration run or
+     *        rolled back, as Migrator tells it: for a progress bar
      */
     public function __construct(
         private readonly \Closure $connect,
@@ -83,6 +96,7 @@ final class MigrateCommand
         private readonly ?DatabaseSeeder $seeder = null,
         ?\Closure $ask = null,
         ?array $environment = null,
+        ?\Closure $progress = null,
     ) {
         $this->out = $out ?? static function (string $line): void {
             fwrite(STDOUT, $line . "\n");
@@ -100,6 +114,7 @@ final class MigrateCommand
             return \in_array(strtolower(trim((string) fgets(STDIN))), ['y', 'yes'], true);
         };
         $this->environment = $environment ?? getenv();
+        $this->progress = $progress;
     }
 
     /** @param list<string> $arguments what follows the command */
@@ -108,7 +123,10 @@ final class MigrateCommand
         try {
             return match ($command) {
                 'migrate' => $this->migrate(self::options($command, $arguments, ['lock-timeout'])),
-                'migrate:rollback' => $this->rollback(self::options($command, $arguments, ['step', 'lock-timeout'])),
+                'migrate:rollback' => $this->rollback(
+                    \in_array('--force', $arguments, true),
+                    self::options($command, array_values(array_diff($arguments, ['--force'])), ['step', 'lock-timeout']),
+                ),
                 'migrate:status' => $this->status(self::options($command, $arguments, [])),
                 'migrate:fresh' => $this->fresh(
                     \in_array('--force', $arguments, true),
@@ -172,8 +190,14 @@ final class MigrateCommand
         return 0;
     }
 
-    /** @param array<string, string> $options */
-    private function rollback(array $options): int
+    /**
+     * Takes back the last batch, or the last --step; asked first, unless
+     * --force, wherever TINVAR_ENV does not say this is a developer's or a
+     * test's database: a down() drops what its up() made, and every row in it.
+     *
+     * @param array<string, string> $options
+     */
+    private function rollback(bool $force, array $options): int
     {
         $steps = null;
         if (isset($options['step'])) {
@@ -182,7 +206,22 @@ final class MigrateCommand
                 : throw new \InvalidArgumentException('--step takes a number of migrations, 1 or more.');
         }
 
-        $rolledBack = $this->migrator(false, $options)->rollback($steps);
+        $migrator = $this->migrator(false, $options);
+        $development = \in_array(strtolower(trim($this->environment['TINVAR_ENV'] ?? '')), NonProduction::ENVIRONMENTS, true);
+        $targets = $force || $development ? [] : $migrator->toRollBack($steps);
+        if ($targets !== [] && !($this->ask)(\sprintf(
+            'Roll back %d migration(s) (%s), and what their down() drops with them?',
+            \count($targets),
+            implode(', ', \array_slice($targets, 0, 3)) . (\count($targets) > 3 ? ', …' : ''),
+        ))) {
+            throw new MigrationRefused(\sprintf(
+                'migrate:rollback takes back %d migration(s) and whatever their down() drops, and nothing says this is not production: '
+                . 'TINVAR_ENV is not local, development or testing. Nothing was rolled back; run it again with --force to do that.',
+                \count($targets),
+            ));
+        }
+
+        $rolledBack = $migrator->rollback($steps);
         ($this->out)($rolledBack === [] ? 'Nothing to roll back.' : \sprintf('Rolled back %d migration(s).', \count($rolledBack)));
 
         return 0;
@@ -243,7 +282,7 @@ final class MigrateCommand
     private function refuseFresh(string $command, bool $force, bool $declared): void
     {
         NonProduction::require($command, 'drops every table', $this->environment, $declared);
-        if (!$force) {
+        if (!$force && !($this->ask)("{$command}: drop every table, and every row in them?")) {
             throw new MigrationRefused("{$command} drops every table and every row in them. Run it again with --force to do that.");
         }
     }
@@ -389,6 +428,7 @@ final class MigrateCommand
             $this->directory,
             lockTimeout: $timeout,
             log: $this->out,
+            progress: $this->progress,
         );
     }
 

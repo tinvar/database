@@ -46,12 +46,17 @@ final class Migrator
     /** @var \Closure(string): void */
     private readonly \Closure $log;
 
+    /** @var (\Closure(string, int, int, string): void)|null */
+    private readonly ?\Closure $progress;
+
     /** @var array<string, Migration> loaded migrations, by path */
     private array $loaded = [];
 
     /**
      * @param string|list<string> $paths the directories migrations are read from
      * @param (\Closure(string): void)|null $log a line for each migration run, rolled back or table dropped
+     * @param (\Closure(string, int, int, string): void)|null $progress told 'up' or 'down', how many
+     *        of how many are done and the one just done: with 0 and '' before the first, then after each
      */
     public function __construct(
         private readonly Connection $connection,
@@ -59,10 +64,12 @@ final class Migrator
         ?Dialect $dialect = null,
         private readonly float $lockTimeout = self::LOCK_TIMEOUT,
         ?\Closure $log = null,
+        ?\Closure $progress = null,
     ) {
         $this->dialect = $dialect ?? Dialect::for($connection);
         $this->paths = \is_string($paths) ? [$paths] : $paths;
         $this->log = $log ?? static function (string $line): void {};
+        $this->progress = $progress;
     }
 
     public function dialect(): Dialect
@@ -176,19 +183,9 @@ final class Migrator
         }
 
         return $this->locked(function () use ($steps): array {
-            $newestFirst = array_reverse($this->recorded());
-            if ($newestFirst === []) {
-                return [];
-            }
-
-            $targets = $steps === null
-                ? array_values(array_filter($newestFirst, static fn (array $row): bool => $row['batch'] === $newestFirst[0]['batch']))
-                : \array_slice($newestFirst, 0, $steps);
-
             $files = $this->files();
             $migrations = [];
-            foreach ($targets as $row) {
-                $name = $row['name'];
+            foreach ($this->toRollBack($steps) as $name) {
                 $path = $files[$name] ?? throw MigrationRefused::missingFile($name);
                 $migration = $this->load($path);
                 if (!$migration->reversible()) {
@@ -197,12 +194,35 @@ final class Migrator
                 $migrations[$name] = $migration;
             }
 
+            $this->tell('down', 0, \count($migrations), '');
+            $done = 0;
             foreach ($migrations as $name => $migration) {
                 $this->run($name, $migration, 'down', 0);
+                $this->tell('down', ++$done, \count($migrations), $name);
             }
 
             return array_keys($migrations);
         });
+    }
+
+    /**
+     * What rollback($steps) would take back, newest first: the last batch,
+     * or the last $steps migrations whatever their batch. Read without the
+     * lock, to say before it runs; rollback() reads it again under it.
+     *
+     * @return list<string>
+     */
+    public function toRollBack(?int $steps = null): array
+    {
+        $newestFirst = array_reverse($this->recorded());
+        if ($newestFirst === []) {
+            return [];
+        }
+        $targets = $steps === null
+            ? array_values(array_filter($newestFirst, static fn (array $row): bool => $row['batch'] === $newestFirst[0]['batch']))
+            : \array_slice($newestFirst, 0, $steps);
+
+        return array_column($targets, 'name');
     }
 
     /**
@@ -241,11 +261,23 @@ final class Migrator
             }
         }
 
+        if ($pending !== []) {
+            $this->tell('up', 0, \count($pending), '');
+        }
+        $done = 0;
         foreach ($pending as $name => $migration) {
             $this->run($name, $migration, 'up', $batch);
+            $this->tell('up', ++$done, \count($pending), $name);
         }
 
         return array_keys($pending);
+    }
+
+    private function tell(string $direction, int $done, int $total, string $name): void
+    {
+        if ($this->progress !== null) {
+            ($this->progress)($direction, $done, $total, $name);
+        }
     }
 
     private function run(string $name, Migration $migration, string $direction, int $batch): void
