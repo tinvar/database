@@ -11,6 +11,7 @@ use Tinvar\Orm\NoTenantContext;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\ReadOnlyViolation;
 use Tinvar\Tests\Orm\Fixtures\Script;
+use Tinvar\Tests\Orm\Fixtures\ScriptRun;
 use Tinvar\Tests\Orm\Fixtures\Tenancy;
 use Tinvar\Tests\Orm\Fixtures\TenantFixture;
 
@@ -440,6 +441,57 @@ describe('relations inside acrossTenants', function () {
         });
 
         expect($scoped)->toBe(2, 'acme only, not the four the unscoped read saw');
+    });
+
+    // Each collection read across tenants loaded the whole result set's
+    // children again and kept only its own group: N parents, N statements,
+    // each returning every child -- quadratic in the rows read.
+    it('loads a hasMany for the whole result set once, as a scoped read does', function () {
+        $fixture = new TenantFixture();
+        $orm = tenantOrm($fixture);
+
+        $total = $orm->acrossTenants(static function () use ($orm, $fixture): int {
+            $scripts = $orm->all(Script::class);
+            $fixture->connection->resetStatementCount();
+            $sum = 0;
+            foreach ($scripts as $script) {
+                $sum += $script->runs->count();
+            }
+
+            return $sum;
+        });
+
+        expect($total)->toBe(4)
+            ->and($fixture->connection->statementCount())->toBe(1, 'four scripts, one runs statement');
+    });
+
+    // What one read across tenants loaded is that read's: a write inside the
+    // block is seen by a sibling read after it, and a read in another scope
+    // -- the tenant's own, after the block -- never sees the rows.
+    it('reads a write made inside the block, and keeps the rows to the block\'s scope', function () {
+        $fixture = new TenantFixture();
+        $orm = tenantOrm($fixture);
+        $globex = $fixture->scripts['globex'][1];
+        $run = $fixture->connection->select('SELECT id FROM script_runs WHERE script_id = ?', [$globex])[0]['id'];
+
+        $scripts = $orm->acrossTenants(static function () use ($orm, $run): array {
+            $scripts = $orm->all(Script::class);
+            $scripts[0]->runs->count();
+            $orm->query(ScriptRun::class)->where('id', $run)->delete();
+
+            return $scripts;
+        });
+
+        $byId = [];
+        foreach ($scripts as $script) {
+            $byId[$script->id] = $script;
+        }
+        $acme = $fixture->scripts['acme'][1];
+
+        expect($orm->acrossTenants(static fn (): int => $byId[$globex]->runs->count()))->toBe(0, 'the delete is seen')
+            ->and($orm->actAs('acme', static fn (): int => $byId[$acme]->runs->count()))->toBe(1)
+            ->and($fixture->connection->statementLog()[array_key_last($fixture->connection->statementLog())] ?? '')
+            ->toContain('"tenant_id"');
     });
 });
 

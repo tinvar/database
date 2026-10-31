@@ -26,6 +26,14 @@ final class Orm
     /** @var array<string, array<string, mixed>> relation key => group key => rows */
     private array $relationRows = [];
 
+    /**
+     * How many writes this Orm has followed, and transactions it has rolled
+     * back: what a widened read's rows, kept on the result set they were
+     * read for (widenedRows()), are checked against, so a write made since
+     * they were read has them read again.
+     */
+    private int $writeGeneration = 0;
+
     private ?BatchScheduler $scheduler = null;
 
     /**
@@ -2051,6 +2059,7 @@ final class Orm
             // would be handed one of them rather than the database's state.
             $this->identityMap->flush();
             $this->relationRows = [];
+            $this->writeGeneration++;
 
             throw $e;
         }
@@ -2190,6 +2199,8 @@ final class Orm
      */
     private function followWrite(ModelMeta $meta, string $id, ?array $row): void
     {
+        $this->writeGeneration++;
+
         foreach (Metadata::relationsTo($meta->class) as $relation) {
             if ($relation->kind === RelationKind::HasMany) {
                 $this->followHasMany($relation, $meta, $id, $row);
@@ -2391,9 +2402,10 @@ final class Orm
 
         // An unscoped read never touches the cache, in either direction, so it
         // takes its answer straight from the load; nor does one across a
-        // subtree, for the same reason.
+        // subtree, for the same reason. The load is kept on the result set
+        // for its siblings, under the widened scope's own name.
         if ($this->isWidened()) {
-            $grouped = $this->loadRelationRows($relation, $this->batchWith($parent), $key);
+            $grouped = $this->widenedRows($relation, $parent, $key);
 
             return $this->hydrateAll($relation->target, $grouped[$groupKey] ?? []);
         }
@@ -2441,6 +2453,44 @@ final class Orm
     }
 
     /**
+     * A widened read's rows for $relation across $parent's result set: read
+     * once for the whole set, as a scoped read caches them, and kept on the
+     * result set rather than in the relation-row cache, which holds the
+     * tenant's rows alone. Each parent read across tenants used to load
+     * every sibling's rows again and keep only its own: N statements for N
+     * parents, each returning every row.
+     *
+     * Kept under the widened scope's name -- every tenant, or the tenants
+     * of the subtree in force -- so a read in another scope, the tenant's
+     * own after the block among them, never sees them; and against the
+     * write generation, so a write made since has them read again.
+     *
+     * @return array<string, list<array<string, mixed>>>
+     */
+    private function widenedRows(RelationMeta $relation, Model $parent, string $key): array
+    {
+        $set = $parent->resultSet();
+        $parents = $this->batchWith($parent);
+        if ($set === null || $set->all() === []) {
+            return $this->loadRelationRows($relation, $parents, $key);
+        }
+
+        $subtree = $this->subtreeInForce();
+        $scoped = ($subtree === null ? "\0across" : "\0subtree\0" . implode("\0", $subtree)) . "\0" . $relation->key();
+
+        $kept = $set->widenedRows($scoped, $this->writeGeneration);
+        if ($kept !== null) {
+            return $kept;
+        }
+
+        $generation = $this->writeGeneration;
+        $grouped = $this->loadRelationRows($relation, $parents, $key);
+        $set->keepWidenedRows($scoped, $generation, $grouped);
+
+        return $grouped;
+    }
+
+    /**
      * @return array<string, mixed>|null
      *
      * @internal for the Orm's own relation loading and the batch
@@ -2451,7 +2501,7 @@ final class Orm
         $key = $this->relationCacheKey($relation);
 
         if ($this->isWidened()) {
-            $grouped = $this->loadRelationRows($relation, $this->batchWith($parent), $key);
+            $grouped = $this->widenedRows($relation, $parent, $key);
 
             /** @var array<string, mixed>|null */
             return $grouped[$foreignKey][0] ?? null;

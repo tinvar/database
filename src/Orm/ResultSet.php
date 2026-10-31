@@ -23,7 +23,36 @@ final class ResultSet
      *        for that model alone, which the record a test reads says
      *        (LazyLoad::ALONE).
      */
+    /**
+     * Relation rows a read across tenants or a subtree loaded for these
+     * models, by the widened scope's name and the relation: with the Orm's
+     * write generation they were read at, and grouped as
+     * Orm::loadRelationRows() groups them.
+     *
+     * @var array<string, array{int, array<string, list<array<string, mixed>>>}>
+     */
+    private array $widened = [];
+
     public function __construct(public readonly bool $alone = false) {}
+
+    /**
+     * The rows kept under $key, or null when none were, or they were read
+     * before the write generation the Orm is at now.
+     *
+     * @return array<string, list<array<string, mixed>>>|null
+     */
+    public function widenedRows(string $key, int $generation): ?array
+    {
+        $kept = $this->widened[$key] ?? null;
+
+        return $kept !== null && $kept[0] === $generation ? $kept[1] : null;
+    }
+
+    /** @param array<string, list<array<string, mixed>>> $rows */
+    public function keepWidenedRows(string $key, int $generation, array $rows): void
+    {
+        $this->widened[$key] = [$generation, $rows];
+    }
 
     public function add(Model $model): void
     {
