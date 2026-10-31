@@ -14,11 +14,14 @@ namespace Tinvar\Tests\Orm\NestedTransaction;
 
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\Orm;
+use Tinvar\Orm\PdoConnection;
+use Tinvar\Tests\Orm\Fixtures\Databases;
 use Tinvar\Tests\Orm\Fixtures\Fixture;
 use Tinvar\Tests\Orm\Fixtures\Rack;
 
 require_once __DIR__ . '/Fixtures/models.php';
 require_once __DIR__ . '/Fixtures/schema.php';
+require_once __DIR__ . '/Fixtures/databases.php';
 
 /** @return list<string> rack names in the database, in name order */
 function rackNames(Fixture $fixture): array
@@ -127,3 +130,43 @@ it('nests more than one level deep, each level undoing only its own writes', fun
 
     expect(rackNames($fixture))->toBe(['R-03', 'a-level-1', 'b-level-2']);
 });
+
+/**
+ * On Postgres a statement that fails aborts the transaction it runs in. A
+ * nested transaction() whose work caught such a failure and returned went
+ * on to RELEASE its savepoint, which Postgres refused with an opaque 25P02
+ * -- naming neither the statement nor what to do. The savepoint is rolled
+ * back now, which brings the outer transaction back, and the failure is
+ * named, with the statement's own as its previous.
+ */
+describe('on Postgres', function () {
+    it('rolls back a savepoint a caught failure aborted, and says why', function () {
+        Databases::inScratchSchema('pgsql', static function (\PDO $pdo): void {
+            $connection = new PdoConnection($pdo, 'pgsql');
+            $connection->execute('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+
+            $inner = null;
+            $connection->transaction(static function () use ($connection, &$inner): void {
+                $connection->execute('INSERT INTO t VALUES (1)');
+                try {
+                    $connection->transaction(static function () use ($connection): void {
+                        $connection->execute('INSERT INTO t VALUES (2)');
+                        try {
+                            $connection->execute('INSERT INTO t VALUES (1)');
+                        } catch (\PDOException) {
+                        }
+                    });
+                } catch (\PDOException $e) {
+                    $inner = $e;
+                }
+                $connection->execute('INSERT INTO t VALUES (3)');
+            });
+
+            expect($inner)->toBeInstanceOf(\PDOException::class)
+                ->and($inner?->getMessage())->toContain('rolled back, not committed')
+                ->and($inner?->getPrevious()?->getMessage())->toContain('duplicate key')
+                ->and(array_column($connection->select('SELECT id FROM t ORDER BY id'), 'id'))->toBe([1, 3])
+                ->and($connection->inTransaction())->toBeFalse();
+        });
+    });
+})->group('pgsql')->skip(Databases::postgresMissing() !== null, Databases::postgresMissing() ?? '');

@@ -293,6 +293,35 @@ describe('on Postgres, with row-level security', function () {
         });
     });
 
+    // A nested transaction() whose work caught a failed statement returned,
+    // and its RELEASE was refused with an opaque 25P02: the transaction was
+    // aborted. Its savepoint is rolled back now, and the failure named.
+    it('rolls back a savepoint a caught failure aborted, and says why', function () {
+        Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
+            $inner = null;
+            $connection->transaction(static function () use ($connection, &$inner): void {
+                $connection->execute("INSERT INTO brands VALUES ('b-1', 'Outer', 1)");
+                try {
+                    $connection->transaction(static function () use ($connection): void {
+                        $connection->execute("INSERT INTO brands VALUES ('b-2', 'Inner', 2)");
+                        try {
+                            $connection->execute("INSERT INTO brands VALUES ('b-1', 'Again', 3)");
+                        } catch (\PDOException) {
+                        }
+                    });
+                } catch (\PDOException $e) {
+                    $inner = $e;
+                }
+                $connection->execute("INSERT INTO brands VALUES ('b-3', 'After', 3)");
+            });
+
+            expect($inner)->toBeInstanceOf(\PDOException::class)
+                ->and($inner?->getMessage())->toContain('rolled back, not committed')
+                ->and($inner?->getPrevious()?->getMessage())->toContain('duplicate key')
+                ->and(brands($connection))->toBe(['After', 'Outer', 'Xi', 'Ypsilon', 'Zeta']);
+        });
+    });
+
     it('runs a fiber\'s afterCommit() callbacks on its own commit, not another fiber\'s', function () {
         Shelves::onPostgresAsync(static function (Shelves $fixture, AsyncConnection $connection): void {
             $orm = $fixture->orm(connection: $connection);

@@ -508,12 +508,7 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
             $failed = $session->aborted[0];
             $this->rollBack($lease);
 
-            throw new \PDOException(
-                'The transaction was rolled back, not committed: a statement in it failed, and Postgres aborts the transaction it fails in. '
-                . 'Run a statement that may fail in a transaction() of its own, whose savepoint takes the failure back alone.',
-                0,
-                $failed,
-            );
+            throw PdoConnection::abortedBy($failed);
         }
 
         try {
@@ -595,6 +590,14 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
 
         try {
             $result = $work();
+
+            // As PdoConnection: a statement that failed in here aborted the
+            // Postgres transaction, though $work caught it and returned, and
+            // the RELEASE was refused with a bare 25P02. Rolled back to the
+            // savepoint below, and said so.
+            if ($session->aborted !== null && $session->aborted[1] >= $number) {
+                throw PdoConnection::abortedBy($session->aborted[0]);
+            }
         } catch (\Throwable $e) {
             if (!$lease->ended() && !$session->closed) {
                 // ROLLBACK TO leaves the savepoint open, so it is released as

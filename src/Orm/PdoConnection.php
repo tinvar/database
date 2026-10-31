@@ -611,12 +611,7 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
                 // left to the reset contract, as below
             }
 
-            throw new \PDOException(
-                'The transaction was rolled back, not committed: a statement in it failed, and Postgres aborts the transaction it fails in. '
-                . 'Run a statement that may fail in a transaction() of its own, whose savepoint takes the failure back alone.',
-                0,
-                $failed,
-            );
+            throw self::abortedBy($failed);
         }
 
         try {
@@ -746,6 +741,16 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
 
         try {
             $result = $work();
+
+            // A statement that failed in here aborted the transaction on
+            // Postgres, though $work caught the failure and returned: the
+            // RELEASE below was refused with a bare 25P02, naming neither
+            // the statement nor what to do. Rolled back to the savepoint,
+            // which brings the transaction back, and said so, as the
+            // outermost transaction() says so.
+            if ($this->aborted !== null && $this->aborted[1] >= $this->savepoints) {
+                throw self::abortedBy($this->aborted[0]);
+            }
         } catch (\Throwable $e) {
             // ROLLBACK TO leaves the savepoint open on SQLite and Postgres
             // alike, so it is released as well. On Postgres this is also what
@@ -771,6 +776,23 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
     public function inTransaction(): bool
     {
         return $this->pdo->inTransaction();
+    }
+
+    /**
+     * What a transaction() a failed statement aborted on Postgres throws in
+     * place of its commit, or its savepoint's release, with the statement's
+     * failure as its previous.
+     *
+     * @internal for this package's connections
+     */
+    public static function abortedBy(\Throwable $failed): \PDOException
+    {
+        return new \PDOException(
+            'The transaction was rolled back, not committed: a statement in it failed, and Postgres aborts the transaction it fails in. '
+            . 'Run a statement that may fail in a transaction() of its own, whose savepoint takes the failure back alone.',
+            0,
+            $failed,
+        );
     }
 
     public function rollBackOpenTransaction(): bool
