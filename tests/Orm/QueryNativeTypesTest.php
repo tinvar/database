@@ -54,9 +54,33 @@ function pagesByABoolean(Orm $orm): void
         ->and(names($orm->query(Flag::class)->where('done', true)->orderBy('name')->fetch()))->toBe(['c', 'd']);
 }
 
+/**
+ * A key compared by a range or a pattern: Postgres refuses text that is not
+ * a UUID for a uuid column, with an error quoting it, and has no LIKE for
+ * one at all -- a 500 for what SQLite answered.
+ */
+function comparesAKey(Orm $orm, Flags $flags): void
+{
+    $after = $flags->ids['b'];
+    $expected = array_keys(array_filter($flags->ids, static fn (string $id): bool => strcmp($id, $after) > 0));
+    sort($expected);
+
+    expect(fn () => $orm->query(Flag::class)->where('id', 'like', 'a%'))
+        ->toThrow(\InvalidArgumentException::class, 'LIKE')
+        ->and(fn () => $orm->query(Flag::class)->where('id', 'not like', 'a%'))->toThrow(\InvalidArgumentException::class, 'LIKE')
+        ->and(fn () => $orm->query(Flag::class)->where('id', '>', 'abc'))->toThrow(\InvalidArgumentException::class, 'UUID')
+        ->and(names($orm->query(Flag::class)->where('id', '>', $after)->orderBy('name')->fetch()))->toBe($expected)
+        ->and(names($orm->query(Flag::class)->where('id', '>=', '00000000-0000-0000-0000-000000000000')->orderBy('name')->fetch()))
+        ->toBe(['a', 'b', 'c', 'd']);
+}
+
 describe('on Postgres', function () {
     it('pages by a boolean whose anchor is false', function () {
         Flags::onPostgres(pagesByABoolean(...));
+    });
+
+    it('compares a key by a range, and refuses a pattern', function () {
+        Flags::onPostgres(comparesAKey(...));
     });
 })->group('pgsql')->skip(Databases::postgresMissing() !== null, Databases::postgresMissing() ?? '');
 
@@ -70,6 +94,10 @@ describe('on MySQL', function () {
     it('pages by a boolean whose anchor is false', function () {
         Flags::onMySql(pagesByABoolean(...));
     });
+
+    it('compares a key by a range, and refuses a pattern', function () {
+        Flags::onMySql(comparesAKey(...));
+    });
 })->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
 
 describe('on MySQL through the async driver', function () {
@@ -81,5 +109,9 @@ describe('on MySQL through the async driver', function () {
 describe('on SQLite', function () {
     it('pages by a boolean whose anchor is false', function () {
         pagesByABoolean(Flags::sqlite());
+    });
+
+    it('compares a key by a range, and refuses a pattern', function () {
+        Flags::onSqlite(comparesAKey(...));
     });
 });

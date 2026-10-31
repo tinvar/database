@@ -2504,6 +2504,23 @@ final readonly class Query
             return $this->adding($sql === '=' ? Condition::never($or) : Condition::null($or, $ref, true));
         }
 
+        // A pattern or a range has no such answer. Postgres has no LIKE for
+        // a uuid column, and refuses a bound that is not a UUID with an
+        // error quoting it: a 500 for what SQLite and MySQL answered, from
+        // text that may be a request's.
+        if (!\in_array($sql, ['=', '<>'], true) && $this->isKey($ref)) {
+            if (\in_array($sql, ['LIKE', 'NOT LIKE'], true)) {
+                throw new \InvalidArgumentException(
+                    "A key is a UUID, which Postgres matches with no LIKE: compare '{$ref->column}' with =, whereIn() or a range.",
+                );
+            }
+            if (!\is_string($bound) || preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i', $bound) !== 1) {
+                throw new \InvalidArgumentException(
+                    "A key is compared by a range with a UUID, which Postgres requires of a uuid column: '{$ref->column}' {$sql} takes one.",
+                );
+            }
+        }
+
         return $this->adding(Condition::compare($or, $ref, $sql, $bound));
     }
 

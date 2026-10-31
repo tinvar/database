@@ -62,43 +62,56 @@ final class Flags
 
     public static function sqlite(): Orm
     {
-        $pdo = new \PDO('sqlite::memory:', null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        $orm = null;
+        self::onSqlite(static function (Orm $read) use (&$orm): void {
+            $orm = $read;
+        });
 
-        return new self($pdo, 'sqlite')->orm(new PdoConnection($pdo, 'test'));
+        return $orm ?? throw new \LogicException('no orm');
     }
 
-    /** @param \Closure(Orm): void $test */
+    /** @param \Closure(Orm, self): void $test */
+    public static function onSqlite(\Closure $test): void
+    {
+        $pdo = new \PDO('sqlite::memory:', null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        $flags = new self($pdo, 'sqlite');
+        $test($flags->orm(new PdoConnection($pdo, 'test')), $flags);
+    }
+
+    /** @param \Closure(Orm, self): void $test */
     public static function onPostgres(\Closure $test): void
     {
         Databases::inScratchSchema('pgsql', static function (\PDO $pdo) use ($test): void {
-            $test(new self($pdo, 'pgsql')->orm(new PdoConnection($pdo, 'pgsql')));
+            $flags = new self($pdo, 'pgsql');
+            $test($flags->orm(new PdoConnection($pdo, 'pgsql')), $flags);
         });
     }
 
-    /** @param \Closure(Orm): void $test */
+    /** @param \Closure(Orm, self): void $test */
     public static function onPostgresAsync(\Closure $test): void
     {
         Databases::inScratchSchema('pgsql', static function (\PDO $pdo, string $schema) use ($test): void {
             $flags = new self($pdo, 'pgsql');
             $connection = AsyncConnection::postgres(Databases::asyncPostgres("-c search_path={$schema}"), 'pgsql-async');
             try {
-                $test($flags->orm($connection));
+                $test($flags->orm($connection), $flags);
             } finally {
                 $connection->close();
             }
         });
     }
 
-    /** @param \Closure(Orm): void $test */
+    /** @param \Closure(Orm, self): void $test */
     public static function onMySql(\Closure $test): void
     {
         Databases::inScratchSchema('mysql', static function (\PDO $pdo) use ($test): void {
             $pdo->exec("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')");
-            $test(new self($pdo, 'mysql')->orm(new PdoConnection($pdo, 'mysql')));
+            $flags = new self($pdo, 'mysql');
+            $test($flags->orm(new PdoConnection($pdo, 'mysql')), $flags);
         });
     }
 
-    /** @param \Closure(Orm): void $test */
+    /** @param \Closure(Orm, self): void $test */
     public static function onMySqlAsync(\Closure $test): void
     {
         Databases::inScratchSchema('mysql', static function (\PDO $pdo, string $database) use ($test): void {
@@ -107,7 +120,7 @@ final class Flags
             $mode = $pdo->query('SELECT @@SESSION.sql_mode')?->fetchColumn();
             $connection = AsyncConnection::mysql(Databases::asyncMySql($database, \is_string($mode) ? $mode : 'ANSI_QUOTES'), 'mysql-async');
             try {
-                $test($flags->orm($connection));
+                $test($flags->orm($connection), $flags);
             } finally {
                 $connection->close();
             }
