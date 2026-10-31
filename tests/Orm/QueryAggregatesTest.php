@@ -537,6 +537,20 @@ describe('increment and decrement', function () {
             ->and($fixture->pdo->query('SELECT SUM(price_cents) FROM items')?->fetchColumn())->toBe(1873);
     });
 
+    // The column's own entry in $also was dropped for the addition, without
+    // a word: the caller's value never written, nor refused.
+    it('refuses to set the column it adds to beside the addition', function () {
+        $fixture = Shelves::sqlite();
+        $orm = $fixture->orm();
+        $acme = static fn (\Closure $write): mixed => $orm->actAs('acme', $write);
+
+        expect(fn () => $acme(static fn (): int => $orm->query(Shelf::class)->increment('position', 1, ['position' => 9])))
+            ->toThrow(\InvalidArgumentException::class, "'position'")
+            ->and(fn () => $acme(static fn (): int => $orm->query(Shelf::class)->decrement('position', 1, ['position' => 9])))
+            ->toThrow(\InvalidArgumentException::class, "'position'")
+            ->and($fixture->pdo->query('SELECT SUM(position) FROM shelves')?->fetchColumn())->toBe(13);
+    });
+
     it('reaches the rows a sort by related rows and a limit pick', function () {
         $fixture = Shelves::sqlite();
         $orm = $fixture->orm();

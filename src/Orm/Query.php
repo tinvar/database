@@ -1426,7 +1426,27 @@ final readonly class Query
             throw new \InvalidArgumentException('increment() adds a number above zero; decrement() takes one away.');
         }
 
-        return $this->update([...$also, self::fieldName($column) => Increment::by($by)]);
+        return $this->update(self::alsoBeside('increment()', $column, $also, Increment::by($by)));
+    }
+
+    /**
+     * increment()'s and decrement()'s fields: $also, and the addition to
+     * $column. Spread together, $also's own entry for the column was
+     * replaced by the addition, and the caller's value dropped unsaid; one
+     * spelled differently -- the column for the property -- Fields refuses
+     * as a field set twice.
+     *
+     * @param array<string, mixed> $also
+     * @return array<string, mixed>
+     */
+    private static function alsoBeside(string $what, string|\BackedEnum $column, array $also, Increment $by): array
+    {
+        $field = self::fieldName($column);
+        if (\array_key_exists($field, $also)) {
+            throw new \InvalidArgumentException("{$what} works '{$field}' out itself, and \$also sets it as well: set it with update(), or leave it out of \$also.");
+        }
+
+        return [...$also, $field => $by];
     }
 
     /**
@@ -1443,7 +1463,7 @@ final readonly class Query
             throw new \InvalidArgumentException('decrement() takes away a number above zero; increment() adds one.');
         }
 
-        return $this->update([...$also, self::fieldName($column) => Increment::by(-$by)]);
+        return $this->update(self::alsoBeside('decrement()', $column, $also, Increment::by(-$by)));
     }
 
     /**
