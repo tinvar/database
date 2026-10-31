@@ -103,8 +103,8 @@ function rows(Orm $orm): array
     return $orm->connection()->select('SELECT sku, stock, created_at, updated_at FROM bins ORDER BY sku');
 }
 
-const THEN = '2026-10-28 09:30:00.000000+00:00';
-const LATER = '2026-10-28 10:00:00.000000+00:00';
+const THEN = '2026-10-28T09:30:00.000000Z';
+const LATER = '2026-10-28T10:00:00.000000Z';
 
 it('stamps a new row\'s updatedAt with its createdAt, on save and on a query\'s insert', function () {
     $orm = orm();
@@ -152,7 +152,7 @@ it('keeps one the save set itself', function () {
     $bin->touchedAt(new \DateTimeImmutable('2025-01-01 00:00:00', new \DateTimeZone('UTC')));
     $orm->save($bin);
 
-    expect(rows($orm)[0]['updated_at'])->toBe('2025-01-01 00:00:00.000000+00:00');
+    expect(rows($orm)[0]['updated_at'])->toBe('2025-01-01T00:00:00.000000Z');
 });
 
 it('puts back what it held when the update is refused or rolled back, and stamps again on the next try', function () {
@@ -184,7 +184,7 @@ it('puts back what it held when the update is refused or rolled back, and stamps
 
     Clock::$now = '2026-10-28 11:00:00';
     $orm->save($other);
-    expect(rows($orm)[0]['updated_at'])->toBe('2026-10-28 11:00:00.000000+00:00');
+    expect(rows($orm)[0]['updated_at'])->toBe('2026-10-28T11:00:00.000000Z');
 });
 
 it('stamps every row a query\'s update() reaches, through a Change too, and the models held follow', function () {
@@ -208,7 +208,7 @@ it('keeps one a query\'s update() sets, which a private(set) one cannot be', fun
     Clock::$now = '2026-10-28 10:00:00';
     $orm->query(OpenBin::class)->update(['stock' => 1, 'updatedAt' => new \DateTimeImmutable('2025-01-01 00:00:00', new \DateTimeZone('UTC'))]);
 
-    expect(rows($orm)[0]['updated_at'])->toBe('2025-01-01 00:00:00.000000+00:00')
+    expect(rows($orm)[0]['updated_at'])->toBe('2025-01-01T00:00:00.000000Z')
         ->and(fn () => $orm->query(Bin::class)->update(['updatedAt' => new \DateTimeImmutable()]))
         ->toThrow(\InvalidArgumentException::class, 'set by the model alone')
         ->and(fn () => $orm->query(Bin::class)->update([]))

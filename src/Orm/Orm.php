@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
+use Carbon\CarbonImmutable;
 use Tinvar\Support\Lazy;
 use Tinvar\Support\Uuid;
 
@@ -163,6 +164,9 @@ final class Orm
     /** The registered tree, checked; null with no tenancy, or tenants side by side. */
     private readonly ?TenantBounds $tenants;
 
+    /** The form a moment is written in on this connection's database. */
+    private readonly TimestampStorage $timestampStorage;
+
     /**
      * @param TenantSubtrees|null $tenants the tenancy registered with this Orm: the
      *        application's tenant tree, as tinvar/tenancy hands it over. Null for
@@ -173,8 +177,8 @@ final class Orm
      *        throws -- hold whatever an implementation returns (ADR 0056).
      * @param (\Closure(): \DateTimeImmutable)|null $clock what now() answers: the time a
      *        new row's createdAt, and a written row's updatedAt, are stamped with.
-     *        The system's, in UTC, unless given --
-     *        a test's moved clock, say.
+     *        Carbon's now(), in UTC, unless given -- which is the system's time, or
+     *        the clock a test has Carbon follow (CarbonClock).
      */
     public function __construct(
         private readonly Connection $connection,
@@ -182,6 +186,7 @@ final class Orm
         ?TenantSubtrees $tenants = null,
         private readonly ?\Closure $clock = null,
     ) {
+        $this->timestampStorage = TimestampStorage::for($connection);
         $this->tenancy = $tenants !== null;
         $this->tenants = $tenants !== null && $tenants->hierarchical() ? new TenantBounds($tenants) : null;
         $this->unscopedByFiber = new \WeakMap();
@@ -1816,7 +1821,15 @@ final class Orm
      */
     public function now(): \DateTimeImmutable
     {
-        return $this->clock === null ? new \DateTimeImmutable('now', new \DateTimeZone('UTC')) : ($this->clock)();
+        return $this->clock === null
+            ? \DateTimeImmutable::createFromInterface(CarbonImmutable::now('UTC'))
+            : ($this->clock)();
+    }
+
+    /** The form a moment is written in on this Orm's database (TimestampStorage). */
+    public function timestampStorage(): TimestampStorage
+    {
+        return $this->timestampStorage;
     }
 
     /** @return true a row was written, always */
@@ -1842,11 +1855,12 @@ final class Orm
         $now = $this->now();
         foreach ([$meta->createdAtProperty, $meta->updatedAtProperty] as $stamped) {
             if ($stamped !== null && !$this->isSet($model, $meta, $stamped)) {
-                $meta->set($model, $stamped, $now);
+                $meta->stamp($model, $stamped, $now);
             }
         }
 
-        $values = $meta->writeValues($model);
+        // Not attached yet, so told the form a moment is written in here.
+        $values = $meta->writeValues($model, $this->timestampStorage);
 
         if ($meta->tenantColumn !== null) {
             if (!$this->tenancy) {
@@ -1908,7 +1922,7 @@ final class Orm
         $restore = null;
         if ($updated !== null && !\array_key_exists($meta->columns[$updated], $changes)) {
             $previous = $this->isSet($model, $meta, $updated) ? [$updated => $meta->get($model, $updated)] : [];
-            $meta->set($model, $updated, $this->now());
+            $meta->stamp($model, $updated, $this->now());
             $changes[$meta->columns[$updated]] = $meta->writeValues($model)[$meta->columns[$updated]];
             $restore = static function () use ($model, $meta, $previous): void {
                 $meta->fill($model, $previous);

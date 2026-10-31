@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
+use Carbon\CarbonImmutable;
+
 /**
  * Compiled metadata for one model: table, columns, relations, a hydrator and
  * the hooks a save runs.
@@ -34,6 +36,7 @@ final class ModelMeta
      *        the ORM stamps on insert when nothing has set it (Orm::now())
      * @param string|null                  $updatedAtProperty an `updatedAt` column typed as a moment, which
      *        the ORM stamps on insert and on every update unless that write sets it
+     * @param list<string>                 $carbonStamps of those two, the ones typed CarbonImmutable
      */
     public function __construct(
         public readonly string $class,
@@ -56,8 +59,24 @@ final class ModelMeta
         private readonly array $afterSave = [],
         private readonly array $beforeDelete = [],
         private readonly array $afterDelete = [],
+        private readonly array $carbonStamps = [],
     ) {
         $this->running = new \WeakMap();
+    }
+
+    /**
+     * Sets a moment the ORM stamps -- createdAt, updatedAt -- to $now, as
+     * the class the property is typed: a CarbonImmutable for one typed so,
+     * a DateTimeImmutable for any other, in UTC either way.
+     */
+    public function stamp(Model $model, string $property, \DateTimeImmutable $now): void
+    {
+        $now = $now->setTimezone(new \DateTimeZone('UTC'));
+        $this->set($model, $property, match (true) {
+            \in_array($property, $this->carbonStamps, true) => CarbonImmutable::instance($now),
+            $now::class === \DateTimeImmutable::class => $now,
+            default => \DateTimeImmutable::createFromInterface($now),
+        });
     }
 
     /**
@@ -110,11 +129,15 @@ final class ModelMeta
      * The inverse of the hydrator. Foreign keys are not declared columns;
      * writeValues() adds them.
      *
+     * A moment is written in $storage's form; unsaid, in the form of the
+     * connection the model was read or saved through, or with its offset
+     * spelled out for a model that has been through none.
+     *
      * @return array<string, mixed> column => value
      */
-    public function columnValues(Model $model): array
+    public function columnValues(Model $model, ?TimestampStorage $storage = null): array
     {
-        return ($this->columnReader)($model);
+        return ($this->columnReader)($model, $storage ?? $model->orm()?->timestampStorage() ?? TimestampStorage::WithOffset);
     }
 
     /**
@@ -129,9 +152,9 @@ final class ModelMeta
      *
      * @return array<string, mixed> column => value
      */
-    public function writeValues(Model $model): array
+    public function writeValues(Model $model, ?TimestampStorage $storage = null): array
     {
-        $values = $this->columnValues($model);
+        $values = $this->columnValues($model, $storage);
 
         foreach ($this->relations as $property => $relation) {
             if ($relation->kind !== RelationKind::BelongsTo) {

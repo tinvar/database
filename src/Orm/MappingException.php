@@ -90,6 +90,19 @@ final class MappingException extends \RuntimeException
         );
     }
 
+    /**
+     * A column typed as a moment that changes in place -- Carbon\Carbon,
+     * DateTime, or an interface either implements -- which would change the
+     * column through whatever else holds it, as any mutable value would.
+     */
+    public static function mutableMoment(string $class, string $property, string $type): self
+    {
+        return new self(
+            "{$class}::\${$property} is typed {$type}, which can change in place. A model is immutable all the way down (ADR 0122), "
+            . 'so a moment is a Carbon\CarbonImmutable (or a DateTimeImmutable): type the property CarbonImmutable.',
+        );
+    }
+
     public static function mutableValue(string $class, string $property, string $valueClass, string $mutable): self
     {
         return new self(

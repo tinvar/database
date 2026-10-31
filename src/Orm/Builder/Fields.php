@@ -12,6 +12,7 @@ use Tinvar\Orm\Metadata;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\RelationKind;
+use Tinvar\Orm\TimestampStorage;
 use Tinvar\Support\Uuid;
 
 /**
@@ -58,7 +59,7 @@ final class Fields
      *        (Orm::now()), unless the row names it
      * @return array<string, mixed> column => stored value, or an Assignment update() writes
      */
-    public static function row(ModelMeta $meta, array $values, bool $inserting, ?string $tenant = null, bool $hooks = false, ?\DateTimeImmutable $now = null): array
+    public static function row(ModelMeta $meta, array $values, bool $inserting, ?string $tenant = null, bool $hooks = false, ?\DateTimeImmutable $now = null, TimestampStorage $storage = TimestampStorage::WithOffset): array
     {
         if ($hooks && !$inserting) {
             throw new \LogicException('#[BeforeSave] methods run on a whole new row, never on part of one.');
@@ -143,7 +144,7 @@ final class Fields
         }
 
         if ($hooks) {
-            return self::hooked($meta, $scratch, $stored, $tenant, $now);
+            return self::hooked($meta, $scratch, $stored, $tenant, $now, $storage);
         }
 
         // A copy reads the row as it was: but MySQL works a single-table
@@ -170,14 +171,14 @@ final class Fields
         if ($now !== null && ($inserting || $stored !== [] || $properties !== [])) {
             foreach ($inserting ? [$meta->createdAtProperty, $meta->updatedAtProperty] : [$meta->updatedAtProperty] as $stamped) {
                 if ($stamped !== null && !isset($properties[$stamped]) && !\array_key_exists($meta->columns[$stamped], $stored)) {
-                    $meta->set($scratch, $stamped, $now);
+                    $meta->stamp($scratch, $stamped, $now);
                     $properties[$stamped] = $meta->columns[$stamped];
                 }
             }
         }
 
         // Each through the model's column reader, as save() stores it.
-        $read = $meta->columnValues($scratch);
+        $read = $meta->columnValues($scratch, $storage);
         foreach ($properties as $column) {
             $stored[$column] = $read[$column];
         }
@@ -299,18 +300,18 @@ final class Fields
      * @param array<string, mixed> $stored what the row named, before the hooks
      * @return array<string, mixed>
      */
-    private static function hooked(ModelMeta $meta, Model $scratch, array $stored, ?string $tenant, ?\DateTimeImmutable $now): array
+    private static function hooked(ModelMeta $meta, Model $scratch, array $stored, ?string $tenant, ?\DateTimeImmutable $now, TimestampStorage $storage): array
     {
         $meta->beforeSave($scratch);
 
         // After the hooks, as save() stamps them: one a hook set is kept.
         foreach ([$meta->createdAtProperty, $meta->updatedAtProperty] as $stamped) {
             if ($now !== null && $stamped !== null && !new \ReflectionProperty($meta->class, $stamped)->isInitialized($scratch)) {
-                $meta->set($scratch, $stamped, $now);
+                $meta->stamp($scratch, $stamped, $now);
             }
         }
 
-        $row = $meta->columnValues($scratch);
+        $row = $meta->columnValues($scratch, $storage);
         foreach ($meta->relations as $property => $relation) {
             if ($relation->kind !== RelationKind::BelongsTo || !new \ReflectionProperty($meta->class, $property)->isInitialized($scratch)) {
                 continue;

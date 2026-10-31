@@ -90,7 +90,7 @@ it('stamps a new model\'s createdAt on save, from the Orm\'s clock', function ()
 
     expect($rack->createdAt->format('Y-m-d H:i:s'))->toBe('2026-10-28 09:30:00')
         ->and($orm->connection()->select('SELECT created_at FROM racks')[0]['created_at'])
-        ->toBe('2026-10-28 09:30:00.000000+00:00');
+        ->toBe('2026-10-28T09:30:00.000000Z');
 });
 
 it('keeps one the model set itself, and never moves it on an update', function () {
@@ -100,7 +100,7 @@ it('keeps one the model set itself, and never moves it on an update', function (
     $orm->save($rack);
 
     expect($orm->connection()->select('SELECT name, created_at FROM racks')[0])
-        ->toBe(['name' => 'R-2', 'created_at' => '2020-01-01 00:00:00.000000+00:00']);
+        ->toBe(['name' => 'R-2', 'created_at' => '2020-01-01T00:00:00.000000Z']);
 });
 
 it('stamps the rows a query inserts, which cannot name a private(set) one', function () {
@@ -108,7 +108,7 @@ it('stamps the rows a query inserts, which cannot name a private(set) one', func
     $orm->query(Rack::class)->insert([['name' => 'R-1'], ['name' => 'R-2']]);
 
     expect(array_column($orm->connection()->select('SELECT created_at FROM racks'), 'created_at'))
-        ->toBe(['2026-10-28 09:30:00.000000+00:00', '2026-10-28 09:30:00.000000+00:00'])
+        ->toBe(['2026-10-28T09:30:00.000000Z', '2026-10-28T09:30:00.000000Z'])
         ->and(fn () => $orm->query(Rack::class)->insert([['name' => 'R-3', 'createdAt' => new \DateTimeImmutable()]]))
         ->toThrow(\InvalidArgumentException::class, 'set by the model alone');
 });
@@ -118,7 +118,7 @@ it('stamps through a query insert that runs #[BeforeSave] methods', function () 
     $orm->query(HookedRack::class)->insert([['name' => '  R-1  ']]);
 
     expect($orm->connection()->select('SELECT name, created_at FROM racks')[0])
-        ->toBe(['name' => 'R-1', 'created_at' => '2026-10-28 09:30:00.000000+00:00']);
+        ->toBe(['name' => 'R-1', 'created_at' => '2026-10-28T09:30:00.000000Z']);
 });
 
 it('leaves a nullable one the model initialised, and one a query row names', function () {

@@ -1331,7 +1331,7 @@ final readonly class Query
 
         // Every row it reaches takes updatedAt, as save() stamps it, unless
         // $values sets it.
-        $set = Fields::row($this->meta, $values, inserting: false, now: $this->orm->now());
+        $set = Fields::row($this->meta, $values, inserting: false, now: $this->orm->now(), storage: $this->orm->timestampStorage());
         if ($set === []) {
             throw new \InvalidArgumentException('update() sets at least one field.');
         }
@@ -1579,7 +1579,7 @@ final readonly class Query
             if (!\is_array($row)) {
                 throw new \InvalidArgumentException("{$what} takes rows, each a map of field => value.");
             }
-            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant, hooks: $uniqueBy === null && $this->meta->hasBeforeSave(), now: $now);
+            $one = Fields::row($this->meta, $row, inserting: true, tenant: $tenant, hooks: $uniqueBy === null && $this->meta->hasBeforeSave(), now: $now, storage: $this->orm->timestampStorage());
             if (isset($one[$this->meta->idColumn])) {
                 $preset[] = (string) $one[$this->meta->idColumn];
             }
@@ -1728,7 +1728,7 @@ final readonly class Query
                     throw new \InvalidArgumentException("{$what} updates '{$name}' once.");
                 }
                 if (\is_string($key)) {
-                    $assignment = Fields::row($this->meta, [$name => $entry], inserting: false)[$column] ?? null;
+                    $assignment = Fields::row($this->meta, [$name => $entry], inserting: false, storage: $this->orm->timestampStorage())[$column] ?? null;
                     if (!$assignment instanceof Assignment) {
                         throw new \LogicException("'{$name}' resolved to no change of its own column.");
                     }
@@ -2194,7 +2194,7 @@ final readonly class Query
             throw new \InvalidArgumentException('An aggregate compared with NULL matches no group; compare with a value.');
         }
 
-        return clone($this, ['havings' => [...$this->havings, [$this->measure($function, $column), $sql, self::value($value), $or]]]);
+        return clone($this, ['havings' => [...$this->havings, [$this->measure($function, $column), $sql, $this->value($value), $or]]]);
     }
 
     /** @return static */
@@ -2215,7 +2215,7 @@ final readonly class Query
             throw new \LogicException("havingColumn() compares a group's column, and '{$ref->column}' is a key: narrow the rows with where().");
         }
 
-        return clone($this, ['havings' => [...$this->havings, [$ref, $sql, self::value($value), $or]]]);
+        return clone($this, ['havings' => [...$this->havings, [$ref, $sql, $this->value($value), $or]]]);
     }
 
     private function measure(Aggregate $function, string|\BackedEnum|null $column): Measure
@@ -2526,7 +2526,7 @@ final readonly class Query
         }
 
         $ref = Identifiers::column($this->meta, $column);
-        $bound = self::value($value);
+        $bound = $this->value($value);
 
         // A key is a UUID the ORM minted, so anything else names no row --
         // answered without asking the database, which on Postgres refuses
@@ -2571,7 +2571,7 @@ final readonly class Query
             if ($value === null) {
                 throw new \InvalidArgumentException('An IN list cannot hold NULL, which matches nothing; use whereNull().');
             }
-            $one = self::value($value);
+            $one = $this->value($value);
             if ($key && !(\is_string($one) && Uuid::isValid($one))) {
                 continue;   // names no row, as in where()
             }
@@ -2608,7 +2608,7 @@ final readonly class Query
             if ($value === null) {
                 throw new \InvalidArgumentException('A raw condition binds no NULL; write IS NULL.');
             }
-            $values[] = self::value($value);
+            $values[] = $this->value($value);
         }
 
         return $this->adding(Condition::raw($or, $tokens, $values));
@@ -2733,7 +2733,7 @@ final readonly class Query
      *
      * @return int|float|string
      */
-    private static function value(mixed $value): int|float|string
+    private function value(mixed $value): int|float|string
     {
         if (\is_float($value) && !is_finite($value)) {
             throw new \InvalidArgumentException('A query compares with finite numbers.');
@@ -2743,10 +2743,9 @@ final readonly class Query
             \is_int($value), \is_float($value), \is_string($value) => $value,
             \is_bool($value) => $value ? 1 : 0,
             $value instanceof \BackedEnum => $value->value,
-            // As the ORM writes one (Metadata::compileColumnReader()).
-            $value instanceof \DateTimeInterface => \DateTimeImmutable::createFromInterface($value)
-                ->setTimezone(new \DateTimeZone('UTC'))
-                ->format('Y-m-d H:i:s.uP'),
+            // As the ORM writes one on this database (TimestampStorage), so
+            // a comparison of SQLite's text is a comparison of instants.
+            $value instanceof \DateTimeInterface => $this->orm->timestampStorage()->format($value),
             $value instanceof Model => self::keyOf($value),
             default => throw new \InvalidArgumentException(
                 'A query compares with a scalar, a backed enum, a date or a saved model, not ' . get_debug_type($value) . '.',

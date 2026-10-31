@@ -61,7 +61,7 @@ it('writes UTC, whatever zone the value carries', function () {
     $orm->save(event(new \DateTimeImmutable('2026-01-01 10:00:00', new \DateTimeZone('Asia/Tokyo'))));
 
     expect($orm->connection()->select('SELECT at FROM events')[0]['at'])
-        ->toBe('2026-01-01 01:00:00.000000+00:00');
+        ->toBe('2026-01-01T01:00:00.000000Z');
 });
 
 it('reads a stored time with no offset as UTC, not the default zone', function () {

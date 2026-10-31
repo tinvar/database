@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
+use Carbon\Carbon;
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 use Tinvar\Orm\Attributes\AfterDelete;
 use Tinvar\Orm\Attributes\AfterSave;
 use Tinvar\Orm\Attributes\BeforeDelete;
@@ -28,8 +31,19 @@ final class Metadata
     /** @var array<class-string<Model>, ModelMeta> */
     private static array $compiled = [];
 
-    /** Classes of PHP's own that never change once made: their state is no property reflection sees. */
-    private const array IMMUTABLE_CLASSES = [\DateTimeImmutable::class, \DateTimeZone::class, 'BcMath\Number'];
+    /**
+     * Classes that never change once made, taken at their word since their
+     * state is no property reflection sees as readonly: PHP's own, and
+     * Carbon's immutable moment, whose every change returns a copy (ADR 0144).
+     */
+    private const array IMMUTABLE_CLASSES = [\DateTimeImmutable::class, \DateTimeZone::class, 'BcMath\Number', CarbonImmutable::class];
+
+    /**
+     * Moments that change in place, by type: refused as a column's type, with
+     * the immutable one to use instead. CarbonInterface is here because
+     * mutable Carbon implements it, and a property typed by it takes one.
+     */
+    private const array MUTABLE_MOMENTS = [\DateTime::class, \DateTimeInterface::class, Carbon::class, CarbonInterface::class];
 
     /** How deep a value object's own values are followed before it is refused. */
     private const int IMMUTABLE_DEPTH = 32;
@@ -176,21 +190,25 @@ final class Metadata
             afterSave: self::compileHooks($reflection, AfterSave::class),
             beforeDelete: self::compileHooks($reflection, BeforeDelete::class),
             afterDelete: self::compileHooks($reflection, AfterDelete::class),
+            carbonStamps: array_values(array_filter(
+                [$createdAt, $updatedAt],
+                static fn (?string $stamped): bool => $stamped !== null
+                    && (string) $reflection->getProperty($stamped)->getType() === CarbonImmutable::class,
+            )),
         );
     }
 
     /**
      * Whether a column property holds a moment the ORM can stamp: typed
-     * DateTimeImmutable, or the interface it implements, and nothing else --
-     * a string or an int column named createdAt or updatedAt is the model's
-     * own to fill.
+     * DateTimeImmutable or CarbonImmutable, and nothing else -- a string or
+     * an int column named createdAt or updatedAt is the model's own to fill.
      */
     private static function isTimestamp(\ReflectionProperty $property): bool
     {
         $type = $property->getType();
 
         return $type instanceof \ReflectionNamedType
-            && \in_array($type->getName(), [\DateTimeImmutable::class, \DateTimeInterface::class], true);
+            && \in_array($type->getName(), [\DateTimeImmutable::class, CarbonImmutable::class], true);
     }
 
     /**
@@ -333,15 +351,20 @@ final class Metadata
      * object is compared by its stored form: one left alone, or replaced by
      * an equal one, writes nothing.
      *
+     * A moment is written in UTC, to the microsecond, in the form the
+     * dialect keeps one ($storage, TimestampStorage). 'Y-m-d H:i:s' wrote
+     * the wall-clock time in whatever zone the value carried and dropped the
+     * fraction, so a New York time came back hours off and truncated.
+     *
      * @param class-string<Model> $class
      * @param list<array{string, string, (\Closure(mixed): mixed)|null, (\Closure(object): mixed)|null}> $plan
-     * @return \Closure(Model): array<string, mixed>
+     * @return \Closure(Model, TimestampStorage): array<string, mixed>
      */
     private static function compileColumnReader(string $class, array $plan): \Closure
     {
-        /** @var \Closure(Model): array<string, mixed> $bound */
+        /** @var \Closure(Model, TimestampStorage): array<string, mixed> $bound */
         $bound = \Closure::bind(
-            static function (Model $model) use ($plan): array {
+            static function (Model $model, TimestampStorage $storage) use ($plan): array {
                 $values = [];
                 foreach ($plan as [$property, $column, $_cast, $store]) {
                     $reflection = new \ReflectionProperty($model, $property);
@@ -352,17 +375,7 @@ final class Metadata
                     $value = $model->{$property};
                     $values[$column] = match (true) {
                         $store !== null && $value !== null => $store($value),
-                        // In UTC, to the microsecond, with the offset spelled
-                        // out. 'Y-m-d H:i:s' wrote the wall-clock time in
-                        // whatever zone the value carried and dropped the
-                        // fraction, so a New York time came back hours off
-                        // and truncated. The offset is what a timestamptz
-                        // column needs to take the instant rather than the
-                        // session zone's reading of it; a timestamp column
-                        // ignores it, and gets the UTC time.
-                        $value instanceof \DateTimeInterface => \DateTimeImmutable::createFromInterface($value)
-                            ->setTimezone(new \DateTimeZone('UTC'))
-                            ->format('Y-m-d H:i:s.uP'),
+                        $value instanceof \DateTimeInterface => $storage->format($value),
                         $value instanceof \BackedEnum => $value->value,
                         \is_array($value) => json_encode($value, JSON_THROW_ON_ERROR),
                         \is_bool($value) => $value ? 1 : 0,
@@ -558,6 +571,14 @@ final class Metadata
 
         if (!$type instanceof \ReflectionNamedType) {
             return [null, null];
+        }
+
+        // A moment that can change in place would change the column through
+        // whatever else holds it, as any mutable value would (ADR 0122).
+        foreach (self::MUTABLE_MOMENTS as $mutable) {
+            if (strcasecmp($type->getName(), $mutable) === 0 || is_subclass_of($type->getName(), \DateTime::class)) {
+                throw MappingException::mutableMoment($class, $property->getName(), $type->getName());
+            }
         }
 
         if (enum_exists($type->getName())) {
@@ -967,6 +988,12 @@ final class Metadata
             \DateTimeImmutable::class => static fn (mixed $v): \DateTimeImmutable => $v instanceof \DateTimeImmutable
                 ? $v
                 : (new \DateTimeImmutable((string) $v, new \DateTimeZone('UTC')))->setTimezone(new \DateTimeZone('UTC')),
+            // Carbon's, likewise, and in UTC whatever it was read as: the
+            // constructor, never parse(), which would read a relative time
+            // -- 'tomorrow' -- against a clock a test had moved.
+            CarbonImmutable::class => static fn (mixed $v): CarbonImmutable => $v instanceof \DateTimeInterface
+                ? CarbonImmutable::instance($v)->setTimezone('UTC')
+                : new CarbonImmutable((string) $v, 'UTC')->setTimezone('UTC'),
             'mixed' => null,
             default => throw MappingException::unsupportedColumnType($class, $property->getName(), $type->getName()),
         };
