@@ -6,6 +6,7 @@
   "require": {
     "php": ">=8.5",
     "ext-json": "*",
+    "nesbot/carbon": "^3.15.1",
     "tinvar/support": "0.4.*"
   },
   "require-dev": {
