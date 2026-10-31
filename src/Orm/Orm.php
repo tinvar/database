@@ -189,6 +189,14 @@ final class Orm
                 ? [$this->identityMap->tenant(), $this->isUnscoped(), $this->subtreeInForce() ?? []]
                 : ['', false, []]);
         }
+
+        // And each statement shown to the Orm before it is sent: raw SQL
+        // that may write inside a widened read names what it may reach, or
+        // is refused (guardStatement(), ADR 0122). On the connection, not on
+        // what connection() hands out, so one held from anywhere is guarded.
+        if ($connection instanceof GuardsStatements) {
+            $connection->guardStatements($this->guardStatement(...));
+        }
     }
 
     /**
@@ -196,10 +204,87 @@ final class Orm
      * no tenant predicate of the ORM's. While flagRawStatements() is on, it
      * is handed out through RawStatements, which reports each statement
      * that names a tenant table.
+     *
+     * A connection that guards its statements (GuardsStatements) shows
+     * guardStatement() each one sent from outside the ORM, however it was held:
+     * inside withinSubtree() or acrossTenants(), with a tenantsEnteredBy()
+     * open, a raw write names the tenants it may have reached, or is
+     * refused (ADR 0122).
      */
     public function connection(): Connection
     {
         return $this->rawStatements ?? $this->connection;
+    }
+
+    /**
+     * A statement about to be sent on the connection, from the guard the
+     * Orm installs on one that guards its statements (GuardsStatements).
+     *
+     * The ORM follows its own writes to the rows they reach and names those
+     * rows' tenants (noteRowTenants(), ADR 0106); raw SQL names no rows to
+     * follow. So where an announcement is open (tenantsEnteredBy()) and
+     * reads are widened, a statement sent from outside the ORM that may
+     * write -- every execute(), and a select() RawSql::writes() says may --
+     * has what it may have reached named whole, or is refused: failing
+     * closed, never announced as the tenant in force alone (ADR 0122):
+     *
+     *   - inside withinSubtree(), every tenant of the subtree, which is what
+     *     the widening let it reach -- on Postgres the policy holds it
+     *     there; elsewhere it is what the code asked to reach;
+     *   - inside acrossTenants(), every tenant there is, which nothing can
+     *     name: refused. Write through the ORM, which names the tenants of
+     *     the rows it reaches; or as each tenant, with actAs(); or outside
+     *     the widening, where the tenant in force is named.
+     *
+     * Nothing is asked where nothing would change: no announcement open --
+     * a job, a command -- or reads held to the tenant in force.
+     */
+    private function guardStatement(string $sql, bool $select): void
+    {
+        if ($this->entered === [] || !$this->isWidened() || self::sentByOrm() || ($select && !RawSql::writes($sql))) {
+            return;
+        }
+
+        $subtree = $this->subtreeInForce();
+        if ($subtree === null) {
+            throw new \LogicException(
+                'Raw SQL that may write was sent through connection() inside acrossTenants(), where it may reach any tenant\'s rows, and '
+                . 'nothing can name them to the caches that hold what it changed. Write through the ORM, which names the tenants of the '
+                . 'rows it reaches; as each tenant, with actAs(); or outside acrossTenants(). (' . RawSql::redacted(mb_substr($sql, 0, 120)) . ')',
+            );
+        }
+
+        foreach ($this->entered as $frame => $tenants) {
+            foreach ($subtree as $tenant) {
+                if (!\in_array($tenant, $tenants, true)) {
+                    $this->entered[$frame][] = $tenant;
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether the statement the guard is shown was sent by the ORM itself
+     * -- the Orm, its query builder, its scheduler -- which names the
+     * tenants of what it writes: read off who called the connection's
+     * select() or execute(), the outermost connection called (RawStatements
+     * is one, over the Orm's). Asked only inside a widened read with an
+     * announcement open, so the walk costs nothing elsewhere. Code of the
+     * application's own reached from inside the ORM -- a hook -- is its
+     * own caller, and is guarded.
+     */
+    private static function sentByOrm(): bool
+    {
+        $frames = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 24);
+        $caller = null;
+        foreach ($frames as $i => $frame) {
+            $class = $frame['class'] ?? null;
+            if ($class !== null && \in_array($frame['function'], ['select', 'execute'], true) && is_a($class, Connection::class, true)) {
+                $caller = $frames[$i + 1]['class'] ?? '';
+            }
+        }
+
+        return $caller !== null && str_starts_with($caller, __NAMESPACE__ . '\\') && !is_a($caller, Connection::class, true);
     }
 
     /**

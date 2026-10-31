@@ -116,3 +116,13 @@ describe('the flag', function () {
             ->and($orm->connection())->toBe($orm->statements());
     });
 });
+
+// ADR 0122: what a select() may write, for the guard a widened read runs.
+it('reads a statement as one that may write by any word a write holds, and by text it cannot read', function () {
+    expect(RawSql::writes('SELECT id, name FROM shelves WHERE note = ?'))->toBeFalse()
+        ->and(RawSql::writes("SELECT 'delete' AS word -- update"))->toBeFalse()
+        ->and(RawSql::writes('WITH gone AS (DELETE FROM shelves RETURNING id) SELECT COUNT(*) FROM gone'))->toBeTrue()
+        ->and(RawSql::writes('SELECT * INTO copied FROM shelves'))->toBeTrue()
+        ->and(RawSql::writes('select 1; update shelves set name = 1'))->toBeTrue()
+        ->and(RawSql::writes('SELECT 1 /*! DELETE FROM shelves */'))->toBeTrue();
+});

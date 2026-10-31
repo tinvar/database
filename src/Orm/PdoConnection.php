@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm;
 
-final class PdoConnection implements Connection, TenantSetting, NamesDriver, ObservesStatements
+final class PdoConnection implements Connection, TenantSetting, NamesDriver, ObservesStatements, GuardsStatements
 {
     /**
      * The most statements the log keeps between resets; the count goes on.
@@ -25,6 +25,9 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
 
     /** @var (\Closure(string, int, int, ?\Throwable): void)|null told of each statement once it is answered (ObservesStatements) */
     private ?\Closure $observer = null;
+
+    /** @var (\Closure(string, bool): void)|null shown each statement before it is sent (GuardsStatements) */
+    private ?\Closure $guard = null;
 
     /** Savepoints open inside the outermost transaction; names the next one. */
     private int $savepoints = 0;
@@ -287,6 +290,9 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
 
     public function select(string $sql, array $bindings = []): array
     {
+        if ($this->guard !== null) {
+            ($this->guard)($sql, true);
+        }
         $this->record($sql);
 
         /** @var list<array<string, mixed>> $rows */
@@ -304,6 +310,9 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
 
     public function execute(string $sql, array $bindings = []): int
     {
+        if ($this->guard !== null) {
+            ($this->guard)($sql, false);
+        }
         $this->record($sql);
 
         $statement = fn (): int => $this->run(function () use ($sql, $bindings): int {
@@ -794,6 +803,11 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
     {
         $this->tenantScope = $scope;
         $this->tenantSetting = null;
+    }
+
+    public function guardStatements(?\Closure $guard): void
+    {
+        $this->guard = $guard;
     }
 
     public function clearTenantSetting(): void

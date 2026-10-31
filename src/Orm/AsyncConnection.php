@@ -47,7 +47,7 @@ use function Amp\async;
  * cleared -- and the request waits for the clearing. The pool and its
  * sessions outlive the request; nothing the request told them does.
  */
-final class AsyncConnection implements ConcurrentConnection, TenantSetting, ObservesStatements
+final class AsyncConnection implements ConcurrentConnection, TenantSetting, ObservesStatements, GuardsStatements
 {
     /** The most statements the log keeps between resets, as PdoConnection's. */
     public const int MAX_LOGGED = PdoConnection::MAX_LOGGED;
@@ -77,6 +77,9 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
 
     /** @var (\Closure(string, int, int, ?\Throwable): void)|null told of each statement once it is answered (ObservesStatements) */
     private ?\Closure $observer = null;
+
+    /** @var (\Closure(string, bool): void)|null shown each statement before it is sent (GuardsStatements) */
+    private ?\Closure $guard = null;
 
     private readonly Pool $pool;
 
@@ -180,6 +183,9 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
 
     public function select(string $sql, array $bindings = []): array
     {
+        if ($this->guard !== null) {
+            ($this->guard)($sql, true);
+        }
         $this->record($sql);
 
         /** @var list<array<string, mixed>> $rows */
@@ -190,6 +196,9 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
 
     public function execute(string $sql, array $bindings = []): int
     {
+        if ($this->guard !== null) {
+            ($this->guard)($sql, false);
+        }
         $this->record($sql);
 
         /** @var int $affected */
@@ -721,6 +730,11 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
     public function followTenant(\Closure $scope): void
     {
         $this->tenantScope = $scope;
+    }
+
+    public function guardStatements(?\Closure $guard): void
+    {
+        $this->guard = $guard;
     }
 
     /**

@@ -22,6 +22,12 @@ final class RawSql
     /** The longest a statement is kept to be shown, after its literals are taken out. */
     public const int MAX_SHOWN = 2000;
 
+    /** The words a statement that writes holds: writes() reads any of them, anywhere, as one. */
+    private const array WRITE_WORDS = [
+        'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'REPLACE', 'UPSERT', 'TRUNCATE', 'DROP', 'ALTER', 'CREATE', 'RENAME',
+        'GRANT', 'REVOKE', 'COPY', 'CALL', 'EXEC', 'EXECUTE', 'DO', 'LOAD', 'HANDLER', 'IMPORT', 'INTO',
+    ];
+
     /** A string literal, a quoted name, a comment, or a bare name: what tokens() reads. */
     private const string TOKENS = <<<'REGEX'
         ~
@@ -69,6 +75,28 @@ final class RawSql
         }
 
         return array_keys($found);
+    }
+
+    /**
+     * Whether $sql may write: a word outside its strings and comments that
+     * a statement writing rows, or the schema, starts with or holds -- a
+     * DELETE inside a WITH included -- or text the pattern cannot read.
+     * For what select() is sent: execute() is taken to write whatever it
+     * says. A function a SELECT calls that writes rows is not seen.
+     */
+    public static function writes(string $sql): bool
+    {
+        $names = self::names($sql);
+        if ($names === null) {
+            return true;
+        }
+        foreach ($names as $name) {
+            if (\in_array(strtoupper($name), self::WRITE_WORDS, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
