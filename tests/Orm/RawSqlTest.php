@@ -42,6 +42,13 @@ describe('RawSql', function () {
         'a backslash in a literal' => ["SELECT '\\'', x FROM shelves WHERE a = ''", ['shelves', 'app.items']],
         'a dollar quote, a name on MySQL' => ['SELECT id AS $x$ FROM shelves ORDER BY $x$', ['shelves', 'app.items']],
         '-- with no space, no comment on MySQL' => ["SELECT 5--1 FROM shelves\n", ['shelves', 'app.items']],
+        // A bracket is a quoted name on SQL Server and an array on Postgres,
+        // whose ARRAY[...] holds SQL: read inside, not taken for one name.
+        'inside a Postgres array' => ['SELECT ARRAY[(SELECT name FROM shelves)]', ['shelves']],
+        'inside an array in ANY()' => ['SELECT 1 FROM brands WHERE id = ANY(ARRAY[(SELECT shelf_id FROM items)])', ['app.items']],
+        'beside an array subscript' => ['SELECT (ARRAY[1,2])[1], name FROM shelves', ['shelves']],
+        'a bracketed name' => ['SELECT * FROM [shelves]', ['shelves']],
+        'a literal inside an array it cannot read' => ["SELECT ARRAY['\\'', 1] FROM brands", ['shelves', 'app.items']],
     ]);
 
     it('shows a statement with its literals taken out, cut short', function () {
@@ -124,5 +131,7 @@ it('reads a statement as one that may write by any word a write holds, and by te
         ->and(RawSql::writes('WITH gone AS (DELETE FROM shelves RETURNING id) SELECT COUNT(*) FROM gone'))->toBeTrue()
         ->and(RawSql::writes('SELECT * INTO copied FROM shelves'))->toBeTrue()
         ->and(RawSql::writes('select 1; update shelves set name = 1'))->toBeTrue()
-        ->and(RawSql::writes('SELECT 1 /*! DELETE FROM shelves */'))->toBeTrue();
+        ->and(RawSql::writes('SELECT 1 /*! DELETE FROM shelves */'))->toBeTrue()
+        ->and(RawSql::writes('SELECT ARRAY[(SELECT 1 FROM (DELETE FROM shelves RETURNING 1) x)]'))->toBeTrue()
+        ->and(RawSql::writes('SELECT (ARRAY[1, 2])[1]'))->toBeFalse();
 });

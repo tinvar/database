@@ -150,6 +150,25 @@ final class RawSql
             if ($unread) {
                 return null;
             }
+
+            // A bracket is a quoted name on SQLite and SQL Server, and
+            // Postgres's array -- ARRAY[(SELECT ... FROM orders)] -- whose
+            // inside is SQL. Read as both: the name, and the names inside.
+            // One that holds a quote or a comment may end inside it, at a
+            // `]` the pattern took for its close, so it is not read at all.
+            $quoted = $match['quoted'][0] ?? null;
+            if ($quoted !== null && $quoted[0] === '[') {
+                $inner = substr($quoted, 1, str_ends_with($quoted, ']') ? -1 : null);
+                if (preg_match('~[\'"`$]|--|/\*~', $inner) === 1) {
+                    return null;
+                }
+                $inside = self::names($inner);
+                if ($inside === null) {
+                    return null;
+                }
+                array_push($names, ...$inside);
+            }
+
             $name = match (true) {
                 ($match['bare'][0] ?? null) !== null => $text,
                 ($match['quoted'][0] ?? null) !== null => self::unquote($text),
