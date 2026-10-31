@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Orm;
 
 use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 
 /**
  * Carbon's now(), following a clock of the application's.
@@ -28,13 +29,34 @@ final class CarbonClock
 {
     private static bool $following = false;
 
-    /** @param (\Closure(): \DateTimeInterface)|null $now the clock; null for the system's time */
+    /** Whether the clock is being read, for a Carbon made while it is. */
+    private static bool $reading = false;
+
+    /**
+     * A clock may make a Carbon itself -- the shop's makes one from its
+     * seconds -- and Carbon asks its hook while it makes any, so the clock
+     * would be asked again, without end. While it is being read, Carbon is
+     * answered with the system's time, as though the hook were not there:
+     * which a Carbon made from a timestamp or a written date never reads.
+     *
+     * @param (\Closure(): \DateTimeInterface)|null $now the clock; null for the system's time
+     */
     public static function follow(?\Closure $now): void
     {
         self::$following = $now !== null;
-        CarbonImmutable::setTestNow($now === null
-            ? null
-            : static fn (): CarbonImmutable => CarbonImmutable::instance($now())->setTimezone('UTC'));
+        // Carbon hands the hook the system's time, which is the answer to a
+        // Carbon made while the clock is read.
+        CarbonImmutable::setTestNow($now === null ? null : static function (CarbonInterface $system) use ($now): CarbonInterface {
+            if (self::$reading) {
+                return $system;
+            }
+            self::$reading = true;
+            try {
+                return CarbonImmutable::instance($now())->setTimezone('UTC');
+            } finally {
+                self::$reading = false;
+            }
+        });
     }
 
     /** Whether Carbon follows a clock, rather than the system's time. */

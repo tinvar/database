@@ -233,6 +233,14 @@ describe('the clock', function () {
             ->and(CarbonClock::following())->toBeFalse();
     });
 
+    // Carbon asks its hook as it makes any Carbon, the clock's own included.
+    it('follows a clock that makes a Carbon itself, rather than asking it again without end', function () {
+        CarbonClock::follow(static fn (): CarbonImmutable => CarbonImmutable::createFromTimestampUTC(1_800_000_000));
+
+        expect(CarbonImmutable::now()->toIso8601ZuluString())->toBe('2027-01-15T08:00:00Z')
+            ->and(CarbonImmutable::now()->subDay()->toIso8601ZuluString())->toBe('2027-01-14T08:00:00Z');
+    });
+
     it('reads the clock again each time, so a clock moved later moves Carbon with it', function () {
         $now = 1_800_000_000;
         CarbonClock::follow(static function () use (&$now): \DateTimeImmutable {
