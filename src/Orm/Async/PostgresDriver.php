@@ -133,10 +133,15 @@ final readonly class PostgresDriver implements Driver
     {
         return match (true) {
             $failure instanceof QueryError => $failure,
+            // The server ending the session answers as a statement's error
+            // would -- admin_shutdown, crash_shutdown, cannot_connect_now, or
+            // a connection exception -- and libpq has closed the socket by
+            // the time it is read: the session failed, and goes.
             $failure instanceof PostgresQueryError => new QueryError(
-                self::sqlState($failure),
+                $state = self::sqlState($failure),
                 7,
                 $failure->getMessage(),
+                sessionFailed: str_starts_with($state, '08') || \in_array($state, ['57P01', '57P02', '57P03'], true),
             ),
             // The session failed rather than the statement: gone, closed, or
             // answering what the client could not read.
