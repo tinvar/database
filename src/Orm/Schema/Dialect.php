@@ -7,6 +7,7 @@ namespace Tinvar\Orm\Schema;
 use Tinvar\Orm\Connection;
 use Tinvar\Orm\Migrations\MigrationRefused;
 use Tinvar\Orm\NamesDriver;
+use Tinvar\Orm\OnDelete;
 
 /**
  * What one database calls the builder's types and statements, what it can
@@ -24,6 +25,21 @@ abstract class Dialect
         'PRIMARY', 'KEY', 'NOT', 'NULL', 'UNIQUE', 'CHECK', 'DEFAULT', 'COLLATE', 'REFERENCES', 'GENERATED', 'ALWAYS',
         'AS', 'STORED', 'VIRTUAL', 'CONSTRAINT', 'ON', 'CONFLICT', 'AUTOINCREMENT', 'AUTO_INCREMENT', 'FOREIGN', 'SET',
         'COMMENT', 'INVISIBLE', 'VISIBLE', 'SRID',
+    ];
+
+    /**
+     * Words a column may be named that SQLite, Postgres or MySQL reserves,
+     * and so would read as the word, unquoted, in a condition the builder
+     * writes (allowedValues()).
+     */
+    private const array KEYWORDS = [
+        'ALL', 'AND', 'ANY', 'AS', 'ASC', 'BETWEEN', 'BY', 'CASE', 'CAST', 'CHECK', 'COLLATE', 'COLUMN', 'CONSTRAINT', 'CREATE',
+        'CROSS', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'CURRENT_USER', 'DEFAULT', 'DESC', 'DISTINCT', 'DIV', 'DO',
+        'ELSE', 'END', 'EXCEPT', 'EXISTS', 'FALSE', 'FETCH', 'FOR', 'FOREIGN', 'FROM', 'FULL', 'GRANT', 'GROUP', 'HAVING', 'IN',
+        'INDEX', 'INNER', 'INSERT', 'INTERSECT', 'INTERVAL', 'INTO', 'IS', 'JOIN', 'KEY', 'LEFT', 'LIKE', 'LIMIT', 'MATCH', 'MOD',
+        'NATURAL', 'NOT', 'NULL', 'OFFSET', 'ON', 'OR', 'ORDER', 'OUTER', 'PRIMARY', 'RANGE', 'RANK', 'READ', 'REFERENCES',
+        'REGEXP', 'RIGHT', 'ROW', 'ROWS', 'SELECT', 'SET', 'SOME', 'TABLE', 'THEN', 'TO', 'TRUE', 'UNION', 'UNIQUE', 'UPDATE',
+        'USER', 'USING', 'VALUES', 'WHEN', 'WHERE', 'WINDOW', 'WITH',
     ];
 
     /** The driver name PDO reports for this database: sqlite, pgsql or mysql. */
@@ -301,7 +317,7 @@ abstract class Dialect
             if (!$column->changing) {
                 continue;
             }
-            if ($column->primary || $column->unique || $column->check !== null || $column->references !== null) {
+            if ($column->primary || $column->unique || $column->check !== null || $column->allowed !== null || $column->references !== null) {
                 throw new \LogicException(
                     "Column '{$column->name}': change() declares a column's type, nullability, default and case anew; "
                     . 'a primary key, unique index, check or foreign key is added or dropped on its own.',
@@ -505,6 +521,9 @@ abstract class Dialect
         if ($column->unique && $inlineUnique) {
             $sql .= ' UNIQUE';
         }
+        if ($column->allowed !== null) {
+            $sql .= ' CHECK (' . $this->allowedValues($column->name, $column->allowed) . ')';
+        }
         if ($column->check !== null) {
             $sql .= " CHECK ({$column->check})";
         }
@@ -536,12 +555,34 @@ abstract class Dialect
         \assert($column->references !== null);
         [$table, $key] = $column->references;
 
+        // Accepted by every database when the key is made, and failing the
+        // very delete it was meant to allow, when that delete comes.
+        if ($column->onDelete === OnDelete::SetNull->value && !$column->nullable) {
+            throw new \LogicException("Column '{$column->name}': ON DELETE SET NULL needs a column that takes NULL; declare it nullable().");
+        }
+
         return \sprintf(
             'REFERENCES %s (%s)%s',
             $this->quote($table),
             $this->quote($key),
             $column->onDelete === null ? '' : " ON DELETE {$column->onDelete}",
         );
+    }
+
+    /**
+     * The condition of an enum column's CHECK: `status IN ('placed', ...)`,
+     * each value a literal as this dialect writes one. The column is
+     * written bare, as a check() is, so the constraint reads as one written
+     * by hand; quoted only where its name is a keyword the condition would
+     * misread.
+     *
+     * @param non-empty-list<string|int> $values
+     */
+    protected function allowedValues(string $column, array $values): string
+    {
+        $name = \in_array(strtoupper($column), self::KEYWORDS, true) ? $this->quote($column) : $column;
+
+        return $name . ' IN (' . implode(', ', array_map($this->literal(...), $values)) . ')';
     }
 
     protected function literal(int|float|string|bool|Expression|null $value): string

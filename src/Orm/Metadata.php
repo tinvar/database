@@ -474,12 +474,12 @@ final class Metadata
      * @param class-string<Model> $class
      * @return value-of<RelationMeta::DELETE_ACTIONS>|null
      */
-    private static function deleteAction(string $class, \ReflectionProperty $property, ?string $onDelete): ?string
+    private static function deleteAction(string $class, \ReflectionProperty $property, OnDelete|string|null $onDelete): ?string
     {
         if ($onDelete === null) {
             return null;
         }
-        $action = strtoupper(trim((string) preg_replace('/\s+/', ' ', $onDelete)));
+        $action = $onDelete instanceof OnDelete ? $onDelete->value : strtoupper(trim((string) preg_replace('/\s+/', ' ', $onDelete)));
         foreach (RelationMeta::DELETE_ACTIONS as $known) {
             if ($action !== $known) {
                 continue;
@@ -492,7 +492,7 @@ final class Metadata
         }
 
         throw new MappingException(
-            "{$class}::\${$property->getName()}: '{$onDelete}' is no ON DELETE action; name one of " . implode(', ', array_map(strtolower(...), RelationMeta::DELETE_ACTIONS)) . '.',
+            "{$class}::\${$property->getName()}: '" . (\is_string($onDelete) ? $onDelete : $action) . "' is no ON DELETE action; name one of " . implode(', ', array_map(strtolower(...), RelationMeta::DELETE_ACTIONS)) . '.',
         );
     }
 

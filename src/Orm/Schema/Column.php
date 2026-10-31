@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm\Schema;
 
+use Tinvar\Orm\OnDelete;
+
 /**
  * One column as a migration declares it, in the builder's own types: each
  * dialect says what a type is called on its database (see Dialect).
@@ -40,6 +42,9 @@ final class Column
     public private(set) bool $caseInsensitive = false;
 
     public private(set) ?string $check = null;
+
+    /** @var non-empty-list<string|int>|null the only values the column may hold: a backed enum's (Table::enum()) */
+    public private(set) ?array $allowed = null;
 
     /** @var array{string, string}|null the table and column this one references */
     public private(set) ?array $references = null;
@@ -142,17 +147,52 @@ final class Column
         return $this;
     }
 
-    /** What a delete of the referenced row does to this one: cascade, set null, restrict or no action. */
-    public function onDelete(string $action): self
+    /**
+     * What a delete of the referenced row does to this one: cascade, set
+     * null, restrict or no action, as an OnDelete or a word for one.
+     */
+    public function onDelete(OnDelete|string $action): self
     {
-        $action = strtoupper(trim($action));
-        if (!\in_array($action, ['CASCADE', 'SET NULL', 'RESTRICT', 'NO ACTION'], true)) {
-            throw new \InvalidArgumentException("'{$action}' is not an ON DELETE action.");
-        }
+        $action = OnDelete::parse($action);
         if ($this->references === null) {
             throw new \LogicException("Column '{$this->name}' has no references() for onDelete() to act on.");
         }
-        $this->onDelete = $action;
+        $this->onDelete = $action->value;
+
+        return $this;
+    }
+
+    /** The row goes when the row it references is deleted. */
+    public function cascadeOnDelete(): self
+    {
+        return $this->onDelete(OnDelete::Cascade);
+    }
+
+    /** The key becomes NULL when the row it references is deleted: for a nullable() column. */
+    public function nullOnDelete(): self
+    {
+        return $this->onDelete(OnDelete::SetNull);
+    }
+
+    /** A delete of the row it references is refused while this row references it. */
+    public function restrictOnDelete(): self
+    {
+        return $this->onDelete(OnDelete::Restrict);
+    }
+
+    /**
+     * Holds the column to these values alone, with a CHECK each dialect
+     * writes as `column IN (...)`: Table::enum()'s, from a backed enum's
+     * cases. A check() of the column's own is kept beside it.
+     *
+     * @param list<string|int> $values
+     */
+    public function oneOf(array $values): self
+    {
+        if ($values === []) {
+            throw new \InvalidArgumentException("Column '{$this->name}' is held to a list of one value or more.");
+        }
+        $this->allowed = $values;
 
         return $this;
     }

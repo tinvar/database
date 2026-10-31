@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm\Schema;
 
+use Tinvar\Orm\Metadata;
+use Tinvar\Orm\Model;
+use Tinvar\Orm\OnDelete;
+use Tinvar\Support\Str;
+
 /**
  * A table as a migration describes it: the columns and indexes of a new
  * one (Schema::create()), or the changes to an existing one
@@ -12,8 +17,9 @@ namespace Tinvar\Orm\Schema;
  *
  *     $schema->create('orders', function (Table $table): void {
  *         $table->uuid('id')->primary();
- *         $table->uuid('customer_id')->references('customers');
- *         $table->string('placed_at');
+ *         $table->foreign(Customer::class);
+ *         $table->enum('status', OrderStatus::class);
+ *         $table->timestamp('placed_at');
  *         $table->index(['customer_id', 'placed_at DESC']);
  *     });
  */
@@ -99,10 +105,98 @@ final class Table
         return $this->add(new Column($name, 'json'));
     }
 
-    /** An instant: timestamptz on Postgres, so the offset the ORM writes is kept as the instant it names. */
+    /**
+     * An instant, which a DateTimeImmutable or CarbonImmutable property
+     * holds, stored in UTC as each dialect keeps one best (ADR 0144):
+     * timestamptz on Postgres, which keeps the instant the ORM's offset
+     * names; DATETIME(6) on MySQL, written as UTC wall-clock time, so no
+     * session zone converts it; ISO 8601 text on SQLite, at a fixed width
+     * in UTC, which sorts as it reads.
+     */
     public function timestamp(string $name): Column
     {
         return $this->add(new Column($name, 'timestamp'));
+    }
+
+    /**
+     * created_at and updated_at, the instants the ORM stamps a model's
+     * createdAt and updatedAt with: required, since every insert stamps
+     * both. Added to a table that has rows, they are nullable until a
+     * backfill fills them.
+     */
+    public function timestamps(bool $nullable = false): void
+    {
+        $this->timestamp('created_at')->nullable($nullable);
+        $this->timestamp('updated_at')->nullable($nullable);
+    }
+
+    /**
+     * A foreign key to a model's table, all of it read from the model: the
+     * column is named for the model (`order_id` for Order, `order_line_id`
+     * for OrderLine), as a #[BelongsTo] names the key it reads by, unless
+     * $column says otherwise; typed as the model's key is; and references
+     * its #[Table] and key column.
+     *
+     *     $table->foreign(Order::class)->cascadeOnDelete();
+     *     $table->foreign(Customer::class, 'buyer_id', onDelete: OnDelete::SetNull, nullable: true);
+     *
+     * The model is read when the migration runs, as it is then: a model
+     * whose table is later renamed gives the new name to a database
+     * migrated afresh, which is the name the rename's own migration leaves.
+     *
+     * @param class-string<Model> $model
+     */
+    public function foreign(string $model, ?string $column = null, ?OnDelete $onDelete = null, bool $nullable = false): Column
+    {
+        if (!is_subclass_of($model, Model::class)) {
+            throw new \InvalidArgumentException("{$model} is not a Model, so it has no table for a foreign key to reference.");
+        }
+        $meta = Metadata::for($model);
+        $key = new \ReflectionProperty($model, $meta->idProperty)->getType();
+        $type = match ($key instanceof \ReflectionNamedType ? $key->getName() : null) {
+            'string' => 'uuid',
+            'int' => 'bigInteger',
+            default => throw new \InvalidArgumentException("{$model}'s key is neither a string nor an int, so foreign() cannot type a column for it."),
+        };
+
+        $added = $this->add(new Column($column ?? Str::snake(Str::shortName($model)) . '_id', $type))
+            ->nullable($nullable)
+            ->references($meta->table, $meta->idColumn);
+
+        return $onDelete === null ? $added : $added->onDelete($onDelete);
+    }
+
+    /**
+     * A column holding one of a backed enum's values, and only those: a
+     * string for a string-backed enum, an integer for an int-backed one,
+     * with a CHECK listing the cases' values -- a CHECK rather than
+     * MySQL's ENUM type, so the column is the same on every dialect and a
+     * new case is a change to a constraint, not to the column (ADR 0144).
+     *
+     *     $table->enum('status', OrderStatus::class)->default(OrderStatus::Placed->value);
+     *
+     * The cases are read when the migration runs. One added to the enum
+     * later needs a migration of its own to widen the check: the database
+     * refuses its value until then, and make:migration says so.
+     *
+     * @param class-string<\BackedEnum> $enum
+     */
+    public function enum(string $name, string $enum): Column
+    {
+        if (!is_subclass_of($enum, \BackedEnum::class)) {
+            throw new \InvalidArgumentException("{$enum} is not a backed enum, so it has no values for '{$name}' to hold.");
+        }
+        $values = array_map(static fn (\BackedEnum $case): int|string => $case->value, $enum::cases());
+        if ($values === []) {
+            throw new \InvalidArgumentException("{$enum} has no cases, so '{$name}' could hold nothing.");
+        }
+
+        if ((string) new \ReflectionEnum($enum)->getBackingType() === 'int') {
+            return $this->integer($name)->oneOf($values);
+        }
+        $longest = max(array_map(static fn (int|string $value): int => mb_strlen((string) $value), $values));
+
+        return $this->string($name, max(255, $longest))->oneOf($values);
     }
 
     public function date(string $name): Column
