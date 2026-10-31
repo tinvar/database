@@ -268,8 +268,10 @@ describe('ADR 0123 on MySQL', function () {
         }, indexes(...));
     });
 
-    // The guard is an error under every SQL mode: a NULL into a NOT NULL
-    // column would be a warning and a write outside strict mode.
+    // The guard is an error under every SQL mode, on MySQL and MariaDB: a
+    // NULL into a NOT NULL column would be a warning and a write outside
+    // strict mode, and invalid JSON a warning and a NULL on MariaDB. Run
+    // with TINVAR_TEST_MYSQL_DSN naming either server.
     it('refuses another tenant\'s row with the server out of strict mode', function () {
         Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
             $fixture->pdo->exec("SET SESSION sql_mode = 'ANSI_QUOTES'");
@@ -278,7 +280,7 @@ describe('ADR 0123 on MySQL', function () {
 
             expect(fn () => $orm->actAs('acme', static fn (): int => $orm->query(KeyedShelf::class)->upsert([
                 ['name' => 'Oscar', 'position' => 1, 'note' => null, 'secret' => 's-b', 'aisle' => $a1],
-            ], 'name', update: ['position', 'note'])))->toThrow(\PDOException::class, 'json')
+            ], 'name', update: ['position', 'note'])))->toThrow(\PDOException::class, 'Subquery returns more than 1 row')
                 ->and(shelves($orm, 'globex'))->toBe(['Delta' => [1, 'g'], 'Echo' => [2, null]])
                 ->and(array_keys(shelves($orm, 'acme')))->not->toContain('Oscar');
         }, indexes(...));

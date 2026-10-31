@@ -1777,11 +1777,13 @@ final readonly class Query
      * key, as its unique index does -- and not a row this upsert inserted
      * itself, which is two new rows the collation takes for one key, and
      * refused as Postgres refuses to update a row twice. Any other row is an
-     * error that rolls the statement back before it changes anything: not a
-     * NULL into a NOT NULL column, which a server outside strict mode turns
-     * into a warning and a write, but invalid JSON, an error under every SQL
-     * mode, made of the row's key so no server can work it out before it is
-     * asked for (ADR 0123). Postgres and SQLite name their conflict target,
+     * error that rolls the statement back before it changes anything: a
+     * scalar subquery answering two rows, an error under every SQL mode on
+     * MySQL and on MariaDB alike, and made of the row's key so no server can
+     * work it out before the branch is taken. Not a NULL into a NOT NULL
+     * column, which a server outside strict mode turns into a warning and a
+     * write; nor invalid JSON, which MariaDB answers with a warning and a
+     * NULL (ADR 0123). Postgres and SQLite name their conflict target,
      * so a collision on any other index is an error there already.
      *
      * @param non-empty-list<string> $target
@@ -1822,7 +1824,7 @@ final readonly class Query
                     array_push($bindings, ...$minted);
                 }
                 $terms[] = "{$tenant} = IF(" . implode(' AND ', $same) . ", {$existing}{$tenant}, "
-                    . "JSON_EXTRACT(CONCAT('tinvar: an upsert reached a row that is not its tenant''s by its key ', {$existing}{$id}), '\$'))";
+                    . "(SELECT {$existing}{$id} UNION ALL SELECT {$existing}{$id}))";
             }
             foreach ($set as $column) {
                 $terms[] = $assign($column, 'VALUES(' . Identifiers::quote($column) . ')');
