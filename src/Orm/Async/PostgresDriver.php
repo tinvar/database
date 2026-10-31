@@ -73,29 +73,21 @@ final readonly class PostgresDriver implements Driver
         return $tenant . "\0" . ($across ? 'on' : 'off') . "\0" . RowLevelSecurity::arrayLiteral($subtree);
     }
 
-    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): int
+    public function tell(PostgresConnection|MysqlConnection $link, int $backend, string $tenant, bool $across, array $subtree, bool $readOnly): int
     {
         return self::backendOf($link->execute(
-            'SELECT set_config($1, $2, false), set_config($3, $4, false), set_config($5, $6, false), set_config($7, $8, false), '
-                . 'pg_backend_pid() AS pid',
-            [
-                RowLevelSecurity::TENANT_SETTING, $tenant,
-                RowLevelSecurity::ACROSS_SETTING, $across ? 'on' : 'off',
-                RowLevelSecurity::SUBTREE_SETTING, RowLevelSecurity::arrayLiteral($subtree),
-                'default_transaction_read_only', $readOnly ? 'on' : 'off',
-            ],
+            // Numbered in the order they appear: the read-only setting's
+            // in the list, before the backend expected in the FROM.
+            RowLevelSecurity::tellOnBackend('$1', '$2', '$3', '$5', '$4'),
+            [$tenant, $across ? 'on' : 'off', RowLevelSecurity::arrayLiteral($subtree), $readOnly ? 'on' : 'off', $backend],
         ));
     }
 
-    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): int
+    public function tellTenant(PostgresConnection|MysqlConnection $link, int $backend, string $tenant, bool $across, array $subtree): int
     {
         return self::backendOf($link->execute(
-            'SELECT set_config($1, $2, false), set_config($3, $4, false), set_config($5, $6, false), pg_backend_pid() AS pid',
-            [
-                RowLevelSecurity::TENANT_SETTING, $tenant,
-                RowLevelSecurity::ACROSS_SETTING, $across ? 'on' : 'off',
-                RowLevelSecurity::SUBTREE_SETTING, RowLevelSecurity::arrayLiteral($subtree),
-            ],
+            RowLevelSecurity::tellOnBackend('$1', '$2', '$3', '$4'),
+            [$tenant, $across ? 'on' : 'off', RowLevelSecurity::arrayLiteral($subtree), $backend],
         ));
     }
 

@@ -821,9 +821,27 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
 
     public function clearTenantSetting(): void
     {
-        // A session already refused (SessionMoved) runs nothing more, a
-        // clear included: the reset a worker ends a request with goes on.
-        if ($this->driver !== 'pgsql' || !$this->tenantSettingTouched || $this->sessionMoved !== null) {
+        if ($this->driver !== 'pgsql') {
+            return;
+        }
+
+        // A session already refused (SessionMoved) tells no tenant, but is
+        // still cleared: whichever server session the pooler hands this to
+        // is left holding none, for whoever it is handed to next. Best
+        // effort, as the worker's own reset goes on whatever this answers.
+        if ($this->sessionMoved !== null) {
+            try {
+                $this->pdo->exec(
+                    "SELECT set_config('" . RowLevelSecurity::TENANT_SETTING . "', '', false), "
+                        . "set_config('" . RowLevelSecurity::ACROSS_SETTING . "', 'off', false), "
+                        . "set_config('" . RowLevelSecurity::SUBTREE_SETTING . "', '', false)",
+                );
+            } catch (\Throwable) {
+            }
+
+            return;
+        }
+        if (!$this->tenantSettingTouched) {
             return;
         }
 
@@ -847,7 +865,10 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
      * Session-wide holds only while every statement runs on the session
      * told. Behind a pooler in transaction or statement mode it may not, so
      * each tell asks which backend answered, in the same round trip, and a
-     * backend other than the first is refused (SessionMoved).
+     * backend other than the first is refused (SessionMoved). The settings
+     * are made only on the backend expected, in that same statement; any
+     * other is cleared instead, so a server session the pooler hands on is
+     * left holding no tenant of ours, nor the one it held.
      */
     private function applyTenantSetting(): void
     {
@@ -871,17 +892,8 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
             return;
         }
 
-        $statement = $this->pdo->prepare(
-            'SELECT set_config(?, ?, false), set_config(?, ?, false), set_config(?, ?, false), pg_backend_pid()',
-        );
-        $statement->execute([
-            RowLevelSecurity::TENANT_SETTING,
-            $tenant,
-            RowLevelSecurity::ACROSS_SETTING,
-            $across ? 'on' : 'off',
-            RowLevelSecurity::SUBTREE_SETTING,
-            $tenants,
-        ]);
+        $statement = $this->pdo->prepare(RowLevelSecurity::tellOnBackend('?', '?', '?', '?'));
+        $statement->execute([$tenant, $across ? 'on' : 'off', $tenants, $this->tenantBackend]);
         $backend = $statement->fetchColumn(3);
         $statement->closeCursor();
         $backend = is_numeric($backend) ? (int) $backend : -1;

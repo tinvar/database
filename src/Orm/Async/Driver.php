@@ -55,10 +55,13 @@ interface Driver
      * refuses writes, session-wide, in one round trip -- answering which
      * backend took it, where the tenant is a session setting a pooler could
      * have handed to another (SessionMoved), and null where it is not.
+     * Where it is, the tenant is set only if that backend is $backend, the
+     * session's own, and cleared on any other, in the same statement: a
+     * server session handed on is left holding neither ours nor its own.
      *
      * @param list<string> $subtree
      */
-    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): ?int;
+    public function tell(PostgresConnection|MysqlConnection $link, int $backend, string $tenant, bool $across, array $subtree, bool $readOnly): ?int;
 
     /**
      * Tells a session inside a transaction its tenant alone: whether it
@@ -67,7 +70,7 @@ interface Driver
      *
      * @param list<string> $subtree
      */
-    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): ?int;
+    public function tellTenant(PostgresConnection|MysqlConnection $link, int $backend, string $tenant, bool $across, array $subtree): ?int;
 
     /** The statement that begins a transaction, read-only or not. */
     public function begin(bool $readOnly): string;

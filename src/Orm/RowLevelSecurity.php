@@ -122,6 +122,39 @@ final class RowLevelSecurity
         )) . '}';
     }
 
+    /**
+     * The statement a connection tells its session's tenant with: the three
+     * settings, set session-wide only when the backend answering is the one
+     * expected, and cleared on any other -- in the same statement, so on
+     * that backend whatever a pooler does next -- answering which backend it
+     * was as `pid`. The parameters are the placeholders, in the driver's
+     * own spelling, for the tenant, 'on' or 'off', the subtree's array
+     * literal and the backend expected, an integer or null for any (the
+     * first tell, before one is known); $readOnly, when given, is one for
+     * 'on' or 'off' to set default_transaction_read_only to as well, left
+     * alone on a backend not expected.
+     *
+     * A tripwire's second half (ADR 0140): the tell a transaction pooler
+     * hands to another server session neither leaves ours there for
+     * whichever client gets it next, nor leaves the tenant it held.
+     *
+     * @internal PdoConnection's and the async drivers', inside this package
+     */
+    public static function tellOnBackend(string $tenant, string $across, string $subtree, string $expected, ?string $readOnly = null): string
+    {
+        $setting = static fn (string $name, string $value, string $cleared): string => "CASE WHEN here.expected IS NULL OR here.pid = here.expected THEN set_config('{$name}', {$value}, false) "
+            . "ELSE set_config('{$name}', '{$cleared}', false) END";
+
+        return 'SELECT ' . $setting(self::TENANT_SETTING, $tenant, '') . ' AS tenant, '
+            . $setting(self::ACROSS_SETTING, $across, 'off') . ' AS across, '
+            . $setting(self::SUBTREE_SETTING, $subtree, '') . ' AS subtree, '
+            . ($readOnly === null ? '' : "CASE WHEN here.expected IS NULL OR here.pid = here.expected THEN set_config('default_transaction_read_only', {$readOnly}, false) END AS read_only, ")
+            . 'here.pid AS pid '
+            // One pg_backend_pid() for the whole statement: a subquery with
+            // a volatile call in its list is not folded into the outer one.
+            . "FROM (SELECT pg_backend_pid() AS pid, CAST({$expected} AS integer) AS expected) AS here";
+    }
+
     /** A plain or schema-qualified identifier, quoted. */
     private static function identifier(string $name, string $what): string
     {

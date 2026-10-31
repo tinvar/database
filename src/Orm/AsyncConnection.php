@@ -374,7 +374,9 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
      * Refuses a tell another backend than the session's answered: a pooler
      * in transaction or statement mode between this pool and Postgres, which
      * may run the next statement on a session told another worker's tenant
-     * (SessionMoved). Every tell after is refused too, on any session.
+     * (SessionMoved). Every tell after is refused too, on any session. The
+     * driver set nothing on that other backend and cleared what it held, in
+     * the tell itself (Driver::tell()).
      */
     private function sameBackend(Session $session, ?int $backend): void
     {
@@ -400,7 +402,7 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
         if (!$session->inTransaction) {
             if ($session->tenant !== $key || $session->readOnly !== $readOnly) {
                 $session->tenant = null;
-                $this->sameBackend($session, $this->send($lease, fn (PostgresConnection|MysqlConnection $link): ?int => $this->driver->tell($link, $tenant, $across, $subtree, $readOnly)));
+                $this->sameBackend($session, $this->send($lease, fn (PostgresConnection|MysqlConnection $link): ?int => $this->driver->tell($link, $session->backend, $tenant, $across, $subtree, $readOnly)));
                 $session->tenant = $key;
                 $session->readOnly = $readOnly;
             }
@@ -410,7 +412,7 @@ final class AsyncConnection implements ConcurrentConnection, TenantSetting, Obse
 
         if ($session->tenant !== $key) {
             $session->tenant = null;
-            $this->sameBackend($session, $this->send($lease, fn (PostgresConnection|MysqlConnection $link): ?int => $this->driver->tellTenant($link, $tenant, $across, $subtree)));
+            $this->sameBackend($session, $this->send($lease, fn (PostgresConnection|MysqlConnection $link): ?int => $this->driver->tellTenant($link, $session->backend, $tenant, $across, $subtree)));
             $session->tenant = $key;
         }
 

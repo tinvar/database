@@ -66,14 +66,14 @@ final readonly class MySqlDriver implements Driver
         return '';
     }
 
-    public function tell(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree, bool $readOnly): ?int
+    public function tell(PostgresConnection|MysqlConnection $link, int $backend, string $tenant, bool $across, array $subtree, bool $readOnly): ?int
     {
         $link->query('SET SESSION transaction_read_only = ' . ($readOnly ? 'ON' : 'OFF'));
 
         return null;
     }
 
-    public function tellTenant(PostgresConnection|MysqlConnection $link, string $tenant, bool $across, array $subtree): ?int
+    public function tellTenant(PostgresConnection|MysqlConnection $link, int $backend, string $tenant, bool $across, array $subtree): ?int
     {
         return null;
     }
