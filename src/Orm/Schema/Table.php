@@ -107,7 +107,7 @@ final class Table
 
     /**
      * An instant, which a DateTimeImmutable or CarbonImmutable property
-     * holds, stored in UTC as each dialect keeps one best (ADR 0144):
+     * holds, stored in UTC as each dialect keeps one best (ADR 0145):
      * timestamptz on Postgres, which keeps the instant the ORM's offset
      * names; DATETIME(6) on MySQL, written as UTC wall-clock time, so no
      * session zone converts it; ISO 8601 text on SQLite, at a fixed width
@@ -171,7 +171,7 @@ final class Table
      * string for a string-backed enum, an integer for an int-backed one,
      * with a CHECK listing the cases' values -- a CHECK rather than
      * MySQL's ENUM type, so the column is the same on every dialect and a
-     * new case is a change to a constraint, not to the column (ADR 0144).
+     * new case is a change to a constraint, not to the column (ADR 0145).
      *
      *     $table->enum('status', OrderStatus::class)->default(OrderStatus::Placed->value);
      *

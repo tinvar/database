@@ -7,7 +7,7 @@ namespace Tinvar\Orm;
 /**
  * The form a moment is written to its column in, on each database: always
  * the instant in UTC, to the microsecond, spelled as the column's type
- * keeps it best (ADR 0144).
+ * keeps it best (ADR 0145).
  *
  *   - SQLite has no time type: the column is TEXT, so the moment is ISO
  *     8601 with a Z, at one width -- `2026-10-31T12:00:00.000000Z` -- and

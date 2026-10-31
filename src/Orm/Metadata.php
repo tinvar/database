@@ -34,7 +34,7 @@ final class Metadata
     /**
      * Classes that never change once made, taken at their word since their
      * state is no property reflection sees as readonly: PHP's own, and
-     * Carbon's immutable moment, whose every change returns a copy (ADR 0144).
+     * Carbon's immutable moment, whose every change returns a copy (ADR 0145).
      */
     private const array IMMUTABLE_CLASSES = [\DateTimeImmutable::class, \DateTimeZone::class, 'BcMath\Number', CarbonImmutable::class];
 
