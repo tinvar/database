@@ -243,7 +243,9 @@ describe('the clock', function () {
         CarbonClock::follow(null);
 
         expect($followed)->toBe(['2031-02-03 04:05:06.700000', '2031-02-03 04:05:06.700000', 'UTC'])
-            ->and(CarbonImmutable::now()->year)->toBe((int) date('Y'))
+            // The system's time again: within seconds of it, which a year
+            // compared with date('Y') was not on New Year's Eve's last tick.
+            ->and(abs(CarbonImmutable::now()->getTimestamp() - time()))->toBeLessThan(5)
             ->and(CarbonClock::following())->toBeFalse();
     });
 
