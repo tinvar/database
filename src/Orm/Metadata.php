@@ -16,6 +16,7 @@ use Tinvar\Orm\Attributes\Column;
 use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
+use Tinvar\Orm\Attributes\Audited;
 use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Orm\Attributes\Unique;
 use Tinvar\Support\KnownAttributes;
@@ -168,6 +169,7 @@ final class Metadata
             throw MappingException::noId($class);
         }
         $tenantColumn = $tenant?->column;
+        $audited = Audited::on($reflection);
 
         return new ModelMeta(
             class: $class,
@@ -195,6 +197,15 @@ final class Metadata
                 static fn (?string $stamped): bool => $stamped !== null
                     && (string) $reflection->getProperty($stamped)->getType() === CarbonImmutable::class,
             )),
+            audited: $audited === null ? null : AuditedColumns::compile(
+                $class,
+                $audited,
+                $columns,
+                $relations,
+                $columns[$idProperty],
+                $tenantColumn,
+                array_values(array_filter([$createdAt, $updatedAt], static fn (?string $stamp): bool => $stamp !== null)),
+            ),
         );
     }
 

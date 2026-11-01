@@ -80,6 +80,12 @@ final class Orm
     private ?RawStatements $rawStatements = null;
 
     /**
+     * Where each change to an #[Audited] model is recorded (ADR 0150), or
+     * null for nowhere -- and then such a model is not written at all.
+     */
+    private ?ModelChanges $changes = null;
+
+    /**
      * Depth of acrossTenants() calls outside any fiber.
      *
      * Kept per fiber as well, below: "Context is fiber-local, so a suspended
@@ -225,6 +231,74 @@ final class Orm
         if ($connection instanceof GuardsStatements) {
             $connection->guardStatements($this->guardStatement(...));
         }
+    }
+
+    /**
+     * Records each change to an #[Audited] model with $changes (ADR 0150):
+     * the application's audit log, which registers itself here when it is
+     * built. Null records nothing, and an audited model is then refused at
+     * its first write rather than written unrecorded.
+     */
+    public function recordChangesWith(?ModelChanges $changes): void
+    {
+        $this->changes = $changes;
+    }
+
+    /** Whether changes to #[Audited] models are recorded anywhere. */
+    public function recordsChanges(): bool
+    {
+        return $this->changes !== null;
+    }
+
+    /**
+     * Refuses a write of an #[Audited] model with nowhere to record it:
+     * failing closed, since a change made unrecorded is the one an audit
+     * log exists to catch.
+     *
+     * @internal for the query builder's writes too
+     */
+    public function refuseUnrecorded(ModelMeta $meta): void
+    {
+        if ($meta->audited !== null && $this->changes === null) {
+            throw new \LogicException(
+                "{$meta->class} is #[Audited], and this Orm records changes nowhere, so it is not written. Build the application's "
+                . 'audit log over this Orm (new Tinvar\\Audit\\AuditLog($orm, ...)), which registers itself with recordChangesWith(), '
+                . 'or take #[Audited] off the model.',
+            );
+        }
+    }
+
+    /**
+     * Records a change to an #[Audited] model's row, from the row as it was
+     * and as it is -- each column => value as the database stores it --
+     * inside the transaction the write is in. Nothing for a model that is
+     * not audited, nor for an update that changed nothing recorded.
+     *
+     * @internal for the query builder's writes too
+     * @param array<string, mixed>|null $before null for a row created
+     * @param array<string, mixed>|null $after null for a row deleted
+     * @param list<string>|null $columns the columns an update set; null for every one
+     */
+    public function recordChange(ModelMeta $meta, ModelChangeKind $kind, string $id, ?array $before, ?array $after, ?array $columns = null): void
+    {
+        if ($meta->audited === null) {
+            return;
+        }
+        $this->refuseUnrecorded($meta);
+        \assert($this->changes !== null);
+
+        $changes = $meta->audited->diff($before, $after, $kind === ModelChangeKind::Updated ? $columns : null);
+        if ($kind === ModelChangeKind::Updated && $changes === []) {
+            return;
+        }
+
+        $tenant = null;
+        if ($meta->tenantColumn !== null) {
+            $held = $after[$meta->tenantColumn] ?? $before[$meta->tenantColumn] ?? null;
+            $tenant = \is_string($held) && $held !== '' ? $held : $this->tenant();
+        }
+
+        $this->changes->record(new ModelChange($kind, $meta->class, $id, $tenant, $changes));
     }
 
     /**
@@ -1841,16 +1915,30 @@ final class Orm
         $this->refuseWrite('save()');
 
         $meta = Metadata::for($model::class);
-        if (!$meta->hasAfterSave()) {
+        if (!$meta->hasAfterSave() && $meta->audited === null) {
             $meta->beforeSave($model);
             $model->isPersisted() ? $this->update($model, $meta) : $this->insert($model, $meta);
 
             return $model;
         }
+        $this->refuseUnrecorded($meta);
 
+        // An audited model's change is recorded in the transaction it is
+        // made in, so the two commit or roll back together (ADR 0150).
         $this->transaction(function () use ($model, $meta): void {
             $meta->beforeSave($model);
-            if ($model->isPersisted() ? $this->update($model, $meta) : $this->insert($model, $meta)) {
+            $persisted = $model->isPersisted();
+            $before = $model->snapshot();
+            $pending = $persisted ? array_keys($model->changes()) : null;
+            if ($persisted ? $this->update($model, $meta) : $this->insert($model, $meta)) {
+                $this->recordChange(
+                    $meta,
+                    $persisted ? ModelChangeKind::Updated : ModelChangeKind::Created,
+                    $meta->keyOf($model),
+                    $persisted ? $before : null,
+                    $model->snapshot(),
+                    $pending,
+                );
                 $meta->afterSave($model);
             }
         });
@@ -2057,19 +2145,28 @@ final class Orm
         $this->refuseWrite('delete()');
 
         $meta = Metadata::for($model::class);
-        if (!$meta->hasDeleteHooks()) {
+        if (!$meta->hasDeleteHooks() && $meta->audited === null) {
             $this->deleteRow($model, $meta);
 
             return;
         }
+        $this->refuseUnrecorded($meta);
 
         if (!$model->isPersisted()) {
             throw MissingRow::notPersisted($meta->class);
         }
         $this->transaction(function () use ($model, $meta): void {
             $meta->beforeDelete($model);
-            if ($this->deleteRow($model, $meta, mustMatch: true) === 0) {
+            $before = $model->snapshot();
+            $hooks = $meta->hasDeleteHooks();
+            $deleted = $this->deleteRow($model, $meta, mustMatch: $hooks);
+            if ($deleted === 0 && $hooks) {
                 throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
+            }
+            // A delete that removed nothing -- the row gone already, or out
+            // of the tenant's reach -- changed nothing to record.
+            if ($deleted > 0) {
+                $this->recordChange($meta, ModelChangeKind::Deleted, $meta->keyOf($model), $before, null);
             }
             $meta->afterDelete($model);
         });

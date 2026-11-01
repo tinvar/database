@@ -73,8 +73,10 @@ final readonly class TenantScoped
      * @template T of object
      * @param \ReflectionClass<T> $class
      * @return list<\ReflectionClass<object>>
+     *
+     * @internal read by Audited too, so the two attributes agree on what a model's hierarchy is
      */
-    private static function hierarchy(\ReflectionClass $class): array
+    public static function hierarchy(\ReflectionClass $class): array
     {
         $out = [];
         $seen = [];

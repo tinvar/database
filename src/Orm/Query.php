@@ -1326,6 +1326,7 @@ final readonly class Query
         }
         $this->orm->refuseWriteOf('update()');
         $this->refuseHooks('update()');
+        $this->orm->refuseUnrecorded($this->meta);
         $this->assertRowsWritten('update()');
         $this->assertOffsetLimited();
 
@@ -1354,6 +1355,10 @@ final readonly class Query
             }
             $assignments = implode(', ', $assignments);
 
+            // An audited model's rows as they were, under the lock the keys
+            // were read with, to record what the UPDATE changed (ADR 0150).
+            $before = $this->meta->audited === null ? [] : $this->rowsOf($ids);
+
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
@@ -1365,6 +1370,15 @@ final readonly class Query
 
             $this->orm->noteRowTenants($this->meta, $ids);
             $this->followUpdate($ids, $set);
+
+            if ($this->meta->audited !== null) {
+                $after = $this->rowsOf($ids);
+                foreach ($ids as $id) {
+                    if (isset($before[$id], $after[$id])) {
+                        $this->orm->recordChange($this->meta, ModelChangeKind::Updated, $id, $before[$id], $after[$id], array_keys($set));
+                    }
+                }
+            }
 
             return $count;
         });
@@ -1390,6 +1404,7 @@ final readonly class Query
         }
         $this->orm->refuseWriteOf('delete()');
         $this->refuseDeleteHooks();
+        $this->orm->refuseUnrecorded($this->meta);
         $this->assertRowsWritten('delete()');
         $this->assertOffsetLimited();
 
@@ -1397,11 +1412,16 @@ final readonly class Query
             $ids = $this->idsToWrite();
             // Read while the rows are there to read.
             $this->orm->noteRowTenants($this->meta, $ids);
+            $before = $this->meta->audited === null ? [] : $this->rowsOf($ids);
 
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
                 $count += $this->orm->statements()->execute('DELETE FROM ' . Identifiers::quote($this->meta->table) . " WHERE {$where}", $bindings);
+            }
+
+            foreach ($before as $id => $row) {
+                $this->orm->recordChange($this->meta, ModelChangeKind::Deleted, (string) $id, $row, null);
             }
 
             foreach ($ids as $id) {
@@ -1558,7 +1578,9 @@ final readonly class Query
         // row it updates is one it never read (ADR 0073).
         if ($uniqueBy !== null) {
             $this->refuseHooks($what);
+            $this->refuseAuditedUpsert($what);
         }
+        $this->orm->refuseUnrecorded($this->meta);
         if ($this->conditions !== [] || $this->orders !== [] || $this->limit !== null || $this->offset !== null || $this->with !== []
             || $this->groups !== [] || $this->havings !== [] || $this->distinct || $this->measures !== [] || $this->unionAll !== null) {
             throw new \LogicException("{$what} reads nothing: call it on the query a model starts, not on one narrowed.");
@@ -1634,6 +1656,9 @@ final readonly class Query
                 return $this->followUpserted($stored, $columns, $target, $set, $tenant, $existed);
             }
             $inserted = $this->followInserted($stored, $columns);
+            foreach ($stored as $row) {
+                $this->orm->recordChange($this->meta, ModelChangeKind::Created, (string) $row[$this->meta->idColumn], null, $row);
+            }
             if ($this->meta->hasAfterSave()) {
                 $this->afterInserted($stored);
             }
@@ -2001,6 +2026,41 @@ final readonly class Query
                 . 'writes rows it never read, whole, to run them on, and would write past them. Save each row, or insert() new ones.',
             );
         }
+    }
+
+    /**
+     * Refuses an upsert of an #[Audited] model: it cannot say which rows it
+     * inserted and which it changed, nor from what, without reading each as
+     * save() would -- and a change it could not record is not made
+     * (ADR 0150).
+     */
+    private function refuseAuditedUpsert(string $what): void
+    {
+        if ($this->meta->audited !== null) {
+            throw new \LogicException(
+                "{$this->class} is #[Audited], and {$what} writes rows without reading what they held, so their changes could not be "
+                . 'recorded. Save each model, or insert() new rows and update() the ones there.',
+            );
+        }
+    }
+
+    /**
+     * These rows, each by its key: what an audited write reads before and
+     * after itself.
+     *
+     * @param list<string> $ids
+     * @return array<string, array<string, mixed>>
+     */
+    private function rowsOf(array $ids): array
+    {
+        $rows = [];
+        foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+            foreach ($this->rowsByKey($chunk) as $row) {
+                $rows[(string) $row[$this->meta->idColumn]] = $row;
+            }
+        }
+
+        return $rows;
     }
 
     /**

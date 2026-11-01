@@ -37,6 +37,8 @@ final class ModelMeta
      * @param string|null                  $updatedAtProperty an `updatedAt` column typed as a moment, which
      *        the ORM stamps on insert and on every update unless that write sets it
      * @param list<string>                 $carbonStamps of those two, the ones typed CarbonImmutable
+     * @param AuditedColumns|null          $audited what the audit log records of the model's rows, for an
+     *        #[Audited] one; null for a model whose changes are recorded nowhere (ADR 0150)
      */
     public function __construct(
         public readonly string $class,
@@ -60,6 +62,7 @@ final class ModelMeta
         private readonly array $beforeDelete = [],
         private readonly array $afterDelete = [],
         private readonly array $carbonStamps = [],
+        public readonly ?AuditedColumns $audited = null,
     ) {
         $this->running = new \WeakMap();
     }
