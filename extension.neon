@@ -9,7 +9,7 @@
 #       - vendor/tinvar/database/extension.neon
 #   parameters:
 #       tinvar:
-#           models: [App\Models\Rack]
+#           models: [App\Database\Models\Rack]
 #           tenantTables: []
 parameters:
     tinvar:
