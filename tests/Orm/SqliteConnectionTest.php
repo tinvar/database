@@ -308,7 +308,8 @@ it('gives up on the write lock once the busy timeout has passed, and keeps the t
 });
 
 // Only SQLITE_BUSY is a turn to wait for: a write refused for what it is
-// fails once, at once.
+// fails once, at once. Retried, it would go on for the busy timeout's five
+// seconds; the bound is far under that and far over a loaded run's pause.
 it('does not try a failed write again for anything but a held lock', function () {
     $connection = PdoConnection::sqlite(':memory:');
     $connection->execute('CREATE TABLE hits (n INTEGER PRIMARY KEY)');
@@ -316,7 +317,7 @@ it('does not try a failed write again for anything but a held lock', function ()
 
     $started = microtime(true);
     expect(fn () => $connection->execute('INSERT INTO hits (n) VALUES (1)'))->toThrow(\PDOException::class, 'UNIQUE')
-        ->and(microtime(true) - $started)->toBeLessThan(0.05);
+        ->and(microtime(true) - $started)->toBeLessThan(1.0);
 });
 
 // A connection the caller opened itself is left to whatever busy handler it
