@@ -573,6 +573,24 @@ describe('the production mark', function () {
             ->and(ProductionMarker::isMarked($connection))->toBeTrue();
     });
 
+    // Two deploys migrating together each mark the database once they have
+    // migrated, outside the migration lock: the one that finds it marked
+    // between its look and its write is marked all the same, not failed.
+    it('is marked once when two runs mark it together, and the second is not refused', function () {
+        $run = run();
+        $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);
+        $first = PdoConnection::sqlite($run->files->database());
+        $second = PdoConnection::sqlite($run->files->database());
+        $first->guardStatements(static function (string $sql) use ($second): void {
+            if (str_starts_with($sql, 'INSERT') && str_contains($sql, ProductionMarker::TABLE)) {
+                ProductionMarker::mark($second);
+            }
+        });
+
+        expect(ProductionMarker::mark($first))->toBeFalse()
+            ->and($first->select('SELECT id FROM ' . ProductionMarker::TABLE))->toBe([['id' => 1]]);
+    });
+
     it('is taken away only by hand: an emptied mark table marks nothing', function () {
         $run = run();
         $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES);

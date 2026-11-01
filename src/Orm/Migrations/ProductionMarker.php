@@ -61,12 +61,15 @@ final class ProductionMarker
             $table->integer('id')->primary();
             $table->string('marked_at', 32);
         }, ifNotExists: true);
-        $connection->execute(
-            'INSERT INTO ' . $dialect->quote(self::TABLE) . ' (id, marked_at) VALUES (1, ?)',
-            [gmdate('Y-m-d\TH:i:s\Z', $now ?? time())],
-        );
 
-        return true;
+        // `migrate` marks once it has migrated, outside the migration lock,
+        // so two deploys together can both find the database unmarked: the
+        // second's write finds the row taken and leaves it, rather than
+        // failing a deploy whose migrations ran.
+        return $connection->execute(
+            $dialect->insertUnlessTaken(self::TABLE, ['id', 'marked_at']),
+            [1, gmdate('Y-m-d\TH:i:s\Z', $now ?? time())],
+        ) === 1;
     }
 
     /**
