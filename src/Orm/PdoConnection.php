@@ -152,6 +152,27 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
         return new self(new \PDO($dsn, $user, $password, [\PDO::ATTR_PERSISTENT => false]), $name);
     }
 
+    /**
+     * A Postgres or MySQL server's database, by host, port and name, with
+     * the user and password given apart from the DSN so neither is ever in
+     * it (DatabaseDriver::dsn()) -- as an application's config holds them,
+     * the password a Secret.
+     *
+     * @throws \LogicException for SQLite, which sqlite() opens by its path
+     */
+    public static function server(
+        DatabaseDriver $driver,
+        string $host,
+        ?int $port,
+        string $database,
+        ?string $user = null,
+        #[\SensitiveParameter]
+        ?string $password = null,
+        string $name = 'default',
+    ): self {
+        return new self(new \PDO($driver->dsn($host, $port, $database), $user, $password, [\PDO::ATTR_PERSISTENT => false]), $name);
+    }
+
     /** How long a connection waits on another's write lock before giving up. */
     public const int SQLITE_BUSY_TIMEOUT_MS = 5000;
 
