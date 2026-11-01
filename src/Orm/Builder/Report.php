@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tinvar\Orm\Builder;
 
+use Tinvar\Orm\Aggregate;
 use Tinvar\Orm\Model;
 
 /**
@@ -149,13 +150,14 @@ final readonly class Report
         );
     }
 
+    /**
+     * As Query::sum() and an aggregate read one (Aggregate::integer()):
+     * every integer PHP holds, so the same sum read into a report is not
+     * refused at nineteen digits.
+     */
     private static function int(mixed $value): ?int
     {
-        return match (true) {
-            \is_int($value) => $value,
-            \is_string($value) && preg_match('/^-?[0-9]{1,18}\z/', $value) === 1 => (int) $value,
-            default => null,
-        };
+        return Aggregate::integer($value);
     }
 
     /** As each database hands one back: a bool, 0 or 1, or Postgres's 't' and 'f'. */

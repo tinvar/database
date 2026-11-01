@@ -502,6 +502,22 @@ it('reads a sum as an integer whenever it is one PHP holds', function () {
         ->and(fn () => Aggregate::Count->read('9223372036854775808'))->toThrow(\UnexpectedValueException::class);
 });
 
+final readonly class BigTotal
+{
+    public function __construct(public int $total) {}
+}
+
+// A report's int is read as Query::sum() reads one: the same sum, read
+// into a report, was refused at nineteen digits.
+it('reads a report\'s int as Query::sum() reads one', function () {
+    $report = \Tinvar\Orm\Builder\Report::plan(BigTotal::class, ['total']);
+
+    expect($report->make(['total' => '9223372036854775807'])->total)->toBe(\PHP_INT_MAX)
+        ->and($report->make(['total' => '-9223372036854775808'])->total)->toBe(\PHP_INT_MIN)
+        ->and(fn () => $report->make(['total' => '9223372036854775808']))->toThrow(\UnexpectedValueException::class)
+        ->and(fn () => $report->make(['total' => '2.5']))->toThrow(\UnexpectedValueException::class);
+});
+
 describe('increment and decrement', function () {
     it('adds to the column as the row holds it, on the tenant\'s rows alone', function () {
         $fixture = Shelves::sqlite();

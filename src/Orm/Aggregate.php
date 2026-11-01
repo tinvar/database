@@ -89,8 +89,11 @@ enum Aggregate: string
      * Every integer PHP holds -- nineteen digits among them -- read as
      * one: text that comes back the same from an int. A number past them
      * is not one, rather than cut to the largest.
+     *
+     * @internal for the query builder, inside this package: a report's int
+     *     is read by the same rule (Builder\Report)
      */
-    private static function integer(mixed $value): ?int
+    public static function integer(mixed $value): ?int
     {
         if (\is_int($value)) {
             return $value;
