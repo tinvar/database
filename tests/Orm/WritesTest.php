@@ -257,3 +257,57 @@ it('refuses to insert under a preset key that is not a UUID', function () {
 
     expect(fn () => $orm->save($rack))->toThrow(Tinvar\Orm\MappingException::class);
 });
+
+/** A script that maps its tenant column, as an application may to show it. */
+#[\Tinvar\Orm\Attributes\Table('scripts'), \Tinvar\Orm\Attributes\TenantScoped]
+final class ScriptWithTenant extends \Tinvar\Orm\Model
+{
+    #[\Tinvar\Orm\Attributes\Id] public private(set) string $id;
+    #[\Tinvar\Orm\Attributes\Column] public string $name;
+    #[\Tinvar\Orm\Attributes\Column('tenant_id')] public string $tenantId;
+}
+
+describe('a model that maps its tenant column', function () {
+    // The tenant is stamped on insert and never updated. A save that moved
+    // it was dropped from the write without a word, leaving the model in
+    // memory naming a tenant its row is not in -- refused instead, as a
+    // builder's update of the column is (ForeignTenantRow::moved()).
+    it('refuses a save that changes the tenant, and leaves the row where it was', function () {
+        $fixture = new TenantFixture();
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
+        $id = $fixture->scripts['acme'][0];
+
+        $attempt = $orm->actAs('acme', function () use ($orm, $id): ?\Throwable {
+            $script = $orm->find(ScriptWithTenant::class, $id);
+            $script->tenantId = 'globex';
+            $script->name = 'moved';
+            try {
+                $orm->save($script);
+            } catch (\Throwable $e) {
+                return $e;
+            }
+
+            return null;
+        });
+
+        expect($attempt)->toBeInstanceOf(\Tinvar\Orm\ForeignTenantRow::class)
+            ->and($fixture->connection->select('SELECT name, tenant_id FROM scripts WHERE id = ?', [$id]))
+            ->toBe([['name' => 'acme-script-1', 'tenant_id' => 'acme']])
+            ->and($orm->actAs('globex', fn () => $orm->find(ScriptWithTenant::class, $id)))->toBeNull();
+    });
+
+    it('saves its other changes with the tenant it was read with', function () {
+        $fixture = new TenantFixture();
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
+        $id = $fixture->scripts['acme'][0];
+
+        $orm->actAs('acme', function () use ($orm, $id): void {
+            $script = $orm->find(ScriptWithTenant::class, $id);
+            $script->name = 'renamed';
+            $orm->save($script);
+        });
+
+        expect($fixture->connection->select('SELECT name, tenant_id FROM scripts WHERE id = ?', [$id]))
+            ->toBe([['name' => 'renamed', 'tenant_id' => 'acme']]);
+    });
+});

@@ -1901,12 +1901,14 @@ final class Orm
         $changes = $model->changes();
         unset($changes[$meta->idColumn]);
 
-        // The tenant is stamped on insert and never updated. Leaving it in the
-        // diff would let a model that maps the column move its own row into
+        // The tenant is stamped on insert and never updated. Left in the
+        // diff, a model that maps the column would move its own row into
         // another tenant, with the WHERE predicate still satisfied by the
-        // tenant it is leaving.
-        if ($meta->tenantColumn !== null) {
-            unset($changes[$meta->tenantColumn]);
+        // tenant it is leaving; dropped from it without a word, the model
+        // would go on naming a tenant its row is not in. Refused, as a
+        // builder's update of the column is.
+        if ($meta->tenantColumn !== null && \array_key_exists($meta->tenantColumn, $changes)) {
+            throw ForeignTenantRow::moved($meta->class);
         }
 
         if ($changes === []) {
