@@ -59,6 +59,14 @@ final class Orm
     private ?\Closure $acrossTenantsFlag = null;
 
     /**
+     * What observeWrites() was handed: told of each row written, by class
+     * and key, once the write is made. Kept across flush(), like the flags.
+     *
+     * @var (\Closure(class-string<Model>, string, bool): void)|null
+     */
+    private ?\Closure $writeObserver = null;
+
+    /**
      * The open transactions' journals and afterCommit() callbacks: the
      * connection's one transaction's (TransactionFrames), or, on a
      * ConcurrentConnection, each fiber's own.
@@ -475,6 +483,26 @@ final class Orm
     public function flagAcrossTenants(?\Closure $flag): void
     {
         $this->acrossTenantsFlag = $flag;
+    }
+
+    /**
+     * Tells $observer of every row written from now on -- a save(), a
+     * delete(), and each row an update(), delete(), insert() or upsert()
+     * statement of the query builder wrote -- with the model's class, the
+     * row's key, and whether it was deleted. Null stops it. One observer:
+     * a second call replaces the first.
+     *
+     * Told as the write is made, inside whatever transaction it is in, so
+     * an observer that tells anyone else waits for the commit with
+     * afterCommit(), as search's index does (ADR 0150): a write rolled back
+     * then reaches nobody. Kept across flush(), which is a request's reset:
+     * it is the application's wiring, not the request's state.
+     *
+     * @param (\Closure(class-string<Model>, string, bool): void)|null $observer
+     */
+    public function observeWrites(?\Closure $observer): void
+    {
+        $this->writeObserver = $observer;
     }
 
     /**
@@ -1196,10 +1224,11 @@ final class Orm
      * builder (Builder\Compiler) all predicate on, so the builder cannot
      * scope a read differently from them.
      *
+     * And the one search's index reads by (ADR 0150), so a search is held
+     * to exactly the tenants a read of the model is.
+     *
      * @return non-empty-list<string>|null
      * @throws NoTenantContext with no tenancy registered, or no tenant in force
-     *
-     * @internal for the Orm and its query builder, inside this package
      */
     public function tenantsInScope(ModelMeta $meta): ?array
     {
@@ -2256,6 +2285,9 @@ final class Orm
     private function followWrite(ModelMeta $meta, string $id, ?array $row): void
     {
         $this->writeGeneration++;
+        if ($this->writeObserver !== null) {
+            ($this->writeObserver)($meta->class, $id, $row === null);
+        }
 
         foreach (Metadata::relationsTo($meta->class) as $relation) {
             if ($relation->kind === RelationKind::HasMany) {
