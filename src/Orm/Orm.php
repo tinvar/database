@@ -1886,6 +1886,15 @@ final class Orm
             array_values($values),
         );
 
+        // A model that maps the tenant column holds the tenant its row was
+        // stamped with, as it does its minted key. Left as it was -- unset,
+        // or naming another tenant -- reading it threw, and the next save
+        // read the stamp as a move and refused it.
+        $tenantProperty = $meta->tenantColumn === null ? false : array_search($meta->tenantColumn, $meta->columns, true);
+        if (\is_string($tenantProperty)) {
+            $meta->set($model, $tenantProperty, $values[$meta->tenantColumn]);
+        }
+
         $this->journalSnapshot($model);
         $model->markClean($values);
         $model->attach($this, new ResultSet());

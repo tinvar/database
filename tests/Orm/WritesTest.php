@@ -310,4 +310,43 @@ describe('a model that maps its tenant column', function () {
         expect($fixture->connection->select('SELECT name, tenant_id FROM scripts WHERE id = ?', [$id]))
             ->toBe([['name' => 'renamed', 'tenant_id' => 'acme']]);
     });
+
+    // The tenant is stamped on insert, never taken from the model. The model
+    // kept what it held -- nothing, or another tenant -- so reading the
+    // property after the save threw, and its next save read as moving the
+    // row to the tenant it never left.
+    it('holds the tenant a new one was stamped with once it is saved', function () {
+        $fixture = new TenantFixture();
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
+
+        $script = $orm->actAs('acme', function () use ($orm): ScriptWithTenant {
+            $script = new ScriptWithTenant();
+            $script->name = 'fresh';
+            $orm->save($script);
+
+            return $script;
+        });
+
+        expect($script->tenantId)->toBe('acme')
+            ->and($script->isDirty())->toBeFalse();
+    });
+
+    it('saves later changes to a new one that named another tenant before its insert', function () {
+        $fixture = new TenantFixture();
+        $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
+
+        $orm->actAs('acme', function () use ($orm, $fixture): void {
+            $script = new ScriptWithTenant();
+            $script->name = 'fresh';
+            $script->tenantId = 'globex';
+            $orm->save($script);
+
+            $script->name = 'renamed';
+            $orm->save($script);
+
+            expect($script->tenantId)->toBe('acme')
+                ->and($fixture->connection->select('SELECT name, tenant_id FROM scripts WHERE id = ?', [$script->id]))
+                ->toBe([['name' => 'renamed', 'tenant_id' => 'acme']]);
+        });
+    });
 });
