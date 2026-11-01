@@ -12,7 +12,7 @@
   "require-dev": {
     "amphp/mysql": "3.1.1",
     "amphp/postgres": "2.2.1",
-    "pestphp/pest": "^4.0",
+    "pestphp/pest": "^5.3",
     "phpstan/phpstan": "^2.1"
   },
   "suggest": {
