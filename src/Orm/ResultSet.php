@@ -17,13 +17,6 @@ final class ResultSet
     public private(set) array $models = [];
 
     /**
-     * @param bool $alone a set made for one model hydrated by itself -- a
-     *        #[BelongsTo] ghost filled from its row -- rather than the rows a
-     *        statement returned together. A relation read on its model loads
-     *        for that model alone, which the record a test reads says
-     *        (LazyLoad::ALONE).
-     */
-    /**
      * Relation rows a read across tenants or a subtree loaded for these
      * models, by the widened scope's name and the relation: with the Orm's
      * write generation they were read at, and grouped as
@@ -33,6 +26,13 @@ final class ResultSet
      */
     private array $widened = [];
 
+    /**
+     * @param bool $alone a set made for one model hydrated by itself -- a
+     *        #[BelongsTo] ghost filled from its row -- rather than the rows a
+     *        statement returned together. A relation read on its model loads
+     *        for that model alone, which the record a test reads says
+     *        (LazyLoad::ALONE).
+     */
     public function __construct(public readonly bool $alone = false) {}
 
     /**
