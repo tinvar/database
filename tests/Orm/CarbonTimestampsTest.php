@@ -162,6 +162,20 @@ describe('reading and writing', function () {
         expect(array_map(static fn (Shipment $s): string => $s->placedAt->format('d H'), $after))->toBe(['01 11', '02 08']);
     });
 
+    // A column is read as what it holds, as a DateTimeImmutable column is:
+    // Carbon's constructor, like parse(), reads a relative time against the
+    // clock a test moved, so a row read would change with the test's clock.
+    it('reads a column without asking the clock a test moved', function () {
+        $orm = sqliteOrm();
+        $orm->connection()->execute("INSERT INTO shipments VALUES ('01a166b1-0816-74c0-b4d5-2e9eb49b0838', 'today', NULL, 'today', 'today')");
+        CarbonClock::follow(static fn (): \DateTimeImmutable => new \DateTimeImmutable('2031-02-03 04:05:06', new \DateTimeZone('UTC')));
+
+        $placedAt = $orm->find(Shipment::class, '01a166b1-0816-74c0-b4d5-2e9eb49b0838')?->placedAt;
+
+        // The followed clock's today would be 2031-02-03; the system's is not.
+        expect($placedAt?->format('Y-m-d'))->not->toBe('2031-02-03');
+    });
+
     it('takes a value object holding a CarbonImmutable as immutable', function () {
         expect(Metadata::for(Slot::class)->columns)->toBe(['id' => 'id', 'window' => 'window']);
     });

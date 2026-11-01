@@ -988,12 +988,13 @@ final class Metadata
             \DateTimeImmutable::class => static fn (mixed $v): \DateTimeImmutable => $v instanceof \DateTimeImmutable
                 ? $v
                 : (new \DateTimeImmutable((string) $v, new \DateTimeZone('UTC')))->setTimezone(new \DateTimeZone('UTC')),
-            // Carbon's, likewise, and in UTC whatever it was read as: the
-            // constructor, never parse(), which would read a relative time
-            // -- 'tomorrow' -- against a clock a test had moved.
-            CarbonImmutable::class => static fn (mixed $v): CarbonImmutable => $v instanceof \DateTimeInterface
-                ? CarbonImmutable::instance($v)->setTimezone('UTC')
-                : new CarbonImmutable((string) $v, 'UTC')->setTimezone('UTC'),
+            // Carbon's, likewise, and in UTC whatever it was read as: read
+            // as the DateTimeImmutable above reads it and then made a
+            // Carbon, since Carbon's constructor, like parse(), reads a
+            // relative time -- 'tomorrow' -- against a clock a test moved.
+            CarbonImmutable::class => static fn (mixed $v): CarbonImmutable => CarbonImmutable::instance(
+                $v instanceof \DateTimeInterface ? $v : new \DateTimeImmutable((string) $v, new \DateTimeZone('UTC')),
+            )->setTimezone('UTC'),
             'mixed' => null,
             default => throw MappingException::unsupportedColumnType($class, $property->getName(), $type->getName()),
         };
