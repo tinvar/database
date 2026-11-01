@@ -262,7 +262,7 @@ final class Orm
         if ($meta->audited !== null && $this->changes === null) {
             throw new \LogicException(
                 "{$meta->class} is #[Audited], and this Orm records changes nowhere, so it is not written. Build the application's "
-                . 'audit log over this Orm (new Tinvar\\Audit\\AuditLog($orm, ...)), which registers itself with recordChangesWith(), '
+                . 'audit log over this Orm (the framework\'s AuditLog, ADR 0150), which registers itself with recordChangesWith(), '
                 . 'or take #[Audited] off the model.',
             );
         }

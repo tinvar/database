@@ -141,7 +141,7 @@ final readonly class AuditedColumns
         if ($value instanceof \BackedEnum) {
             return $value->value;
         }
-        $text = \is_string($value) ? $value : (\is_scalar($value) || $value instanceof \Stringable ? (string) $value : get_debug_type($value));
+        $text = \is_string($value) ? $value : ($value instanceof \Stringable ? (string) $value : get_debug_type($value));
         if (\strlen($text) > self::MAX_VALUE_BYTES) {
             $text = mb_strcut($text, 0, self::MAX_VALUE_BYTES, 'UTF-8') . '…';
         }
