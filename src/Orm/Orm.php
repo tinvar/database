@@ -1358,8 +1358,10 @@ final class Orm
         // quoting it, so Exists and Unique turned a malformed id into a 500,
         // and one bad id among a tick's batched model lookups failed every
         // query call in the tick. After the tenant check, which must fail
-        // closed whatever the values.
-        if ($column === $meta->idColumn) {
+        // closed whatever the values. A #[BelongsTo]'s foreign key holds a
+        // key too, and is a uuid column as much as the id is: Exists on one
+        // was the same 500 (Query::where() guards both alike).
+        if ($column === $meta->idColumn || self::isForeignKey($meta, $column)) {
             $values = array_values(array_filter(
                 $values,
                 static fn (mixed $value): bool => \is_string($value) && Uuid::isValid($value),
@@ -1390,6 +1392,18 @@ final class Orm
         }
 
         return $this->hydrateAll($class, $rows);
+    }
+
+    /** Whether $column is the foreign key of one of the model's #[BelongsTo] relations. */
+    private static function isForeignKey(ModelMeta $meta, string $column): bool
+    {
+        foreach ($meta->relations as $relation) {
+            if ($relation->kind === RelationKind::BelongsTo && $relation->foreignKey === $column) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
