@@ -7,7 +7,7 @@ namespace Tinvar\Orm;
 /**
  * Which database an application keeps its rows in: what `tinvar new` asks
  * (`--database=sqlite|postgres|mysql`) and an application's config reads,
- * as the skeleton's APP_DATABASE_DRIVER (ADR 0155).
+ * as the skeleton's APP_DATABASE_DRIVER (ADR 0156).
  *
  * SQLite is a file beside the application and needs nothing else, so it is
  * the default; Postgres and MySQL are servers, reached by host, port and
