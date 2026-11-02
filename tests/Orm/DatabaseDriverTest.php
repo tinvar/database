@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-/** Which database an application keeps its rows in (ADR 0150). */
+/** Which database an application keeps its rows in (ADR 0155). */
 
 use Tinvar\Orm\DatabaseDriver;
 
