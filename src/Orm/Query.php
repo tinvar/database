@@ -1356,7 +1356,7 @@ final readonly class Query
             $assignments = implode(', ', $assignments);
 
             // An audited model's rows as they were, under the lock the keys
-            // were read with, to record what the UPDATE changed (ADR 0151).
+            // were read with, to record what the UPDATE changed (ADR 0153).
             $before = $this->meta->audited === null ? [] : $this->rowsOf($ids);
 
             $count = 0;
@@ -2032,7 +2032,7 @@ final readonly class Query
      * Refuses an upsert of an #[Audited] model: it cannot say which rows it
      * inserted and which it changed, nor from what, without reading each as
      * save() would -- and a change it could not record is not made
-     * (ADR 0151).
+     * (ADR 0153).
      */
     private function refuseAuditedUpsert(string $what): void
     {

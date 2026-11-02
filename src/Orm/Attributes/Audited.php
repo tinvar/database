@@ -8,7 +8,7 @@ use Tinvar\Support\KnownAttributes;
 
 /**
  * Records every change to the model's rows in the application's audit log
- * (ADR 0151): a row created, with what it was made with; updated, with each
+ * (ADR 0153): a row created, with what it was made with; updated, with each
  * field it changed from what to what; deleted, with what it held.
  *
  *     #[Table('orders'), Audited(except: ['notes'])]
