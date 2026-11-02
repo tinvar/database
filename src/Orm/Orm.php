@@ -59,12 +59,14 @@ final class Orm
     private ?\Closure $acrossTenantsFlag = null;
 
     /**
-     * What observeWrites() was handed: told of each row written, by class
-     * and key, once the write is made. Kept across flush(), like the flags.
+     * What observeWrites() was handed, by its owner's object id: each told
+     * of every row written, by class and key, once the write is made, in
+     * the order they registered. The owner is held so its id is not reused
+     * while it observes. Kept across flush(), like the flags.
      *
-     * @var (\Closure(class-string<Model>, string, bool): void)|null
+     * @var array<int, array{object, \Closure(class-string<Model>, string, bool): void}>
      */
-    private ?\Closure $writeObserver = null;
+    private array $writeObservers = [];
 
     /**
      * The open transactions' journals and afterCommit() callbacks: the
@@ -563,8 +565,16 @@ final class Orm
      * Tells $observer of every row written from now on -- a save(), a
      * delete(), and each row an update(), delete(), insert() or upsert()
      * statement of the query builder wrote -- with the model's class, the
-     * row's key, and whether it was deleted. Null stops it. One observer:
-     * a second call replaces the first.
+     * row's key, and whether it was deleted.
+     *
+     * Every owner's observer is told, in the order they first registered:
+     * search, an audit log and whatever comes next each hear of each write,
+     * and one never silences another. $owner names whose it is -- the
+     * Search, say -- so that owner registering again replaces only its own
+     * (never told twice), and null takes only its own away.
+     *
+     * An observer that throws fails the write, as anything inside it does,
+     * and the observers after it are not told.
      *
      * Told as the write is made, inside whatever transaction it is in, so
      * an observer that tells anyone else waits for the commit with
@@ -574,9 +584,15 @@ final class Orm
      *
      * @param (\Closure(class-string<Model>, string, bool): void)|null $observer
      */
-    public function observeWrites(?\Closure $observer): void
+    public function observeWrites(object $owner, ?\Closure $observer): void
     {
-        $this->writeObserver = $observer;
+        $key = spl_object_id($owner);
+        if ($observer === null) {
+            unset($this->writeObservers[$key]);
+
+            return;
+        }
+        $this->writeObservers[$key] = [$owner, $observer];
     }
 
     /**
@@ -2382,8 +2398,8 @@ final class Orm
     private function followWrite(ModelMeta $meta, string $id, ?array $row): void
     {
         $this->writeGeneration++;
-        if ($this->writeObserver !== null) {
-            ($this->writeObserver)($meta->class, $id, $row === null);
+        foreach ($this->writeObservers as [, $observer]) {
+            $observer($meta->class, $id, $row === null);
         }
 
         foreach (Metadata::relationsTo($meta->class) as $relation) {
