@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Orm\Attributes;
 
 /**
- * Marks a column whose value the audit log never records (ADR 0153): an
+ * Marks a column whose value the audit log never records (ADR 0155): an
  * #[Audited] model's entry says the field changed, and shows `[redacted]`
  * on both sides of it.
  *
