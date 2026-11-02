@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Tinvar\Orm;
 
 /**
- * What happened to an #[Audited] model's row (ADR 0150). The value is the
+ * What happened to an #[Audited] model's row (ADR 0151). The value is the
  * event an audit log files the change under.
  */
 enum ModelChangeKind: string

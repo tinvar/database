@@ -6,7 +6,7 @@ namespace Tinvar\Orm;
 
 /**
  * One change to an #[Audited] model's row, as the ORM hands it to what
- * records changes (ModelChanges, ADR 0150): which row, what happened to it,
+ * records changes (ModelChanges, ADR 0151): which row, what happened to it,
  * and each field it changed from what to what.
  *
  * The fields are already what may be recorded: a field the model names in

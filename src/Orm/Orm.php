@@ -80,7 +80,7 @@ final class Orm
     private ?RawStatements $rawStatements = null;
 
     /**
-     * Where each change to an #[Audited] model is recorded (ADR 0150), or
+     * Where each change to an #[Audited] model is recorded (ADR 0151), or
      * null for nowhere -- and then such a model is not written at all.
      */
     private ?ModelChanges $changes = null;
@@ -234,7 +234,7 @@ final class Orm
     }
 
     /**
-     * Records each change to an #[Audited] model with $changes (ADR 0150):
+     * Records each change to an #[Audited] model with $changes (ADR 0151):
      * the application's audit log, which registers itself here when it is
      * built. Null records nothing, and an audited model is then refused at
      * its first write rather than written unrecorded.
@@ -262,7 +262,7 @@ final class Orm
         if ($meta->audited !== null && $this->changes === null) {
             throw new \LogicException(
                 "{$meta->class} is #[Audited], and this Orm records changes nowhere, so it is not written. Build the application's "
-                . 'audit log over this Orm (the framework\'s AuditLog, ADR 0150), which registers itself with recordChangesWith(), '
+                . 'audit log over this Orm (the framework\'s AuditLog, ADR 0151), which registers itself with recordChangesWith(), '
                 . 'or take #[Audited] off the model.',
             );
         }
@@ -1924,7 +1924,7 @@ final class Orm
         $this->refuseUnrecorded($meta);
 
         // An audited model's change is recorded in the transaction it is
-        // made in, so the two commit or roll back together (ADR 0150).
+        // made in, so the two commit or roll back together (ADR 0151).
         $this->transaction(function () use ($model, $meta): void {
             $meta->beforeSave($model);
             $persisted = $model->isPersisted();

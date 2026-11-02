@@ -38,7 +38,7 @@ final class ModelMeta
      *        the ORM stamps on insert and on every update unless that write sets it
      * @param list<string>                 $carbonStamps of those two, the ones typed CarbonImmutable
      * @param AuditedColumns|null          $audited what the audit log records of the model's rows, for an
-     *        #[Audited] one; null for a model whose changes are recorded nowhere (ADR 0150)
+     *        #[Audited] one; null for a model whose changes are recorded nowhere (ADR 0151)
      */
     public function __construct(
         public readonly string $class,
