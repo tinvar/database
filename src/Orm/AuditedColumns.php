@@ -9,7 +9,7 @@ use Tinvar\Orm\Attributes\Sensitive;
 
 /**
  * An #[Audited] model's columns as its audit entries name them, compiled
- * once with its metadata (ADR 0155): each column under the field a
+ * once with its metadata (ADR 0156): each column under the field a
  * developer knows it by -- its property, or the #[BelongsTo] whose key it
  * holds -- the ones never recorded, and the secrets recorded as changed and
  * never with their values.

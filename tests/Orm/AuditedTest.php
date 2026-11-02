@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * #[Audited] (ADR 0155): every change to a model's rows handed to what
+ * #[Audited] (ADR 0156): every change to a model's rows handed to what
  * records changes, inside the change's own transaction -- through save(),
  * delete() and the query builder's statements alike -- with the fields an
  * entry may name, secrets redacted and `except:` left out; and no write at
