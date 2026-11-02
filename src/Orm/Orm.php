@@ -494,7 +494,7 @@ final class Orm
      *
      * Told as the write is made, inside whatever transaction it is in, so
      * an observer that tells anyone else waits for the commit with
-     * afterCommit(), as search's index does (ADR 0150): a write rolled back
+     * afterCommit(), as search's index does (ADR 0152): a write rolled back
      * then reaches nobody. Kept across flush(), which is a request's reset:
      * it is the application's wiring, not the request's state.
      *
@@ -1224,7 +1224,7 @@ final class Orm
      * builder (Builder\Compiler) all predicate on, so the builder cannot
      * scope a read differently from them.
      *
-     * And the one search's index reads by (ADR 0150), so a search is held
+     * And the one search's index reads by (ADR 0152), so a search is held
      * to exactly the tenants a read of the model is.
      *
      * @return non-empty-list<string>|null
