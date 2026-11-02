@@ -22,6 +22,7 @@ use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\MappingException;
 use Tinvar\Orm\Model;
+use Tinvar\Orm\OnDelete;
 use Tinvar\Orm\ModelChange;
 use Tinvar\Orm\ModelChangeKind;
 use Tinvar\Orm\ModelChanges;
@@ -47,6 +48,30 @@ final class Account extends Model
     #[Column] public CarbonImmutable $createdAt;
     #[Column] public CarbonImmutable $updatedAt;
     #[BelongsTo] public Owner $owner;
+}
+
+/** Deleted, or let go, by the database when its owner is: a change no write of the ORM's makes. */
+#[Table('audited_cascaded'), Audited]
+final class Cascaded extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $label;
+    #[BelongsTo(onDelete: OnDelete::Cascade)] public Owner $owner;
+}
+
+#[Table('audited_released'), Audited]
+final class Released extends Model
+{
+    #[Id] public private(set) string $id;
+    #[BelongsTo(onDelete: 'set null')] public ?Owner $owner = null;
+}
+
+/** Held by its owner: a delete of the owner is refused while it is there, so nothing changes unrecorded. */
+#[Table('audited_held'), Audited]
+final class Held extends Model
+{
+    #[Id] public private(set) string $id;
+    #[BelongsTo(onDelete: OnDelete::Restrict)] public Owner $owner;
 }
 
 #[Table('audited_accounts'), Audited(except: ['nothing'])]
@@ -225,4 +250,10 @@ it('records the query builder\'s writes row by row, and refuses an upsert', func
 
 it('refuses an except naming nothing the model maps, when the model compiles', function () {
     expect(fn () => Misnamed::meta())->toThrow(MappingException::class, "names 'nothing', which is no column");
+});
+
+it('refuses an audited row the database deletes or lets go with its owner, which no statement of the ORM\'s records', function () {
+    expect(fn () => Cascaded::meta())->toThrow(MappingException::class, 'ON DELETE CASCADE')
+        ->and(fn () => Released::meta())->toThrow(MappingException::class, 'ON DELETE SET NULL')
+        ->and(Held::meta()->audited)->not->toBeNull();
 });

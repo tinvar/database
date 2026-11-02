@@ -54,6 +54,16 @@ final readonly class AuditedColumns
             $byName[$column] = $column;
         }
         foreach ($relations as $property => $relation) {
+            // The database deletes such a row with the one it belongs to, or
+            // sets its key to NULL, in no statement of the ORM's: a change
+            // that could not be recorded, so not one an audited model takes.
+            if ($relation->kind === RelationKind::BelongsTo && \in_array($relation->onDelete, ['CASCADE', 'SET NULL'], true)) {
+                throw new MappingException(
+                    "{$class}: #[Audited], and its #[BelongsTo] \${$property} has the database " . ($relation->onDelete === 'CASCADE' ? 'delete it' : 'set it to NULL')
+                    . " (ON DELETE {$relation->onDelete}) when what it belongs to is deleted -- a change no statement of the ORM's makes, so the "
+                    . 'audit log could not record it. Leave onDelete off, or restrict, and delete or detach these rows through the ORM first.',
+                );
+            }
             if ($relation->kind === RelationKind::BelongsTo) {
                 $fields[$relation->foreignKey] = $property;
                 $byName[$property] = $relation->foreignKey;
