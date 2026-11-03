@@ -610,8 +610,10 @@ final class Orm
      * row's key, and whether it was deleted.
      *
      * Every owner's observer is told, in the order they first registered:
-     * search, an audit log and whatever comes next each hear of each write,
-     * and one never silences another. $owner names whose it is -- the
+     * search and whatever comes next each hear of each write,
+     * and one never silences another. (The audit log is not one: it hears of
+     * each change inside its transaction, with the change, through
+     * recordChangesWith().) $owner names whose it is -- the
      * Search, say -- so that owner registering again replaces only its own
      * (never told twice), and null takes only its own away.
      *
