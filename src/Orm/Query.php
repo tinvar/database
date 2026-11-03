@@ -2055,7 +2055,7 @@ final readonly class Query
     {
         $rows = [];
         foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
-            foreach ($this->rowsByKey($chunk) as $row) {
+            foreach ($this->rowsByKey($chunk, withTenant: true) as $row) {
                 $rows[(string) $row[$this->meta->idColumn]] = $row;
             }
         }
@@ -2186,21 +2186,28 @@ final readonly class Query
     }
 
     /**
-     * These rows of the model's table, every column a model is read with.
+     * These rows of the model's table, every column a model is read with --
+     * and, with $withTenant, the tenant column a model need not map, so an
+     * audited write reached inside withinSubtree() or acrossTenants() is
+     * recorded under the row's own tenant (Orm::recordChange()).
      *
      * @param list<string> $ids
      * @return list<array<string, mixed>>
      */
-    private function rowsByKey(array $ids): array
+    private function rowsByKey(array $ids, bool $withTenant = false): array
     {
         if ($ids === []) {
             return [];
         }
         [$where, $bindings] = $this->byKeys($ids);
         $table = Identifiers::quote($this->meta->table);
+        $select = $this->meta->selectColumns();
+        if ($withTenant && $this->meta->tenantColumn !== null && !\in_array($this->meta->tenantColumn, $select, true)) {
+            $select[] = $this->meta->tenantColumn;
+        }
         $columns = implode(', ', array_map(
             static fn (string $column): string => $table . '.' . Identifiers::quote($column) . ' AS ' . Identifiers::quote($column),
-            $this->meta->selectColumns(),
+            $select,
         ));
 
         return $this->orm->statements()->select("SELECT {$columns} FROM {$table} WHERE {$where}", $bindings);

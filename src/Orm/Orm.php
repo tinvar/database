@@ -294,13 +294,55 @@ final class Orm
             return;
         }
 
+        // The row's own tenant: what a write stamps, or what the row was
+        // read with. A write held to the tenant in force reaches no other
+        // tenant's row, so that tenant is the row's; one widened past it --
+        // withinSubtree(), acrossTenants() -- may reach a child's, or
+        // anyone's, and its change is the row's tenant's to see, not the
+        // tenant in force's (ADR 0106): refused rather than misfiled.
         $tenant = null;
         if ($meta->tenantColumn !== null) {
             $held = $after[$meta->tenantColumn] ?? $before[$meta->tenantColumn] ?? null;
-            $tenant = \is_string($held) && $held !== '' ? $held : $this->tenant();
+            if (\is_string($held) && $held !== '') {
+                $tenant = $held;
+            } elseif ($this->isWidened()) {
+                throw new \LogicException(
+                    "{$meta->class}: a change to a row reached inside withinSubtree() or acrossTenants() is recorded under the row's "
+                    . 'own tenant, and this one did not say which that is.',
+                );
+            } else {
+                $tenant = $this->tenant();
+            }
         }
 
         $this->changes->record(new ModelChange($kind, $meta->class, $id, $tenant, $changes));
+    }
+
+    /**
+     * The tenant column of a model's row, read from the database, where
+     * recordChange() would otherwise not know it: a #[TenantScoped] model
+     * need not map its tenant column, so a model's snapshot carries it only
+     * when the ORM stamped it on insert -- and a write widened past the
+     * tenant in force may reach another tenant's row. Asked only then;
+     * empty where the snapshot says, or the tenant in force is the row's.
+     *
+     * @param array<string, mixed>|null $snapshot the row as the model was read, column => value
+     * @return array<string, string> the tenant column => the row's tenant, or nothing
+     */
+    private function rowTenantFor(ModelMeta $meta, ?array $snapshot, string $id): array
+    {
+        $column = $meta->tenantColumn;
+        if ($column === null || \is_string($snapshot[$column] ?? null) || !$this->isWidened()) {
+            return [];
+        }
+
+        $rows = $this->connection->select(
+            sprintf('SELECT "%s" AS "tenant" FROM "%s" WHERE "%s" = ?', $column, $meta->table, $meta->idColumn),
+            [$id],
+        );
+        $tenant = $rows[0]['tenant'] ?? null;
+
+        return \is_string($tenant) && $tenant !== '' ? [$column => $tenant] : [];
     }
 
     /**
@@ -1946,13 +1988,14 @@ final class Orm
             $persisted = $model->isPersisted();
             $before = $model->snapshot();
             $pending = $persisted ? array_keys($model->changes()) : null;
+            $tenant = $persisted ? $this->rowTenantFor($meta, $before, $meta->keyOf($model)) : [];
             if ($persisted ? $this->update($model, $meta) : $this->insert($model, $meta)) {
                 $this->recordChange(
                     $meta,
                     $persisted ? ModelChangeKind::Updated : ModelChangeKind::Created,
                     $meta->keyOf($model),
-                    $persisted ? $before : null,
-                    $model->snapshot(),
+                    $before === null ? null : [...$before, ...$tenant],
+                    [...($model->snapshot() ?? []), ...$tenant],
                     $pending,
                 );
                 $meta->afterSave($model);
@@ -2174,6 +2217,8 @@ final class Orm
         $this->transaction(function () use ($model, $meta): void {
             $meta->beforeDelete($model);
             $before = $model->snapshot();
+            // Read while the row is there to read.
+            $before = $before === null ? null : [...$before, ...$this->rowTenantFor($meta, $before, $meta->keyOf($model))];
             $hooks = $meta->hasDeleteHooks();
             $deleted = $this->deleteRow($model, $meta, mustMatch: $hooks);
             if ($deleted === 0 && $hooks) {

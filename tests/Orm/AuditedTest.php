@@ -19,6 +19,7 @@ use Tinvar\Orm\Attributes\Column;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Sensitive;
 use Tinvar\Orm\Attributes\Table;
+use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\MappingException;
 use Tinvar\Orm\Model;
@@ -28,6 +29,9 @@ use Tinvar\Orm\ModelChangeKind;
 use Tinvar\Orm\ModelChanges;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
+use Tinvar\Tests\Orm\Fixtures\Tenancy;
+
+require_once __DIR__ . '/Fixtures/tenancy.php';
 
 #[Table('audited_owners')]
 final class Owner extends Model
@@ -79,6 +83,14 @@ final class Misnamed extends Model
 {
     #[Id] public private(set) string $id;
     #[Column] public string $email;
+}
+
+/** A tenant's row, its tenant column stamped by the ORM and mapped by no property. */
+#[Table('audited_memos'), TenantScoped, Audited]
+final class Memo extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $body;
 }
 
 /** Records into a table on the same connection, as an audit log does, and keeps each change. */
@@ -256,4 +268,60 @@ it('refuses an audited row the database deletes or lets go with its owner, which
     expect(fn () => Cascaded::meta())->toThrow(MappingException::class, 'ON DELETE CASCADE')
         ->and(fn () => Released::meta())->toThrow(MappingException::class, 'ON DELETE SET NULL')
         ->and(Held::meta()->audited)->not->toBeNull();
+});
+
+// ADR 0156 files each change under the tenant whose row it is, and ADR
+// 0106 has a widened write name the tenants of the rows it reaches. A
+// parent editing a child's row inside withinSubtree(), or a job inside
+// acrossTenants(), changes the child's row: the child's log is where the
+// change belongs, whatever tenant was in force.
+it('records a widened write to another tenant\'s row under that row\'s tenant', function () {
+    $connection = new PdoConnection(new \PDO('sqlite::memory:'));
+    $connection->execute('CREATE TABLE audited_memos (id TEXT PRIMARY KEY, body TEXT NOT NULL, tenant_id TEXT NOT NULL)');
+    $connection->execute('CREATE TABLE entries (kind TEXT, id TEXT)');
+    $orm = new Orm($connection, new IdentityMap('audited'), Tenancy::tree(['child' => 'parent']));
+    $recorder = new Recorder($connection);
+    $orm->recordChangesWith($recorder);
+    $widened = static fn (\Closure $work): mixed => $orm->actAs('parent', static fn (): mixed => $orm->grantSubtree(
+        static fn (): mixed => $orm->withinSubtree($work),
+    ));
+
+    $id = $orm->actAs('child', static function () use ($orm): string {
+        $memo = new Memo();
+        $memo->body = 'one';
+        $orm->save($memo);
+
+        return $memo->id;
+    });
+    $widened(static function () use ($orm, $id): void {
+        $memo = $orm->find(Memo::class, $id);
+        \assert($memo instanceof Memo);
+        $memo->body = 'two';
+        $orm->save($memo);
+    });
+    $widened(static fn (): int => Memo::query($orm)->where('body', 'two')->update(['body' => 'three']));
+    $orm->actAs('other', static fn (): mixed => $orm->acrossTenants(
+        static fn (): int => Memo::query($orm)->where('body', 'three')->update(['body' => 'four-ish']),
+    ));
+    $widened(static fn (): int => Memo::query($orm)->where('body', 'four-ish')->delete());
+    $orm->actAs('child', static function () use ($orm): void {
+        $memo = new Memo();
+        $memo->body = 'four';
+        $orm->save($memo);
+    });
+    $widened(static function () use ($orm): void {
+        $memo = Memo::query($orm)->where('body', 'four')->first();
+        \assert($memo instanceof Memo);
+        $orm->delete($memo);
+    });
+
+    expect(array_map(static fn (ModelChange $c): array => [$c->kind->value, $c->tenant], $recorder->changes))->toBe([
+        ['created', 'child'],
+        ['updated', 'child'],
+        ['updated', 'child'],
+        ['updated', 'child'],
+        ['deleted', 'child'],
+        ['created', 'child'],
+        ['deleted', 'child'],
+    ]);
 });
