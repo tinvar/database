@@ -134,6 +134,28 @@ describe('on Postgres', function () {
         });
     });
 
+    // What a job's dispatch holds its models to (Jobs\Payload): a row of the
+    // tenant in force exactly, even where the policy reads the subtree.
+    it('says a row is the tenant in force\'s own only for that tenant, inside withinSubtree() too', function () {
+        withPolicies(function (PdoConnection $connection): void {
+            $orm = new Orm($connection, new IdentityMap('test'), Tenancy::tree(['globex' => 'acme']));
+            [$acme, $globex] = $orm->acrossTenants(static fn (): array => [
+                $orm->query(Script::class)->where('name', 'acme-script-1')->first(),
+                $orm->query(Script::class)->where('name', 'globex-script-1')->first(),
+            ]);
+            \assert($acme instanceof Script && $globex instanceof Script);
+
+            expect($orm->actAs('acme', static fn (): bool => $orm->isOwnRow($acme)))->toBeTrue()
+                ->and($orm->actAs('acme', static fn (): bool => $orm->isOwnRow($globex)))->toBeFalse()
+                ->and($orm->actAs('acme', static fn (): bool => $orm->grantSubtree(
+                    static fn (): bool => $orm->withinSubtree(static fn (): bool => $orm->isOwnRow($globex)),
+                )))->toBeFalse()
+                ->and($orm->actAs('globex', static fn (): bool => $orm->isOwnRow($globex)))->toBeTrue()
+                ->and($orm->isOwnRow($acme))->toBeFalse()
+                ->and($orm->actAs('acme', static fn (): bool => $orm->isOwnRow(new Script())))->toBeFalse();
+        });
+    });
+
     it('lets a raw write inside the subtree, and refuses one outside it', function () {
         withPolicies(function (PdoConnection $connection): void {
             $orm = new Orm($connection, new IdentityMap('test'), Tenancy::tree(['globex' => 'acme']));

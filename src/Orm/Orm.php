@@ -1428,6 +1428,39 @@ final class Orm
         return $model instanceof Model && $model->isPersisted();
     }
 
+    /**
+     * Whether $model is a row of the tenant in force: always, for a model
+     * that is not #[TenantScoped]; never, with no tenant in force, or for a
+     * model that holds no row. What a job's dispatch holds its models to,
+     * since the job runs as that tenant.
+     *
+     * Exactly the tenant in force, whatever withinSubtree() or
+     * acrossTenants() widened reads to: the row as the snapshot says where
+     * the model maps its tenant column, and else asked of the database,
+     * where Postgres's policy holds the read to the tenant in force too.
+     */
+    public function isOwnRow(Model $model): bool
+    {
+        $meta = Metadata::for($model::class);
+        if ($meta->tenantColumn === null) {
+            return true;
+        }
+        $tenant = $this->identityMap->tenant();
+        if ($tenant === '' || !self::holdsRow($model)) {
+            return false;
+        }
+
+        $held = $model->snapshot()[$meta->tenantColumn] ?? null;
+        if (\is_string($held) && $held !== '') {
+            return $held === $tenant;
+        }
+
+        return $this->connection->select(
+            sprintf('SELECT 1 AS "own" FROM "%s" WHERE "%s" = ? AND "%s" = ?', $meta->table, $meta->idColumn, $meta->tenantColumn),
+            [$meta->keyOf($model), $tenant],
+        ) !== [];
+    }
+
     /** @param class-string<Model> $class */
     public function find(string $class, string $id): ?Model
     {
