@@ -12,7 +12,10 @@ declare(strict_types=1);
 
 namespace Tinvar\Tests\Orm\RawSql;
 
+use Tinvar\Orm\NamesDriver;
 use Tinvar\Orm\RawSql;
+use Tinvar\Orm\Schema\Dialect;
+use Tinvar\Orm\Schema\SqliteDialect;
 use Tinvar\Orm\RawStatement;
 use Tinvar\Orm\Query;
 use Tinvar\Tests\Orm\Fixtures\Brand;
@@ -80,6 +83,21 @@ describe('the flag', function () {
             ->and($flagged[0]->tenant)->toBe('acme')
             ->and($flagged[0]->acrossTenants)->toBeFalse()
             ->and($flagged[1]->acrossTenants)->toBeTrue();
+    });
+
+    // ADR 0172: raw SQL asks which database it is on to read MySQL's count
+    // of rows changed, and to pick a migration's dialect. With the flag on
+    // -- the dev toolbar -- the connection handed out named none, so that
+    // code took another database's path in dev alone.
+    it('hands out a connection that names the database beneath it, as the one without the flag does', function () {
+        $fixture = Shelves::sqlite();
+        $orm = $fixture->orm();
+        $orm->flagRawStatements(static function (): void {});
+
+        $connection = $orm->connection();
+        expect($connection)->toBeInstanceOf(NamesDriver::class)
+            ->and($connection instanceof NamesDriver ? $connection->driver() : null)->toBe('sqlite')
+            ->and(Dialect::for($connection))->toBeInstanceOf(SqliteDialect::class);
     });
 
     it('is not raised by the ORM or the query builder, which carry the predicate', function () {

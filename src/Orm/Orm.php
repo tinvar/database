@@ -460,15 +460,21 @@ final class Orm
      */
     public function flagRawStatements(?\Closure $flag): void
     {
-        $this->rawStatements = $flag === null ? null : new RawStatements(
-            $this->connection,
-            function (string $sql, \Closure $site) use ($flag): void {
-                $tables = RawSql::tenantTablesIn($sql, Metadata::tenantTables());
-                if ($tables !== []) {
-                    $flag(new RawStatement(RawSql::redacted($sql), $tables, $site(), $this->identityMap->tenant(), $this->isUnscoped()));
-                }
-            },
-        );
+        if ($flag === null) {
+            $this->rawStatements = null;
+
+            return;
+        }
+        $report = function (string $sql, \Closure $site) use ($flag): void {
+            $tables = RawSql::tenantTablesIn($sql, Metadata::tenantTables());
+            if ($tables !== []) {
+                $flag(new RawStatement(RawSql::redacted($sql), $tables, $site(), $this->identityMap->tenant(), $this->isUnscoped()));
+            }
+        };
+        // Naming the database beneath, where it names one (ADR 0172).
+        $this->rawStatements = $this->connection instanceof NamesDriver
+            ? new NamedRawStatements($this->connection, $report)
+            : new RawStatements($this->connection, $report);
     }
 
     public function identityMap(): IdentityMap

@@ -15,15 +15,19 @@ namespace Tinvar\Orm;
  * they carry the tenant predicate. Raw PDO, and a connection held from
  * somewhere else, are not seen at all; the static check reads those.
  *
+ * Over a connection that names its database, NamedRawStatements, which
+ * names it too: raw SQL asks which database it is on, and must not take
+ * another's path while the flag is on (ADR 0172).
+ *
  * @internal made by Orm::connection(), inside this package
  */
-final readonly class RawStatements implements Connection
+readonly class RawStatements implements Connection
 {
     /**
      * @param \Closure(string, \Closure(): string): void $flag given each statement, and what says where
      *        it was sent from -- asked only for one that is flagged, since a backtrace is not free
      */
-    public function __construct(private Connection $connection, private \Closure $flag) {}
+    public function __construct(protected Connection $connection, private \Closure $flag) {}
 
     public function select(string $sql, array $bindings = []): array
     {
