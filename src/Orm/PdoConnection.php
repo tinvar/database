@@ -158,6 +158,12 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
      * it (DatabaseDriver::dsn()) -- as an application's config holds them,
      * the password a Secret.
      *
+     * A MySQL session reads double quotes as names: ANSI_QUOTES, added to
+     * the server's own SQL mode. The ORM and its query builder write
+     * "users" as standard SQL does, which MySQL otherwise reads as a
+     * string, and an app opened here refused every statement they sent
+     * (ADR 0169).
+     *
      * @throws \LogicException for SQLite, which sqlite() opens by its path
      */
     public static function server(
@@ -170,7 +176,12 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
         ?string $password = null,
         string $name = 'default',
     ): self {
-        return new self(new \PDO($driver->dsn($host, $port, $database), $user, $password, [\PDO::ATTR_PERSISTENT => false]), $name);
+        $pdo = new \PDO($driver->dsn($host, $port, $database), $user, $password, [\PDO::ATTR_PERSISTENT => false]);
+        if ($driver === DatabaseDriver::Mysql) {
+            $pdo->exec("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')");
+        }
+
+        return new self($pdo, $name);
     }
 
     /** How long a connection waits on another's write lock before giving up. */
