@@ -207,3 +207,25 @@ it('counts a row committed since a transaction of its own began among those upda
         });
     });
 })->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
+
+// And save() asks as the row stands: a plain read inside a transaction
+// already open would find a row deleted since its first read, and report a
+// change written to a row that is gone.
+it('refuses to save over a row deleted since a transaction of its own began, on MySQL', function () {
+    Shelves::onMySql(static function (Shelves $fixture, PdoConnection $connection): void {
+        $other = Databases::another('mysql');
+        $other->exec('USE ' . $fixture->pdo->query('SELECT DATABASE()')?->fetchColumn());
+        $orm = $fixture->orm(connection: $connection);
+        $id = $fixture->ids['Xi'];
+
+        $orm->transaction(static function () use ($orm, $other, $id): void {
+            // The transaction's first read, which every plain read after it sees as of.
+            $brand = $orm->find(Brand::class, $id) ?? throw new \LogicException('no brand');
+            $other->prepare('DELETE FROM brands WHERE id = ?')->execute([$id]);
+
+            $brand->name = 'Omicron';
+            expect(static fn () => $orm->save($brand))->toThrow(MissingRow::class)
+                ->and($brand->isDirty())->toBeTrue();
+        });
+    });
+})->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
