@@ -2184,17 +2184,21 @@ final class Orm
         }
 
         try {
-            $affected = $this->connection->execute(
-                $sql,
-                [...array_values($changes), $meta->keyOf($model), ...$scopeBindings],
-            );
+            $bindings = [...array_values($changes), $meta->keyOf($model), ...$scopeBindings];
+            $affected = $this->connection->execute($sql, $bindings);
+
+            // MySQL counts the rows an UPDATE changed, not the rows it
+            // matched: one whose values the row held already -- the same
+            // change saved by two requests -- counted none (ADR 0172).
+            if ($affected === 0 && $this->connection instanceof NamesDriver && $this->connection->driver() === 'mysql') {
+                $affected = $this->updatedOnMysql($meta, $model, $sql, $bindings, $scope, $scopeBindings);
+            }
 
             // Nothing matched: the row is gone, or the tenant predicate excluded
             // it. Treated as success, the change was lost and the model marked
             // clean, so a retry sent nothing either. Thrown before markClean() so
-            // the change stays pending. (This relies on the driver counting rows
-            // matched, which SQLite and Postgres do; MySQL's PDO driver counts
-            // rows changed unless MYSQL_ATTR_FOUND_ROWS is set.)
+            // the change stays pending. (SQLite and Postgres count the rows
+            // matched; on MySQL updatedOnMysql() has asked.)
             if ($affected === 0) {
                 throw MissingRow::onUpdate($meta->class, $meta->keyOf($model));
             }
@@ -2215,6 +2219,38 @@ final class Orm
         $this->followWrite($meta, $meta->keyOf($model), $written);
 
         return true;
+    }
+
+    /**
+     * On MySQL, after an update() that counted no row: 1 when the row is
+     * there, under the same tenant predicate, and holds the change; 0 when
+     * it is not.
+     *
+     * Asked with the row locked (FOR UPDATE), in a transaction of its own --
+     * a savepoint inside one open already -- and the UPDATE sent again under
+     * the lock: a model deleted and saved again inserts its row under the
+     * same key, and a row put back between the UPDATE that found none and
+     * a read that found it would otherwise read as written without holding
+     * the change. A locking read sees the row as it stands, not as a
+     * transaction already open first read it.
+     *
+     * @param list<mixed> $bindings the UPDATE's
+     * @param list<mixed> $scopeBindings
+     */
+    private function updatedOnMysql(ModelMeta $meta, Model $model, string $sql, array $bindings, string $scope, array $scopeBindings): int
+    {
+        return $this->connection->transaction(function () use ($meta, $model, $sql, $bindings, $scope, $scopeBindings): int {
+            $there = $this->connection->select(
+                sprintf('SELECT 1 FROM "%s" WHERE "%s" = ?', $meta->table, $meta->idColumn) . ($scope !== '' ? " AND {$scope}" : '') . ' FOR UPDATE',
+                [$meta->keyOf($model), ...$scopeBindings],
+            );
+            if ($there === []) {
+                return 0;
+            }
+            $this->connection->execute($sql, $bindings);
+
+            return 1;
+        });
     }
 
     /**

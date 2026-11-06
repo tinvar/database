@@ -1362,10 +1362,22 @@ final readonly class Query
             $count = 0;
             foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
-                $count += $this->orm->statements()->execute(
+                $changed = $this->orm->statements()->execute(
                     'UPDATE ' . Identifiers::quote($this->meta->table) . " SET {$assignments} WHERE {$where}",
                     [...$values, ...$bindings],
                 );
+                // MySQL counts the rows an UPDATE changed, not the rows it
+                // matched, and a row that held the values already is not
+                // one (ADR 0172). The rows are this transaction's, locked
+                // by key, so a locking read by the same WHERE counts the
+                // rows matched.
+                if ($changed < \count($chunk) && $this->onMySql()) {
+                    $changed = (int) ($this->orm->statements()->select(
+                        'SELECT COUNT(*) AS "n" FROM ' . Identifiers::quote($this->meta->table) . " WHERE {$where} FOR SHARE",
+                        $bindings,
+                    )[0]['n'] ?? 0);
+                }
+                $count += $changed;
             }
 
             $this->orm->noteRowTenants($this->meta, $ids);
