@@ -69,14 +69,21 @@ final readonly class Pivots
             // The links there now, by the row each links to: every one of
             // the owner's for a sync(), else those to the rows named. A
             // pivot with no unique key over the pair may hold one twice.
+            // A #[SoftDeletes] pivot's trashed links are none, and one is
+            // restored rather than made again beside it (ADR 0191).
             $linked = [];
+            $trashed = [];
             if ($ids !== [] || ($attach && $detach)) {
-                $links = $this->orm->query($pivot->class)->where($pivot->ownerProperty, $ownerId);
+                $links = $this->orm->query($pivot->class)->withTrashed()->where($pivot->ownerProperty, $ownerId);
                 if (!($attach && $detach)) {
                     $links = $links->whereIn($pivot->targetProperty, $ids);
                 }
                 foreach ($links->orderBy($pivotMeta->idProperty)->fetch() as $link) {
-                    $linked[(string) $link->foreignKey($pivot->targetProperty)][] = $link;
+                    if ($link->isTrashed()) {
+                        $trashed[(string) $link->foreignKey($pivot->targetProperty)] ??= $link;
+                    } else {
+                        $linked[(string) $link->foreignKey($pivot->targetProperty)][] = $link;
+                    }
                 }
             }
 
@@ -102,7 +109,17 @@ final readonly class Pivots
             $attached = [];
             if ($attach) {
                 foreach ($ids as $id) {
-                    if (!isset($linked[$id]) && $this->link($owner, $targets[$id], $pivot, $pivotMeta, $values)) {
+                    if (isset($linked[$id])) {
+                        continue;
+                    }
+                    if (isset($trashed[$id])) {
+                        foreach ($values as $name => $value) {
+                            $pivotMeta->set($trashed[$id], $name, $value);
+                        }
+                        $this->orm->save($trashed[$id]);
+                        $this->orm->restore($trashed[$id]);
+                        $attached[] = $id;
+                    } elseif ($this->link($owner, $targets[$id], $pivot, $pivotMeta, $values)) {
                         $attached[] = $id;
                     }
                 }

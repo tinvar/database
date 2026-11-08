@@ -19,12 +19,14 @@ use Tinvar\Orm\Attributes\AfterDelete;
 use Tinvar\Orm\Attributes\Audited;
 use Tinvar\Orm\Attributes\BeforeDelete;
 use Tinvar\Orm\Attributes\BelongsTo;
+use Tinvar\Orm\Attributes\BelongsToMany;
 use Tinvar\Orm\Attributes\Column;
 use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\SoftDeletes;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
+use Tinvar\Orm\Attributes\Unique;
 use Tinvar\Orm\Collection;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\MappingException;
@@ -120,6 +122,36 @@ final class Named extends Model
     #[Column] public ?\DateTimeImmutable $removedAt = null;
 }
 
+#[Table('soft_kits'), TenantScoped]
+final class Kit extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $name;
+
+    /** @var Collection<Label> */
+    #[BelongsToMany(Label::class, through: KitLabel::class, orderBy: 'name')]
+    public Collection $labels;
+}
+
+#[Table('soft_labels'), TenantScoped, SoftDeletes]
+final class Label extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public string $name;
+    #[Column] public ?CarbonImmutable $deletedAt = null;
+}
+
+/** A pivot that soft deletes too: a trashed link links nothing. */
+#[Table('soft_kit_labels'), TenantScoped, SoftDeletes, Unique('kit', 'label')]
+final class KitLabel extends Model
+{
+    #[Id] public private(set) string $id;
+    #[Column] public int $weight = 0;
+    #[Column] public ?CarbonImmutable $deletedAt = null;
+    #[BelongsTo] public Kit $kit;
+    #[BelongsTo] public Label $label;
+}
+
 /** Makes the two tables through the schema builder, as a migration would. */
 function migrate(Schema $schema, bool $policies): void
 {
@@ -137,9 +169,28 @@ function migrate(Schema $schema, bool $policies): void
         $table->softDeletes();
         $table->tenant();
     });
+    $schema->create('soft_kits', static function (Blueprint $table): void {
+        $table->uuid('id')->primary();
+        $table->tenant();
+        $table->string('name');
+    });
+    $schema->create('soft_labels', static function (Blueprint $table): void {
+        $table->uuid('id')->primary();
+        $table->tenant();
+        $table->string('name');
+        $table->softDeletes();
+    });
+    $schema->create('soft_kit_labels', static function (Blueprint $table): void {
+        $table->uuid('id')->primary();
+        $table->tenant();
+        $table->pivot(Kit::class, Label::class);
+        $table->integer('weight')->default(0);
+        $table->softDeletes();
+    });
     if ($policies) {
-        $schema->tenantPolicy('soft_bins');
-        $schema->tenantPolicy('soft_parts');
+        foreach (['soft_bins', 'soft_parts', 'soft_kits', 'soft_labels', 'soft_kit_labels'] as $table) {
+            $schema->tenantPolicy($table);
+        }
     }
 }
 
@@ -148,7 +199,11 @@ function labels(iterable $models): array
 {
     $out = [];
     foreach ($models as $model) {
-        $out[] = $model instanceof Bin ? $model->label : ($model instanceof Part ? $model->name : '?');
+        $out[] = match (true) {
+            $model instanceof Bin => $model->label,
+            $model instanceof Part, $model instanceof Label => $model->name,
+            default => '?',
+        };
     }
 
     return $out;
@@ -367,6 +422,64 @@ function rollsBackAlike(Orm $orm): void
     });
 }
 
+/**
+ * A #[BelongsToMany] passes by a trashed target and a trashed pivot row
+ * alike -- loaded, filtered or counted -- and attach() restores a trashed
+ * link rather than making one beside it (ADR 0191 on ADR 0192).
+ */
+function linksAlike(Orm $orm): void
+{
+    $orm->actAs('acme', static function () use ($orm): void {
+        $kit = new Kit();
+        $kit->name = 'starter';
+        $orm->save($kit);
+        $made = [];
+        foreach (['blue', 'green', 'red'] as $name) {
+            $label = new Label();
+            $label->name = $name;
+            $made[$name] = $orm->save($label);
+        }
+        $orm->attach($kit, 'labels', array_values($made));
+        $orm->identityMap()->flush();
+        $kit = $orm->find(Kit::class, $kit->id);
+        \assert($kit instanceof Kit);
+        expect(labels($kit->labels))->toBe(['blue', 'green', 'red']);
+
+        // A trashed target drops out.
+        $green = $orm->find(Label::class, $made['green']->id);
+        \assert($green instanceof Label);
+        $orm->delete($green);
+        expect(labels($kit->labels))->toBe(['blue', 'red'])
+            ->and($orm->query(Kit::class)->whereHas('labels', static fn (Query $q): Query => $q->where('name', 'green'))->exists())->toBeFalse()
+            ->and(array_map(static fn ($row): array => $row->values, $orm->query(Kit::class)->withCount('labels')->fetchAggregated()))
+            ->toEqual([['labelsCount' => 2]]);
+
+        // A trashed pivot row drops out too, though its target is live.
+        $orm->detach($kit, 'labels', [$made['red']->id]);
+        expect($orm->query(KitLabel::class)->onlyTrashed()->count())->toBe(1)
+            ->and(labels($kit->labels))->toBe(['blue'])
+            ->and($orm->query(Kit::class)->where('labels.name', 'red')->exists())->toBeFalse()
+            ->and(array_map(static fn ($row): array => $row->values, $orm->query(Kit::class)->withCount('labels')->fetchAggregated()))
+            ->toEqual([['labelsCount' => 1]]);
+
+        // Attached again, the trashed link is restored, not made twice.
+        $change = $orm->attach($kit, 'labels', [$made['red']->id], ['weight' => 3]);
+        expect($change->attached)->toBe([$made['red']->id])
+            ->and($orm->query(KitLabel::class)->withTrashed()->count())->toBe(3)
+            ->and($orm->query(KitLabel::class)->where('weight', 3)->count())->toBe(1)
+            ->and(labels($kit->labels))->toBe(['blue', 'red']);
+
+        // Restored, the target is back.
+        $orm->restore($green);
+        expect(labels($kit->labels))->toBe(['blue', 'green', 'red']);
+
+        // A trashed target may not be linked: it is no row the tenant reads.
+        $orm->detach($kit, 'labels', [$green->id]);
+        $orm->delete($green);
+        expect(fn () => $orm->attach($kit, 'labels', [$green->id]))->toThrow(MissingRow::class);
+    });
+}
+
 function sqliteOrm(Recorder $recorder): Orm
 {
     $connection = new PdoConnection(new \PDO('sqlite::memory:'), 'sqlite');
@@ -420,6 +533,10 @@ function onMySql(\Closure $test): void
 }
 
 describe('on SQLite', function () {
+    it('passes a trashed target and a trashed pivot row by in a #[BelongsToMany]', function () {
+        linksAlike(sqliteOrm(new Recorder()));
+    });
+
     it('trashes, passes by, restores and force deletes', function () {
         $recorder = new Recorder();
         softDeletesAlike(sqliteOrm($recorder), $recorder);
@@ -478,6 +595,10 @@ describe('on SQLite', function () {
 });
 
 describe('on Postgres, with row-level security', function () {
+    it('passes a trashed target and a trashed pivot row by in a #[BelongsToMany]', function () {
+        onPostgres(static fn (Orm $orm) => linksAlike($orm));
+    });
+
     it('trashes, passes by, restores and force deletes', function () {
         onPostgres(softDeletesAlike(...));
     });
@@ -492,6 +613,10 @@ describe('on Postgres, with row-level security', function () {
 })->group('pgsql')->skip(Databases::postgresMissing() !== null, Databases::postgresMissing() ?? '');
 
 describe('on MySQL', function () {
+    it('passes a trashed target and a trashed pivot row by in a #[BelongsToMany]', function () {
+        onMySql(static fn (Orm $orm) => linksAlike($orm));
+    });
+
     it('trashes, passes by, restores and force deletes', function () {
         onMySql(softDeletesAlike(...));
     });

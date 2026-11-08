@@ -264,6 +264,11 @@ final class Compiler
             $where[] = $tenant[0];
             $bindings = $tenant[1];
         }
+        // A trashed pivot row links nothing (ADR 0191).
+        $live = $this->trashedPredicate($pivotMeta, $alias, Trashed::Without);
+        if ($live !== null) {
+            $where[] = $live;
+        }
 
         return [
             'EXISTS (SELECT 1 FROM ' . Identifiers::quote($pivotMeta->table) . ' AS ' . Identifiers::quote($alias) . ' WHERE ' . implode(' AND ', $where) . ')',
@@ -371,14 +376,14 @@ final class Compiler
     }
 
     /**
-     * The rows a relation reaches of its target: a #[HasMany]'s live
-     * children, as a loaded collection holds them; every row a
-     * #[BelongsTo]'s key may name, trashed or not, as it loads one (ADR
-     * 0191).
+     * The rows a relation reaches of its target: a #[HasMany]'s or a
+     * #[BelongsToMany]'s live ones, as a loaded collection holds them;
+     * every row a #[BelongsTo]'s key may name, trashed or not, as it loads
+     * one (ADR 0191).
      */
     private static function reached(RelationMeta $relation): Trashed
     {
-        return $relation->kind === RelationKind::HasMany ? Trashed::Without : Trashed::With;
+        return $relation->kind === RelationKind::BelongsTo ? Trashed::With : Trashed::Without;
     }
 
     /**
