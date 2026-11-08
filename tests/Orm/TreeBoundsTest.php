@@ -9,7 +9,7 @@ declare(strict_types=1);
  * The Orm takes the tree through an interface (TenantSubtrees), which any
  * application can implement (ADR 0056). Each port here drops a limit a real
  * walk keeps -- it loops, runs deeper than 32 levels, answers with more than
- * 1,000 tenants or with things that are no tenant's name -- and the Orm
+ * 10,000 tenants or with things that are no tenant's name -- and the Orm
  * still answers as the bounded walk would: "not under" past the cut, and a
  * refusal rather than part of a subtree. Through Orm::tenants(), which the
  * code above the Orm asks, and through withinSubtree(), which reads.
@@ -117,14 +117,14 @@ describe('a walk up', function () {
 });
 
 describe('a subtree', function () {
-    it('is refused past 1,000 tenants, root included, rather than read in part', function () {
+    it('is refused past 10,000 tenants, root included, rather than read in part', function () {
         $wide = static fn (int $n): TenantBounds => bounds(new Answers(
             static fn (): array => [],
             static fn (string $root): array => [$root, ...array_map(static fn (int $i): string => "t{$i}", range(1, $n))],
         ));
 
         expect($wide(TenantBounds::MAX_SUBTREE - 1)->subtree('root'))->toHaveCount(TenantBounds::MAX_SUBTREE)
-            ->and(fn () => $wide(TenantBounds::MAX_SUBTREE)->subtree('root'))->toThrow(\LengthException::class, 'more than the 1000');
+            ->and(fn () => $wide(TenantBounds::MAX_SUBTREE)->subtree('root'))->toThrow(\LengthException::class, 'more than the 10000');
     });
 
     it('puts its root first whatever the port said, each tenant once', function () {
@@ -177,7 +177,7 @@ describe('the Orm', function () {
         )))->toThrow(\LogicException::class, 'not in its subtree');
 
         // From reseller itself, the subtree it answered, which is the port's
-        // to answer truthfully (its contract), within the 1,000.
+        // to answer truthfully (its contract), within the 10,000.
         expect($orm->actAs('reseller', static fn (): array => $orm->grantSubtree(static fn (): array => $orm->withinSubtree($names))))
             ->toBe(['acme-script', 'acme-west-script', 'globex-script', 'reseller-script']);
     });

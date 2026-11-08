@@ -116,12 +116,27 @@ final class RowLevelSecurity
         if ($tenants === []) {
             return '';
         }
+        // The connection asks before every statement, and a subtree is up
+        // to 10,000 tenants (ADR 0196): the last answer is kept, and the
+        // same list -- the same array, which compares at once -- reuses it.
+        if ($tenants === self::$lastTenants) {
+            return self::$lastLiteral;
+        }
 
-        return '{' . implode(',', array_map(
+        $literal = '{' . implode(',', array_map(
             static fn (string $tenant): string => '"' . addcslashes($tenant, '"\\') . '"',
             $tenants,
         )) . '}';
+        self::$lastTenants = $tenants;
+        self::$lastLiteral = $literal;
+
+        return $literal;
     }
+
+    /** @var list<string> the tenants arrayLiteral() wrote last */
+    private static array $lastTenants = [];
+
+    private static string $lastLiteral = '';
 
     /**
      * The statement a connection tells its session's tenant with: the three

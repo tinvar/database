@@ -15,8 +15,10 @@ namespace Tinvar\Orm;
  *
  * The Orm does not take these answers on trust. It reads them through
  * TenantBounds, which holds them to the limits a walk of the tree has --
- * 32 levels, a stop at a loop, 1,000 tenants to a subtree -- whatever an
- * implementation returns, so one that drops them drops nothing. What it
+ * 32 levels, a stop at a loop, 10,000 tenants to a subtree read at once,
+ * pages that keep to the walk -- whatever an implementation returns, so
+ * one that drops them drops nothing (ADRs 0056, 0196). A port that pages
+ * implements PagedTenantSubtrees as well. What it
  * cannot check is held by this contract:
  *
  * - **One record.** ancestors() and subtree() are answered from the same

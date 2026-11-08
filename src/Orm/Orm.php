@@ -192,8 +192,9 @@ final class Orm
      *        none, and then every read or write of a #[TenantScoped] model throws
      *        NoTenantContext, whatever tenant is in force. Its answers are read
      *        through TenantBounds, so the limits of a walk -- a loop or more than
-     *        32 levels says "not under", a subtree of more than 1,000 tenants
-     *        throws -- hold whatever an implementation returns (ADR 0056).
+     *        32 levels says "not under", a subtree read at once of more than
+     *        10,000 tenants throws -- hold whatever an implementation returns
+     *        (ADRs 0056, 0196).
      * @param (\Closure(): \DateTimeImmutable)|null $clock what now() answers: the time a
      *        new row's createdAt, and a written row's updatedAt, are stamped with.
      *        Carbon's now(), in UTC, unless given -- which is the system's time, or
@@ -989,25 +990,132 @@ final class Orm
      * @template T
      * @param \Closure(): T $work
      * @return T
+     * A subtree of up to TenantBounds::MAX_SUBTREE tenants, root included,
+     * is read at once, bound as one value past MAX_LISTED; a larger one is
+     * refused, saying to read it a page at a time with withinSubtreePages()
+     * -- never read in part (ADR 0196).
+     *
+     * @template T
+     * @param \Closure(): T $work
+     * @return T
      * @throws \LogicException where no membership granted it, with no tenant tree, or no tenant
      * @throws \LengthException for a subtree larger than TenantBounds::MAX_SUBTREE
      */
     public function withinSubtree(\Closure $work): mixed
     {
+        [$root, $tree] = $this->grantedRoot('withinSubtree()');
+
+        return $this->inSubtree([$root, $tree->subtree($root)], $work);
+    }
+
+    /**
+     * withinSubtree() a page at a time: $work runs once for each page of
+     * the subtree of the tenant in force -- $size tenants, in byte order of
+     * their names, the root among them where its name sorts -- with reads
+     * widened to that page's tenants alone (ADR 0196).
+     *
+     * For a subtree of any size, larger than withinSubtree() reads at once.
+     * Allowed exactly where withinSubtree() is -- a membership's grant, from
+     * the tenant it was held in or one below it -- and everything else is
+     * as it is there: the tenant in force does not change, a row written is
+     * stamped with it, a token minted names it, and the predicate and
+     * Postgres's policy are widened to the page and no further.
+     *
+     * Each page is read from the tree as the walk reaches it, and $work runs
+     * outside any transaction this opens. $after goes on from a page's
+     * last() -- a checkpoint -- and $pages stops after so many; the answer
+     * is the last tenant of the last page run, to go on after, or null once
+     * the subtree has been read to its end.
+     *
+     * @param \Closure(SubtreePage): mixed $work
+     * @param int $size tenants to a page, from 1 to TenantBounds::MAX_SUBTREE
+     * @param int|null $pages how many pages to run before stopping, 1 or more; all of them for null
+     * @return string|null where to go on after, or null at the end
+     * @throws \LogicException where withinSubtree() would be refused
+     */
+    public function withinSubtreePages(\Closure $work, int $size = TenantBounds::MAX_LISTED, ?string $after = null, ?int $pages = null): ?string
+    {
+        if ($pages !== null && $pages < 1) {
+            throw new \InvalidArgumentException('A walk that stops runs a page at least.');
+        }
+        [$root, $tree] = $this->grantedRoot('withinSubtreePages()');
+
+        $run = 0;
+        foreach ($tree->pages($root, $size, $after) as $page) {
+            $this->inSubtree([$root, $page->tenants], static fn (): mixed => $work($page));
+            if ($pages !== null && ++$run >= $pages) {
+                return $page->last();
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Runs $work as each tenant of $root's subtree in turn -- $root among
+     * them where its name sorts -- for a job or a command that walks one
+     * (ADR 0196). Each run is actAs() that tenant: its rows alone, a write
+     * stamped with it, nothing widened, as code may run as any tenant it
+     * names. So no membership's grant is asked for, and none is given; a
+     * job holds none (ADR 0047).
+     *
+     * The subtree is read a page of $pageSize at a time, in byte order of
+     * the tenants' names, and holds no bound: only a page is held. $after
+     * goes on after a tenant -- the one the last run stopped at, which is
+     * the checkpoint a long job keeps -- and $limit stops after so many
+     * tenants. The answer is the last tenant run, to go on after, or null
+     * once the subtree has been walked to its end. Nothing is held across
+     * tenants: a transaction is $work's to open, for its tenant.
+     *
+     * @param \Closure(string): mixed $work given the tenant it runs as
+     * @param int|null $limit how many tenants to run before stopping, 1 or more; all of them for null
+     * @return string|null where to go on after, or null at the end
+     * @throws \LogicException with no tenant tree
+     */
+    public function forEachTenant(string $root, \Closure $work, ?string $after = null, ?int $limit = null, int $pageSize = TenantBounds::PAGE): ?string
+    {
+        if ($this->tenants === null) {
+            throw new \LogicException('forEachTenant() walks a tenant\'s subtree, and the Orm was given no tenant tree.');
+        }
+        if ($limit !== null && $limit < 1) {
+            throw new \InvalidArgumentException('A walk that stops runs a tenant at least.');
+        }
+
+        $run = 0;
+        foreach ($this->tenants->pages($root, $pageSize, $after) as $page) {
+            foreach ($page->tenants as $tenant) {
+                $this->actAs($tenant, static fn (): mixed => $work($tenant));
+                if ($limit !== null && ++$run >= $limit) {
+                    return $tenant;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The tenant in force, where a membership's grant lets $what read below
+     * it, and the tree to read: refused anywhere else.
+     *
+     * @return array{string, TenantBounds}
+     */
+    private function grantedRoot(string $what): array
+    {
         $granted = $this->subtreeGrant();
         if ($granted === null) {
             throw new \LogicException(
-                'withinSubtree() reads below the tenant in force, which only a membership grants: run it in a panel '
+                "{$what} reads below the tenant in force, which only a membership grants: run it in a panel "
                 . 'defined with `subtree: true`, whose membership check grants it.',
             );
         }
         if ($this->tenants === null) {
-            throw new \LogicException('withinSubtree() reads across a tenant\'s subtree, and the Orm was given no tenant tree.');
+            throw new \LogicException("{$what} reads across a tenant's subtree, and the Orm was given no tenant tree.");
         }
 
         $root = $this->tenant();
         if ($root === '') {
-            throw new \LogicException('withinSubtree() reads below the tenant in force, and there is none.');
+            throw new \LogicException("{$what} reads below the tenant in force, and there is none.");
         }
 
         // The grant is the membership's, held in one tenant: it reaches that
@@ -1016,11 +1124,11 @@ final class Orm
         // nothing there.
         if ($root !== $granted && !$this->tenants->contains($granted, $root)) {
             throw new \LogicException(
-                "withinSubtree() was granted below '{$granted}', and the tenant in force is not in its subtree.",
+                "{$what} was granted below '{$granted}', and the tenant in force is not in its subtree.",
             );
         }
 
-        return $this->inSubtree([$root, $this->tenants->subtree($root)], $work);
+        return [$root, $this->tenants];
     }
 
     /**
@@ -1111,8 +1219,9 @@ final class Orm
 
     /**
      * The tenants a read now reaches when withinSubtree() has widened it --
-     * the tenant in force first -- or null when it reads one tenant, or
-     * scoping is lifted.
+     * the tenant in force first -- or withinSubtreePages() has, to a page
+     * that need not hold the tenant in force; null when it reads one
+     * tenant, or scoping is lifted.
      *
      * @return non-empty-list<string>|null
      */
@@ -1351,14 +1460,59 @@ final class Orm
         }
         $column = ($alias === null ? '' : '"' . $alias . '".') . '"' . $meta->tenantColumn . '"';
 
-        if (\count($tenants) > 1) {
-            return [
-                $column . ' IN (' . implode(', ', array_fill(0, \count($tenants), '?')) . ')',
-                $tenants,
-            ];
+        return $this->tenantIn($column, $tenants);
+    }
+
+    /**
+     * `$column` held to $tenants, and its bindings: `= ?` for one, a
+     * placeholder each up to TenantBounds::MAX_LISTED, and past that the
+     * whole list as one bound value -- a Postgres array, `= ANY (?)`, which
+     * Postgres types as the column's; a JSON array MySQL's JSON_TABLE() or
+     * SQLite's json_each() reads as a table -- so a statement inside a large
+     * subtree is no larger than one inside a small one (ADR 0196).
+     *
+     * The same list either way, which is the list Postgres's policy is told:
+     * the predicate and the policy cannot disagree about whose rows a read
+     * reaches. MySQL's column is its type's collation's to compare, as `= ?`
+     * is, and a name longer than JSON_TABLE()'s column is an error, never a
+     * shorter name. A connection that does not say which database it talks
+     * to is refused past the list, rather than sent SQL it may not read.
+     *
+     * @param non-empty-list<string> $tenants
+     * @return array{string, list<string>}
+     * @throws \LengthException past MAX_LISTED on a connection that names no driver
+     *
+     * @internal for the Orm and its query builder (Builder\Compiler), inside this package
+     */
+    public function tenantIn(string $column, array $tenants): array
+    {
+        if (\count($tenants) === 1) {
+            return [$column . ' = ?', $tenants];
+        }
+        if (\count($tenants) <= TenantBounds::MAX_LISTED) {
+            return [$column . ' IN (' . implode(', ', array_fill(0, \count($tenants), '?')) . ')', $tenants];
         }
 
-        return [$column . ' = ?', $tenants];
+        $driver = $this->connection instanceof NamesDriver ? $this->connection->driver() : null;
+
+        return match ($driver) {
+            'pgsql' => [$column . ' = ANY (?)', [RowLevelSecurity::arrayLiteral($tenants)]],
+            'mysql' => [
+                $column . ' IN (SELECT tinvar_subtree.tenant FROM JSON_TABLE(?, \'$[*]\' COLUMNS '
+                    . '(tenant VARCHAR(255) PATH \'$\' ERROR ON ERROR)) AS tinvar_subtree)',
+                [json_encode($tenants, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES)],
+            ],
+            'sqlite' => [
+                $column . ' IN (SELECT value FROM json_each(?))',
+                [json_encode($tenants, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES)],
+            ],
+            default => throw new \LengthException(\sprintf(
+                'A read across %d tenants binds them as one value, and this connection does not say which database it talks to (NamesDriver); '
+                . 'read the subtree a page of %d at a time, with withinSubtreePages().',
+                \count($tenants),
+                TenantBounds::MAX_LISTED,
+            )),
+        };
     }
 
     /**
@@ -1418,9 +1572,9 @@ final class Orm
             throw new NoTenantContext($meta->class);
         }
 
-        $subtree = $this->subtreeInForce();
-
-        return $subtree !== null && \count($subtree) > 1 ? $subtree : [$tenant];
+        // The subtree's tenants, or a page of them (withinSubtreePages()),
+        // which need not hold the tenant in force.
+        return $this->subtreeInForce() ?? [$tenant];
     }
 
     /**

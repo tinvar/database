@@ -356,11 +356,9 @@ final class Compiler
             return null;
         }
 
-        $column = Identifiers::quote($alias) . '.' . Identifiers::quote($meta->tenantColumn);
-
-        return \count($tenants) === 1
-            ? ["{$column} = ?", $tenants]
-            : [$column . ' IN (' . self::placeholders(\count($tenants)) . ')', $tenants];
+        // The Orm's own spelling of it, so a large subtree is one bound
+        // value here as it is in find() and all() (ADR 0196).
+        return $this->orm->tenantIn(Identifiers::quote($alias) . '.' . Identifiers::quote($meta->tenantColumn), $tenants);
     }
 
     /**
