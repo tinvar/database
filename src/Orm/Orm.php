@@ -3405,13 +3405,17 @@ final class Orm
 
         if ($this->isWidened()) {
             $grouped = $this->widenedRows($relation, $parent, $key);
+            if (!\array_key_exists($foreignKey, $grouped)) {
+                // The ghost's key is not one its siblings hold now: read it alone.
+                $grouped = $this->loadRelationRows($relation, [], $key, keys: [$foreignKey]);
+            }
 
             /** @var array<string, mixed>|null */
             return $grouped[$foreignKey][0] ?? null;
         }
 
         if (!$this->hasRows($key, $foreignKey)) {
-            $this->loadRelationRows($relation, $this->batchWith($parent));
+            $this->loadRelationRows($relation, $this->batchWith($parent), keys: [$foreignKey]);
         }
 
         /** @var array<string, mixed>|null */
@@ -3548,12 +3552,14 @@ final class Orm
      *        -- and only when a test records lazy loads.
      * @param bool $lazy whether a lazy read asked for it, and so goes on the record a
      *        test reads; an eager load (Query::with()) is a statement of the query's own
+     * @param list<string> $keys further #[BelongsTo] keys to read beside the parents': a
+     *        ghost's own, which its parent no longer holds once a write moved it
      * @return array<string, list<array<string, mixed>>>
      *
      * @internal for the Orm's own relation loading and the batch
      *     scheduler's, inside this package
      */
-    public function loadRelationRows(RelationMeta $relation, array $parents, ?string $key = null, ?string $batch = null, bool $lazy = true): array
+    public function loadRelationRows(RelationMeta $relation, array $parents, ?string $key = null, ?string $batch = null, bool $lazy = true, array $keys = []): array
     {
         // The scheduler passes the key the awaiting fiber computed, because
         // the tenant it was namespaced under is the one being re-entered, not
@@ -3574,6 +3580,14 @@ final class Orm
                 ? $parent->primaryKey()
                 : (string) ($parent->foreignKey($relation->property) ?? '');
 
+            if ($groupKey !== '' && ($unscoped || !$this->hasRows($key, $groupKey))) {
+                $groupKeys[$groupKey] = true;
+            }
+        }
+        // A #[BelongsTo] ghost's own key, which its parent may no longer hold:
+        // a write remembers the key it wrote, so a parent read before its
+        // child moved is named by the key it was made with, not the child's.
+        foreach ($keys as $groupKey) {
             if ($groupKey !== '' && ($unscoped || !$this->hasRows($key, $groupKey))) {
                 $groupKeys[$groupKey] = true;
             }

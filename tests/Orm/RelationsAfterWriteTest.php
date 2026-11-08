@@ -277,3 +277,36 @@ it('does not patch another tenant\'s row into a loaded relation from an unscoped
 
     expect(array_map(static fn (Card $c): string => $c->name, $board->cards->all()))->toBe(['acme-card']);
 });
+
+it('fills a parent read before its child moved away, from the key it was read under', function () {
+    // A #[BelongsTo] ghost names its row by the key it was made with. Since
+    // a write remembers the keys it wrote (ADR 0191's review), the child's
+    // key is its new parent's by the time the old one is first touched, and
+    // a batch built from the children's keys alone left the ghost's own row
+    // out: a DanglingRelation for a row that is there.
+    $fixture = new Fixture(racks: 1, unitsPerRack: 0, sites: 2);
+    [$first, $second] = (new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat()))->all(Site::class, 'code');
+    // A fresh map: nothing read yet, so the rack's site is a ghost.
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
+    $rack = rack($orm, 'R-01');
+    $old = $rack->site;
+
+    $rack->site = $orm->find(Site::class, $second->id);
+    $orm->save($rack);
+
+    expect($old->id)->toBe($first->id)
+        ->and($old->code)->toBe($first->code);
+});
+
+it('fills such a parent inside acrossTenants() too', function () {
+    $fixture = new Fixture(racks: 1, unitsPerRack: 0, sites: 2);
+    [$first, $second] = (new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat()))->all(Site::class, 'code');
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
+    $rack = rack($orm, 'R-01');
+    $old = $rack->site;
+
+    $rack->site = $orm->find(Site::class, $second->id);
+    $orm->save($rack);
+
+    expect($orm->acrossTenants(static fn (): string => $old->code))->toBe($first->code);
+});
