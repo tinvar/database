@@ -50,7 +50,7 @@ final class Orm
 
     /**
      * What each lazy relation load and each acrossTenants() call is told to,
-     * with where it was made: the dev toolbar's, under `tinvar dev`
+     * with where it was made: the dev toolbar's, under `tinvar serve --dev`
      * (flagLazyLoads(), flagAcrossTenants()). Null otherwise, so a request
      * pays a null check and no backtrace.
      *
