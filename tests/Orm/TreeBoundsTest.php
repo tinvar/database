@@ -107,6 +107,27 @@ describe('a walk up', function () {
         }
     });
 
+    // MySQL compares with PAD SPACE: 'acme ' equals 'acme' there, so a
+    // tenant named with a space at either end could read another's rows
+    // (ADR 0196, "What a review found"). No tenant is, on any driver.
+    it('takes no name with a space at either end for a tenant\'s', function () {
+        $spaced = bounds(new Answers(
+            static fn (string $t): array => $t === 'a' ? ['b', 'root '] : [],
+            static fn (string $root): array => [$root, 'a', ' b'],
+        ));
+        $orm = new Orm(new Tenants()->connection, tenants: chain(1));
+
+        expect(TenantBounds::isName('acme'))->toBeTrue()
+            ->and(TenantBounds::isName('ac me'))->toBeTrue()
+            ->and(TenantBounds::isName('acme '))->toBeFalse()
+            ->and(TenantBounds::isName(' acme'))->toBeFalse()
+            ->and(TenantBounds::isName(' '))->toBeFalse()
+            ->and($spaced->ancestors('a'))->toBe(['b'])
+            ->and(fn () => $spaced->subtree('root'))->toThrow(\UnexpectedValueException::class, 'no tenant')
+            ->and(fn () => $orm->actAs('acme ', static fn (): null => null))->toThrow(\InvalidArgumentException::class)
+            ->and(fn () => $orm->actAs(' acme', static fn (): null => null))->toThrow(\InvalidArgumentException::class);
+    });
+
     it('places no one under the empty tenant, and the empty tenant under no one', function () {
         $any = bounds(new Answers(static fn (): array => [''], static fn (string $root): array => [$root]));
 

@@ -128,6 +128,11 @@ final class Orm
     /** @var \WeakMap<object, array{string, non-empty-list<string>}> */
     private \WeakMap $subtreeByFiber;
 
+    /** @var list<string> the subtree scopeName() last took a digest of */
+    private array $scopeDigestOf = [];
+
+    private string $scopeDigest = '';
+
     /**
      * The tenant a membership granted reads across the subtree of, or null
      * for none: set by the panel stack (RequirePanelMembership) for a panel
@@ -783,13 +788,14 @@ final class Orm
 
     /**
      * A tenant's name is printable text: what a Postgres setting can carry,
-     * and never the claim a token minted with no tenancy carries, which is
-     * spelled with a control character (TenantBounds::isName()).
+     * never the claim a token minted with no tenancy carries, which is
+     * spelled with a control character, and with no space at either end,
+     * which MySQL would compare away (TenantBounds::isName()).
      */
     private static function assertTenantName(string $tenant): void
     {
         if ($tenant !== '' && !TenantBounds::isName($tenant)) {
-            throw new \InvalidArgumentException('A tenant\'s name has no control character in it.');
+            throw new \InvalidArgumentException('A tenant\'s name has no control character in it, nor a space at either end.');
         }
     }
 
@@ -1092,6 +1098,27 @@ final class Orm
         }
 
         return null;
+    }
+
+    /**
+     * Refuses a new row of $class inside a page of withinSubtreePages() that
+     * does not hold the tenant in force (ADR 0196). The row is stamped with
+     * that tenant, which the page does not read: it would not be read back
+     * where it was made, nor indexed for search under its tenant. A page
+     * that holds the tenant in force, and withinSubtree(), whose subtree
+     * always does, make new rows as anywhere.
+     *
+     * @internal for the Orm and its query builder, inside this package
+     */
+    public function refuseNewRowUnread(string $class): void
+    {
+        $subtree = $this->subtreeInForce();
+        if ($subtree !== null && !\in_array($this->tenant(), $subtree, true)) {
+            throw new \LogicException(
+                "{$class}: a new row is stamped with the tenant in force, '{$this->tenant()}', which this page of withinSubtreePages() "
+                . 'does not read. Make it in the page that holds that tenant, or as the tenant it belongs to, with actAs().',
+            );
+        }
     }
 
     /**
@@ -1464,6 +1491,39 @@ final class Orm
     }
 
     /**
+     * The most keys one statement lists, `IN (?, ...)`, on this connection:
+     * Query::MAX_VALUES, and 2,000 on the async MySQL driver, whose client
+     * (amphp/mysql) sends no statement of more than about 3,600 bound values
+     * -- 2,000 leaves room for the tenant predicate's list beside them (ADR
+     * 0196, "What a review found"). Reads by key, relation loads and writes
+     * by key take this many at a time.
+     *
+     * @internal for the Orm and its query builder, inside this package
+     * @return positive-int
+     */
+    public function maxValues(): int
+    {
+        return $this->onAsyncMySql() ? 2_000 : Query::MAX_VALUES;
+    }
+
+    /**
+     * The most values one INSERT binds on this connection: Query::MAX_BINDINGS,
+     * and 3,000 on the async MySQL driver, for the reason maxValues() gives.
+     *
+     * @internal for the query builder, inside this package
+     * @return positive-int
+     */
+    public function maxBindings(): int
+    {
+        return $this->onAsyncMySql() ? 3_000 : Query::MAX_BINDINGS;
+    }
+
+    private function onAsyncMySql(): bool
+    {
+        return $this->connection instanceof AsyncConnection && $this->connection->driver() === 'mysql';
+    }
+
+    /**
      * `$column` held to $tenants, and its bindings: `= ?` for one, a
      * placeholder each up to TenantBounds::MAX_LISTED, and past that the
      * whole list as one bound value -- a Postgres array, `= ANY (?)`, which
@@ -1768,20 +1828,20 @@ final class Orm
             }
         }
 
-        // Query::MAX_VALUES at a time, so no list outgrows what a driver
+        // maxValues() at a time, so no list outgrows what a driver
         // binds -- SQLite's 32,766 values, Postgres's and MySQL's 65,535 --
         // and each value once, or a value in two chunks came back twice. An
         // order is the database's, which only one statement keeps.
         $values = array_values(array_unique($values, \SORT_REGULAR));
-        if ($orderBy !== null && \count($values) > Query::MAX_VALUES) {
+        if ($orderBy !== null && \count($values) > $this->maxValues()) {
             throw new \LengthException(
-                'whereIn() orders at most ' . Query::MAX_VALUES . ' values, which one statement reads in the database\'s order: '
+                'whereIn() orders at most ' . $this->maxValues() . ' values, which one statement reads in the database\'s order: '
                 . 'read more unordered, or page through them with query()->whereIn()->orderBy().',
             );
         }
 
         $rows = [];
-        foreach (array_chunk($values, Query::MAX_VALUES) as $chunk) {
+        foreach (array_chunk($values, $this->maxValues()) as $chunk) {
             array_push($rows, ...$this->connection->select(
                 $this->selectSql($meta, $column, \count($chunk), $orderBy, scope: $scope),
                 [...$chunk, ...$scopeBindings],
@@ -1993,11 +2053,25 @@ final class Orm
 
     /**
      * The scope a read is in, as a string two reads in the same one share:
-     * the tenant, and whether withinSubtree() has widened it.
+     * the tenant, and the tenants withinSubtree() or a page of
+     * withinSubtreePages() widened it to -- by a digest of them, so two
+     * pages of one walk are two scopes, and a relation read in one loads
+     * under it when touched in the other (ADR 0196).
      */
     private function scopeName(): string
     {
-        return $this->tenant() . ($this->subtreeInForce() === null ? '' : "\0subtree");
+        $subtree = $this->subtreeInForce();
+        if ($subtree === null) {
+            return $this->tenant();
+        }
+        // The same list is the same array while a scope lasts, which
+        // compares at once: a digest of up to 10,000 names, once per scope.
+        if ($subtree !== $this->scopeDigestOf) {
+            $this->scopeDigestOf = $subtree;
+            $this->scopeDigest = hash('xxh128', implode("\0", $subtree));
+        }
+
+        return $this->tenant() . "\0subtree\0" . $this->scopeDigest;
     }
 
     /**
@@ -2311,6 +2385,7 @@ final class Orm
             if ($tenant === '') {
                 throw new NoTenantContext($meta->class);
             }
+            $this->refuseNewRowUnread($meta->class);
             // Stamped, not taken from the model: a caller must not be able to
             // write a row into another tenant.
             $values[$meta->tenantColumn] = $tenant;
@@ -3547,12 +3622,12 @@ final class Orm
             ? $this->readScope($targetMeta, Trashed::Without)
             : $this->tenantScope($targetMeta);
 
-        // Query::MAX_VALUES ids at a time, so a result set of any size loads:
+        // maxValues() ids at a time, so a result set of any size loads:
         // one list of them all outgrew what a driver binds. Each group's
         // rows come from the one statement its id was in, so a relation's
         // order holds within it.
         $grouped = [];
-        foreach (array_chunk($ids, Query::MAX_VALUES) as $chunk) {
+        foreach (array_chunk($ids, $this->maxValues()) as $chunk) {
             $rows = $this->connection->select(
                 // The join column has to come back even when the child does
                 // not declare it: it is what the rows are grouped by.
@@ -3584,7 +3659,7 @@ final class Orm
 
     /**
      * A #[BelongsToMany]'s rows for $ids, the owners' keys, grouped by them
-     * (ADR 0192): one statement for each Query::MAX_VALUES of them, the
+     * (ADR 0192): one statement for each maxValues() of them, the
      * target's table joined to the pivot's, each held to its own tenant
      * predicate -- so a pivot row of another tenant's never links a row,
      * nor does one of the tenant's own reach a target of another's.
@@ -3610,7 +3685,7 @@ final class Orm
         [$targetScope, $targetBindings] = $this->readScope($target, Trashed::Without, 't');
 
         $grouped = [];
-        foreach (array_chunk($ids, Query::MAX_VALUES) as $chunk) {
+        foreach (array_chunk($ids, $this->maxValues()) as $chunk) {
             $sql = "SELECT {$columns}, \"p\".\"{$owner}\" AS \"" . self::LINKED_BY . "\""
                 . " FROM \"{$target->table}\" AS \"t\" JOIN \"{$pivotMeta->table}\" AS \"p\" ON \"p\".\"{$other}\" = \"t\".\"{$target->idColumn}\""
                 . " WHERE \"p\".\"{$owner}\" IN (" . implode(', ', array_fill(0, \count($chunk), '?')) . ')'

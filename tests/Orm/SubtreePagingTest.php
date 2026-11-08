@@ -314,6 +314,56 @@ describe('withinSubtreePages()', function () {
             ->and(granted($orm, 'root', static fn (): array => tenantsRead($orm)))->toBe(['root']);
     });
 
+    // A relation belongs to the scope its parent was read in (ADR 0013),
+    // and each page is a scope of its own: a script read in the first page
+    // and touched in the second loads its runs under the first.
+    it('loads a relation of a model read in one page under that page, wherever it is touched', function () {
+        $parents = wide(4);
+        $orm = new Orm(sqliteScripts(['root', ...array_keys($parents)]), new IdentityMap('paging'), new Links($parents));
+        $kept = null;
+        $seen = [];
+        $read = static function (SubtreePage $page) use ($orm, &$kept, &$seen): void {
+            if ($kept === null) {
+                $kept = $orm->all(Script::class, 'name')[0];
+
+                return;
+            }
+            $seen[] = [$page->tenants, array_map(static fn (ScriptRun $run): string => $run->status, $kept->runs->all())];
+        };
+
+        granted($orm, 'root', static fn (): ?string => $orm->withinSubtreePages($read, 2));
+
+        expect($kept?->name)->toBe('c00001-script')
+            ->and($seen)->toBe([[['c00003', 'c00004'], ['new']], [['root'], ['new']]]);
+    });
+
+    // A new row is stamped with the tenant in force, which a page need not
+    // read: written there, it would not be read back where it was made, nor
+    // indexed for search where it belongs. Refused, as the write it would
+    // silently lose; made in the page that holds the root, it is read back.
+    it('refuses a new row in a page that does not hold the tenant in force, and makes one in the page that does', function () {
+        $parents = wide(4);
+        $orm = new Orm(sqliteScripts(['root', ...array_keys($parents)]), new IdentityMap('paging'), new Links($parents));
+        $made = [];
+        $write = static function (SubtreePage $page) use ($orm, &$made): void {
+            $script = new Script();
+            $script->name = 'made-script';
+            if (!\in_array('root', $page->tenants, true)) {
+                expect(fn () => $orm->save($script))->toThrow(\LogicException::class, 'actAs()')
+                    ->and(fn () => $orm->query(Script::class)->insert([['name' => 'made-script']]))->toThrow(\LogicException::class, 'actAs()');
+
+                return;
+            }
+            $orm->save($script);
+            $made[] = $orm->find(Script::class, $script->id)?->name;
+        };
+
+        granted($orm, 'root', static fn (): ?string => $orm->withinSubtreePages($write, 2));
+
+        expect($made)->toBe(['made-script'])
+            ->and($orm->actAs('root', static fn (): int => $orm->query(Script::class)->where('name', 'made-script')->count()))->toBe(1);
+    });
+
     it('runs only where a membership granted the subtree, from inside it', function () {
         $orm = new Orm(sqliteScripts(['root', 'other']), new IdentityMap('paging'), new Links(wide(3)));
         $page = static fn (): null => null;
@@ -475,11 +525,8 @@ function plant(\PDO $pdo, string $driver): array
  * @param list<string> $subtree
  * @param list<string> $outside
  * @param (\Closure(): int)|null $raw a count of scripts by raw SQL, which only row-level security holds
- * @param bool $writeAtOnce false writes a page at a time: amphp/mysql sends no
- *        statement of more than about 3,600 bound values, and update() names
- *        the 5,000 rows it writes by key
  */
-function prove(Orm $orm, array $subtree, array $outside, ?\Closure $raw = null, bool $writeAtOnce = true): void
+function prove(Orm $orm, array $subtree, array $outside, ?\Closure $raw = null): void
 {
     $within = static fn (\Closure $work): mixed => granted($orm, 'r', static fn (): mixed => $orm->withinSubtree($work));
 
@@ -500,7 +547,7 @@ function prove(Orm $orm, array $subtree, array $outside, ?\Closure $raw = null, 
     $write = static function () use ($orm, &$written): void {
         $written += $orm->query(ScriptRun::class)->update(['status' => 'seen']);
     };
-    $writeAtOnce ? $within($write) : granted($orm, 'r', static fn (): ?string => $orm->withinSubtreePages($write, 1_000));
+    $within($write);
 
     expect($written)->toBe(5_000)
         ->and($orm->acrossTenants(static fn (): int => $orm->query(ScriptRun::class)->where('status', 'seen')->count()))->toBe(5_000)
@@ -591,7 +638,7 @@ describe('5,000 tenants three levels deep', function () {
             $mode = $pdo->query('SELECT @@SESSION.sql_mode')?->fetchColumn();
             $async = AsyncConnection::mysql(Databases::asyncMySql($database, \is_string($mode) ? $mode : 'ANSI_QUOTES'), 'mysql-async');
             try {
-                prove(new Orm($async, new IdentityMap('paging-async'), new TableTree($async, 'mysql')), $subtree, $outside, writeAtOnce: false);
+                prove(new Orm($async, new IdentityMap('paging-async'), new TableTree($async, 'mysql')), $subtree, $outside);
             } finally {
                 $async->close();
             }

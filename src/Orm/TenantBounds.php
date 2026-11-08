@@ -335,12 +335,15 @@ final readonly class TenantBounds
      * character in it, which is all the Orm lets a tenant be
      * (Orm::switchTenant()). A Postgres setting cannot carry NUL, and the
      * claim a token carries with no tenancy registered is spelled with one
-     * of the others, so no tenant can be taken for it. Asked of mixed, since
-     * an implementation's docblock is a promise and this is where the Orm
+     * of the others, so no tenant can be taken for it. Nor a space at
+     * either end: MySQL compares with PAD SPACE, so 'acme ' would read
+     * acme's rows there (ADR 0196). Asked of mixed, since an
+     * implementation's docblock is a promise and this is where the Orm
      * stops taking it on trust.
      */
     public static function isName(mixed $name): bool
     {
-        return \is_string($name) && $name !== '' && preg_match('/[\x00-\x1f\x7f]/', $name) !== 1;
+        return \is_string($name) && $name !== '' && $name[0] !== ' ' && !str_ends_with($name, ' ')
+            && preg_match('/[\x00-\x1f\x7f]/', $name) !== 1;
     }
 }

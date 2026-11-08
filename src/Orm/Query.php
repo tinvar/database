@@ -62,11 +62,18 @@ use Tinvar\Support\Uuid;
  */
 final readonly class Query
 {
-    /** The most values one IN list binds: a list, not a table. */
+    /**
+     * The most values one IN list binds: a list, not a table. The async
+     * MySQL driver takes fewer (Orm::maxValues()).
+     */
     public const int MAX_VALUES = 10_000;
 
-    /** The most values one INSERT binds: below what SQLite, Postgres and MySQL each take in one statement. */
-    private const int MAX_BINDINGS = 30_000;
+    /**
+     * The most values one INSERT binds: below what SQLite, Postgres and
+     * MySQL each take in one statement. The async MySQL driver takes fewer
+     * (Orm::maxBindings()).
+     */
+    public const int MAX_BINDINGS = 30_000;
 
     /** What a unionAll()'s arms are read as, together. */
     private const string UNION = 'u';
@@ -1392,7 +1399,7 @@ final readonly class Query
             $before = $this->meta->audited === null ? [] : $this->rowsOf($ids);
 
             $count = 0;
-            foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+            foreach (array_chunk($ids, $this->orm->maxValues()) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
                 $changed = $this->orm->statements()->execute(
                     'UPDATE ' . Identifiers::quote($this->meta->table) . " SET {$assignments} WHERE {$where}",
@@ -1519,7 +1526,7 @@ final readonly class Query
 
             // The rows locked above, in the state this write changes.
             $targets = [];
-            foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+            foreach (array_chunk($ids, $this->orm->maxValues()) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
                 $rows = $this->orm->statements()->select(
                     'SELECT ' . $table . '.' . Identifiers::quote($this->meta->idColumn) . " AS \"id\" FROM {$table} WHERE {$where} AND {$column} "
@@ -1538,7 +1545,7 @@ final readonly class Query
             $before = $this->meta->audited === null || $stored === null ? [] : $this->rowsOf($targets);
 
             $count = 0;
-            foreach (array_chunk($targets, self::MAX_VALUES) as $chunk) {
+            foreach (array_chunk($targets, $this->orm->maxValues()) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
                 // Changed from NULL or to it, so MySQL's count of rows
                 // changed is the count matched (ADR 0172).
@@ -1566,7 +1573,7 @@ final readonly class Query
             $written = [(string) $this->meta->deletedAtColumn => $stored];
             $whole = [];
             if ($stored === null) {
-                foreach (array_chunk($targets, self::MAX_VALUES) as $chunk) {
+                foreach (array_chunk($targets, $this->orm->maxValues()) as $chunk) {
                     foreach ($this->rowsByKey($chunk) as $row) {
                         $whole[(string) $row[$this->meta->idColumn]] = $row;
                     }
@@ -1590,7 +1597,7 @@ final readonly class Query
             $before = $this->meta->audited === null ? [] : $this->rowsOf($ids);
 
             $count = 0;
-            foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+            foreach (array_chunk($ids, $this->orm->maxValues()) as $chunk) {
                 [$where, $bindings] = $this->byKeys($chunk);
                 $count += $this->orm->statements()->execute('DELETE FROM ' . Identifiers::quote($this->meta->table) . " WHERE {$where}", $bindings);
             }
@@ -1813,7 +1820,7 @@ final readonly class Query
             $table = Identifiers::quote($this->meta->table);
             $list = implode(', ', array_map(Identifiers::quote(...), $columns));
             $tuple = '(' . Compiler::placeholders(\count($columns)) . ')';
-            $perStatement = max(1, intdiv(max(1, self::MAX_BINDINGS - \count($conflictBindings)), \count($columns)));
+            $perStatement = max(1, intdiv(max(1, $this->orm->maxBindings() - \count($conflictBindings)), \count($columns)));
 
             foreach (array_chunk($stored, $perStatement) as $chunk) {
                 $bindings = [];
@@ -1860,6 +1867,7 @@ final readonly class Query
         if ($tenant === '') {
             throw new NoTenantContext($this->class);
         }
+        $this->orm->refuseNewRowUnread($this->class);
 
         return $tenant;
     }
@@ -2133,7 +2141,7 @@ final readonly class Query
 
         $inserted = 0;
         $found = [];
-        foreach (array_chunk($stored, max(1, intdiv(self::MAX_VALUES, \count($key)))) as $chunk) {
+        foreach (array_chunk($stored, max(1, intdiv($this->orm->maxValues(), \count($key)))) as $chunk) {
             $alternatives = [];
             $bindings = [];
             foreach ($chunk as $row) {
@@ -2230,7 +2238,7 @@ final readonly class Query
     private function rowsOf(array $ids): array
     {
         $rows = [];
-        foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+        foreach (array_chunk($ids, $this->orm->maxValues()) as $chunk) {
             foreach ($this->rowsByKey($chunk, withTenant: true) as $row) {
                 $rows[(string) $row[$this->meta->idColumn]] = $row;
             }
@@ -2295,7 +2303,7 @@ final readonly class Query
     private function afterInserted(array $stored): void
     {
         $byKey = [];
-        foreach (array_chunk(array_map(fn (array $row): string => (string) $row[$this->meta->idColumn], $stored), self::MAX_VALUES) as $chunk) {
+        foreach (array_chunk(array_map(fn (array $row): string => (string) $row[$this->meta->idColumn], $stored), $this->orm->maxValues()) as $chunk) {
             foreach (self::of($this->orm, $this->class)->whereIn($this->meta->idProperty, $chunk)->fetch() as $model) {
                 $byKey[$model->primaryKey()] = $model;
             }
@@ -2379,7 +2387,7 @@ final readonly class Query
         $added = array_filter($set, static fn (mixed $value): bool => $value instanceof Assignment) !== [];
         $read = $added ? $ids : array_values(array_filter($ids, fn (string $id): bool => $this->orm->holdsModel($this->class, $id)));
         $rows = [];
-        foreach (array_chunk($read, self::MAX_VALUES) as $chunk) {
+        foreach (array_chunk($read, $this->orm->maxValues()) as $chunk) {
             foreach ($this->rowsByKey($chunk) as $row) {
                 $rows[(string) $row[$this->meta->idColumn]] = $row;
             }
@@ -2851,8 +2859,8 @@ final readonly class Query
                 continue;   // names no row, as in where()
             }
             $bound[] = $one;
-            if (\count($bound) > self::MAX_VALUES) {
-                throw new \LengthException('An IN list binds at most ' . self::MAX_VALUES . ' values.');
+            if (\count($bound) > $this->orm->maxValues()) {
+                throw new \LengthException('An IN list binds at most ' . $this->orm->maxValues() . ' values on this connection.');
             }
         }
         // Each value once, by its type and its exact value: PHP's loose ==
