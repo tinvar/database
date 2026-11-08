@@ -1560,9 +1560,20 @@ final readonly class Query
                 }
             }
 
+            // A restored row is read back whole, so a #[HasMany] it left can
+            // place it again: by its moment alone, the parent it belongs to
+            // is not known (ADR 0191).
             $written = [(string) $this->meta->deletedAtColumn => $stored];
+            $whole = [];
+            if ($stored === null) {
+                foreach (array_chunk($targets, self::MAX_VALUES) as $chunk) {
+                    foreach ($this->rowsByKey($chunk) as $row) {
+                        $whole[(string) $row[$this->meta->idColumn]] = $row;
+                    }
+                }
+            }
             foreach ($targets as $id) {
-                $this->orm->followStatementWrite($this->meta, $id, $written, array_keys($written));
+                $this->orm->followStatementWrite($this->meta, $id, $whole[$id] ?? $written, array_keys($written), isset($whole[$id]));
             }
 
             return $count;

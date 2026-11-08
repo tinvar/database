@@ -79,10 +79,13 @@ final readonly class Pivots
                     $links = $links->whereIn($pivot->targetProperty, $ids);
                 }
                 foreach ($links->orderBy($pivotMeta->idProperty)->fetch() as $link) {
+                    // By the target its row names, as stored: what it was
+                    // read or written with, a link inserted this request too.
+                    $target = (string) ($link->snapshot()[$pivot->targetColumn] ?? '');
                     if ($link->isTrashed()) {
-                        $trashed[(string) $link->foreignKey($pivot->targetProperty)] ??= $link;
+                        $trashed[$target] ??= $link;
                     } else {
-                        $linked[(string) $link->foreignKey($pivot->targetProperty)][] = $link;
+                        $linked[$target][] = $link;
                     }
                 }
             }
@@ -113,12 +116,9 @@ final readonly class Pivots
                         continue;
                     }
                     if (isset($trashed[$id])) {
-                        foreach ($values as $name => $value) {
-                            $pivotMeta->set($trashed[$id], $name, $value);
+                        if ($this->restore($trashed[$id], $pivotMeta, $values)) {
+                            $attached[] = $id;
                         }
-                        $this->orm->save($trashed[$id]);
-                        $this->orm->restore($trashed[$id]);
-                        $attached[] = $id;
                     } elseif ($this->link($owner, $targets[$id], $pivot, $pivotMeta, $values)) {
                         $attached[] = $id;
                     }
@@ -137,6 +137,30 @@ final readonly class Pivots
         }
 
         return $change;
+    }
+
+    /**
+     * Brings a trashed link back with $values; false when another request
+     * restored -- or removed -- it first, as link() answers a link raced
+     * in. In a savepoint, so the values written are taken back with it.
+     *
+     * @param array<string, mixed> $values
+     */
+    private function restore(Model $link, ModelMeta $pivotMeta, array $values): bool
+    {
+        try {
+            $this->orm->transaction(function () use ($link, $pivotMeta, $values): void {
+                foreach ($values as $name => $value) {
+                    $pivotMeta->set($link, $name, $value);
+                }
+                $this->orm->save($link);
+                $this->orm->restore($link);
+            });
+        } catch (MissingRow) {
+            return false;
+        }
+
+        return true;
     }
 
     /**

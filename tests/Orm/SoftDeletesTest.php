@@ -18,6 +18,7 @@ use Carbon\CarbonImmutable;
 use Tinvar\Orm\Attributes\AfterDelete;
 use Tinvar\Orm\Attributes\Audited;
 use Tinvar\Orm\Attributes\BeforeDelete;
+use Tinvar\Orm\Attributes\BeforeSave;
 use Tinvar\Orm\Attributes\BelongsTo;
 use Tinvar\Orm\Attributes\BelongsToMany;
 use Tinvar\Orm\Attributes\Column;
@@ -150,6 +151,17 @@ final class KitLabel extends Model
     #[Column] public ?CarbonImmutable $deletedAt = null;
     #[BelongsTo] public Kit $kit;
     #[BelongsTo] public Label $label;
+
+    /** What another request does as a link is saved: a test's race. */
+    public static ?\Closure $racer = null;
+
+    #[BeforeSave]
+    private function race(): void
+    {
+        if (self::$racer !== null) {
+            (self::$racer)($this);
+        }
+    }
 }
 
 /** Makes the two tables through the schema builder, as a migration would. */
@@ -396,6 +408,20 @@ function statementsAlike(Orm $orm, Recorder $recorder): void
         expect($orm->query(Bin::class)->onlyTrashed()->forceDelete())->toBe(1)
             ->and($other->isPersisted())->toBeFalse()
             ->and($orm->query(Bin::class)->withTrashed()->pluck('label'))->toBe(['drawer']);
+
+        // A child the query restores goes back into its parent's #[HasMany],
+        // loaded and as read afresh -- the statement knows only the column
+        // it wrote, so the parent's rows are read again.
+        $bin = $orm->query(Bin::class)->where('label', 'drawer')->first();
+        \assert($bin instanceof Bin);
+        $cog = $orm->query(Part::class)->where('name', 'cog')->first();
+        \assert($cog instanceof Part);
+        $orm->delete($cog);
+        expect(labels($bin->parts))->toBe(['gear', 'pin'])
+            ->and($orm->query(Part::class)->onlyTrashed()->restore())->toBe(1)
+            ->and(labels($bin->parts))->toBe(['cog', 'gear', 'pin']);
+        $orm->identityMap()->forget(Bin::class, $bin->id);
+        expect(labels($orm->find(Bin::class, $bin->id)?->parts ?? []))->toBe(['cog', 'gear', 'pin']);
     });
 }
 
@@ -477,6 +503,44 @@ function linksAlike(Orm $orm): void
         $orm->detach($kit, 'labels', [$green->id]);
         $orm->delete($green);
         expect(fn () => $orm->attach($kit, 'labels', [$green->id]))->toThrow(MissingRow::class);
+    });
+
+    // Linked and unlinked in one request: the link made is the one detach()
+    // and sync() find, by the target its row names.
+    $orm->actAs('acme', static function () use ($orm): void {
+        $kit = new Kit();
+        $kit->name = 'travel';
+        $orm->save($kit);
+        $yellow = new Label();
+        $yellow->name = 'yellow';
+        $orm->save($yellow);
+
+        $orm->attach($kit, 'labels', [$yellow]);
+        $kept = $orm->sync($kit, 'labels', [$yellow]);
+        expect($kept->changed())->toBeFalse()
+            ->and($orm->query(KitLabel::class)->onlyTrashed()->where('kit', $kit->id)->count())->toBe(0)
+            ->and($orm->detach($kit, 'labels', [$yellow])->detached)->toBe([$yellow->id])
+            ->and($orm->query(KitLabel::class)->where('kit', $kit->id)->count())->toBe(0);
+
+        // Another request restores the trashed link between this one's read
+        // of it and its own restore: raced, so not attached, and the rest of
+        // the attach() kept rather than taken back with it. (The race is
+        // played on this connection, so the savepoint takes it back too.)
+        $other = new Label();
+        $other->name = 'other';
+        $orm->save($other);
+        KitLabel::$racer = static function (KitLabel $link) use ($orm): void {
+            if ($link->isPersisted()) {
+                $orm->connection()->execute('UPDATE soft_kit_labels SET deleted_at = NULL WHERE id = ?', [$link->id]);
+            }
+        };
+        try {
+            $change = $orm->attach($kit, 'labels', [$yellow, $other], ['weight' => 2]);
+        } finally {
+            KitLabel::$racer = null;
+        }
+        expect($change->attached)->toBe([$other->id])
+            ->and($orm->query(KitLabel::class)->withTrashed()->where('kit', $kit->id)->count())->toBe(2);
     });
 }
 

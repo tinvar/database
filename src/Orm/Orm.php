@@ -1940,10 +1940,14 @@ final class Orm
      *
      * @param array<string, mixed>|null $row the row's columns, at least those written; null once deleted
      * @param list<string> $columns the columns the statement wrote
+     * @param bool $whole whether $row is the whole row as stored, read back after the write: the
+     *        loaded relations are then told all of it, so a #[HasMany] can place a child it did not
+     *        hold -- one restore() brought back (ADR 0191) -- while a held model still takes only
+     *        the columns written
      *
      * @internal for the query builder's writes, inside this package
      */
-    public function followStatementWrite(ModelMeta $meta, string $id, ?array $row, array $columns): void
+    public function followStatementWrite(ModelMeta $meta, string $id, ?array $row, array $columns, bool $whole = false): void
     {
         $model = $this->identityMap->get($meta->class, $id);
         $held = $model instanceof Model && self::holdsRow($model) ? $model : null;
@@ -1963,7 +1967,7 @@ final class Orm
         if ($held !== null) {
             $this->refreshHeld($held, $meta, $written);
         }
-        $this->followWrite($meta, $id, $written);
+        $this->followWrite($meta, $id, $whole ? $row : $written);
     }
 
     /**
@@ -2180,6 +2184,7 @@ final class Orm
 
         $this->journalSnapshot($model);
         $model->markClean($values);
+        $this->rememberWrittenKeys($model, $meta, $values);
         $model->attach($this, new ResultSet());
         $this->identityMap->remember($meta->class, $meta->keyOf($model), $model);
         $this->followWrite($meta, $meta->keyOf($model), $values);
@@ -2279,9 +2284,42 @@ final class Orm
         $written = $meta->writeValues($model);
         $this->journalSnapshot($model);
         $model->markClean($written);
+        $this->rememberWrittenKeys($model, $meta, $written);
         $this->followWrite($meta, $meta->keyOf($model), $written);
 
         return true;
+    }
+
+    /**
+     * The #[BelongsTo] keys a save wrote, as the model's own record of them
+     * (Model::foreignKey()), as hydration records the ones it reads: a row
+     * inserted or moved this request said '' for its key, or the old one,
+     * and a pivot's links were matched by it (ADR 0191). The ghost
+     * hydration installed is kept for a key that did not change. Put back
+     * if the transaction rolls back.
+     *
+     * @param array<string, mixed> $values column => value, as written
+     */
+    private function rememberWrittenKeys(Model $model, ModelMeta $meta, array $values): void
+    {
+        $before = [];
+        foreach ($meta->relations as $property => $relation) {
+            if ($relation->kind !== RelationKind::BelongsTo || !\array_key_exists($relation->foreignKey, $values)) {
+                continue;
+            }
+            $was = $model->foreignKey($property);
+            $installed = $model->installedRelation($property);
+            $before[$property] = [$was, $installed];
+            $key = $values[$relation->foreignKey];
+            $model->rememberForeignKey($property, $key, (string) $was === (string) $key ? $installed : null);
+        }
+        if ($before !== []) {
+            $this->journal(static function () use ($model, $before): void {
+                foreach ($before as $property => [$key, $installed]) {
+                    $model->rememberForeignKey($property, $key, $installed);
+                }
+            });
+        }
     }
 
     /**
@@ -3458,6 +3496,12 @@ final class Orm
             }
         }
 
+        // The identity map's models in the scope in force are enough: a
+        // pivot is linked in one tenant (attach(), detach() and sync()
+        // refuse a widened scope), and the map is flushed at every actAs() and acrossTenants()
+        // boundary, so no other tenant's bucket holds a model loaded
+        // before this write that is read after it. The relation-row cache,
+        // which outlives those, is dropped above for every tenant.
         $models = [];
         foreach ($this->identityMap->all() as $model) {
             if ($model instanceof $relation->owner
