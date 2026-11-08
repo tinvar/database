@@ -46,6 +46,9 @@ final class Table
     /** The column tenant() added, which Postgres holds to row-level security. */
     public private(set) ?string $tenantColumn = null;
 
+    /** Whether pivot() has made this table's unique key, which tenant() would have led. */
+    private bool $pivoted = false;
+
     public function __construct(
         public readonly string $name,
         public readonly bool $creating,
@@ -167,6 +170,46 @@ final class Table
     }
 
     /**
+     * A pivot table's two sides (ADR 0192): a foreign() key to each model,
+     * and the unique key no two links share -- led by the tenant column
+     * when tenant() came first, as a #[TenantScoped] model's #[Unique] is,
+     * and so also the index a #[BelongsToMany]'s load reads by. Each key is
+     * indexed alone too, as make:migration indexes every #[BelongsTo]'s, so
+     * the table is the one it would write for the pivot model.
+     *
+     *     $schema->create('product_tags', function (Table $table): void {
+     *         $table->uuid('id')->primary();
+     *         $table->tenant();
+     *         $table->pivot(Product::class, Tag::class);
+     *     });
+     *
+     * $onDelete is each key's ON DELETE. Left null -- the database's
+     * default, which refuses to delete a row still linked -- for a pivot
+     * that is #[Audited]: a link the database deletes is one the audit log
+     * never hears of. The columns are named as foreign() names them
+     * unless given; a model linked to itself needs both.
+     *
+     * @param class-string<Model> $from
+     * @param class-string<Model> $to
+     * @return array{Column, Column}
+     */
+    public function pivot(string $from, string $to, ?string $fromColumn = null, ?string $toColumn = null, ?OnDelete $onDelete = null): array
+    {
+        $first = $this->foreign($from, $fromColumn, $onDelete);
+        $second = $this->foreign($to, $toColumn, $onDelete);
+        if ($first->name === $second->name) {
+            throw new \LogicException("Table '{$this->name}': both sides of the pivot are '{$first->name}'; name the columns.");
+        }
+
+        $this->unique([...($this->tenantColumn === null ? [] : [$this->tenantColumn]), $first->name, $second->name]);
+        $this->index([$first->name]);
+        $this->index([$second->name]);
+        $this->pivoted = true;
+
+        return [$first, $second];
+    }
+
+    /**
      * A column holding one of a backed enum's values, and only those: a
      * string for a string-backed enum, an integer for an int-backed one,
      * with a CHECK listing the cases' values -- a CHECK rather than
@@ -229,6 +272,9 @@ final class Table
     {
         if ($this->tenantColumn !== null) {
             throw new \LogicException("Table '{$this->name}' already has a tenant column, '{$this->tenantColumn}'.");
+        }
+        if ($this->pivoted) {
+            throw new \LogicException("Table '{$this->name}': call tenant() before pivot(), so the tenant column leads the pivot's unique key.");
         }
 
         $this->tenantColumn = $column;

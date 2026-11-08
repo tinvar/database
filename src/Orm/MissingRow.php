@@ -30,6 +30,19 @@ final class MissingRow extends \RuntimeException
     }
 
     /**
+     * An attach(), detach() or sync() naming a row no read in the tenant in
+     * force returns (ADR 0192): worded as onUpdate() is, for the same reason.
+     */
+    public static function toLink(string $class, string $id): self
+    {
+        return new self(sprintf(
+            'Linking %s "%s" matched no row. The row has been deleted, or belongs to another tenant. Nothing was linked or unlinked.',
+            $class,
+            $id,
+        ));
+    }
+
+    /**
      * A delete() of a model with delete hooks whose DELETE matched no row:
      * worded as onUpdate() is, for the same reason.
      */

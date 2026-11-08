@@ -359,7 +359,9 @@ final class ModelMeta
         }
 
         foreach ($this->relations as $relation) {
-            if (!\in_array($relation->foreignKey, $known, true)) {
+            // A #[BelongsToMany]'s key is the pivot's column, on neither
+            // this table nor the target's: no identifier of this model.
+            if ($relation->kind !== RelationKind::BelongsToMany && !\in_array($relation->foreignKey, $known, true)) {
                 $known[] = $relation->foreignKey;
             }
         }

@@ -186,8 +186,9 @@ final class Compiler
         $aliases = [$last => $inner->alias];
         for ($i = $last - 1; $i >= 1; $i--) {
             $aliases[$i] = $this->alias();
-            $joins .= ' JOIN ' . Identifiers::quote($metas[$i]->table) . ' AS ' . Identifiers::quote($aliases[$i])
-                . ' ON ' . self::link($path[$i], $metas[$i], $aliases[$i], $metas[$i + 1], $aliases[$i + 1]);
+            [$on, $onBindings] = $this->link($path[$i], $metas[$i], $aliases[$i], $metas[$i + 1], $aliases[$i + 1]);
+            $joins .= ' JOIN ' . Identifiers::quote($metas[$i]->table) . ' AS ' . Identifiers::quote($aliases[$i]) . ' ON ' . $on;
+            array_push($joinBindings, ...$onBindings);
             $tenant = $this->tenantPredicate($metas[$i], $aliases[$i]);
             if ($tenant !== null) {
                 $joins .= ' AND ' . $tenant[0];
@@ -195,7 +196,8 @@ final class Compiler
             }
         }
 
-        $where = array_values(array_filter([$inner->where, self::link($path[0], $meta, $alias, $metas[1], $aliases[1])], static fn (string $part): bool => $part !== ''));
+        [$first, $firstBindings] = $this->link($path[0], $meta, $alias, $metas[1], $aliases[1]);
+        $where = array_values(array_filter([$inner->where, $first], static fn (string $part): bool => $part !== ''));
         $expression = $measure->function->sql($measure->column === null ? null : $inner->expression($measure->column));
         if ($measure->function === Aggregate::Sum) {
             $expression = "COALESCE({$expression}, 0)";
@@ -203,22 +205,60 @@ final class Compiler
 
         return [
             "(SELECT {$expression} FROM {$inner->from}{$joins} WHERE " . implode(' AND ', $where) . ')',
-            [...$inner->fromBindings, ...$joinBindings, ...$inner->whereBindings],
+            [...$inner->fromBindings, ...$joinBindings, ...$inner->whereBindings, ...$firstBindings],
         ];
     }
 
     /**
      * The condition a relation holds between a row of its model, read as
      * $parentAlias, and a row of its target, read as $childAlias: the
-     * child's foreign key for a #[HasMany], the parent's for a #[BelongsTo].
+     * child's foreign key for a #[HasMany], the parent's for a #[BelongsTo],
+     * and for a #[BelongsToMany] a pivot row naming both, of the tenant's
+     * (ADR 0192) -- EXISTS rather than a join, so a row is never repeated
+     * for each pivot row, and what it binds.
+     *
+     * @return array{string, list<mixed>}
      */
-    private static function link(RelationMeta $relation, ModelMeta $parent, string $parentAlias, ModelMeta $child, string $childAlias): string
+    private function link(RelationMeta $relation, ModelMeta $parent, string $parentAlias, ModelMeta $child, string $childAlias): array
     {
-        return $relation->kind === RelationKind::HasMany
-            ? Identifiers::quote($childAlias) . '.' . Identifiers::quote($relation->foreignKey)
-                . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($parent->idColumn)
-            : Identifiers::quote($childAlias) . '.' . Identifiers::quote($child->idColumn)
-                . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($relation->foreignKey);
+        return match ($relation->kind) {
+            RelationKind::HasMany => [
+                Identifiers::quote($childAlias) . '.' . Identifiers::quote($relation->foreignKey)
+                    . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($parent->idColumn),
+                [],
+            ],
+            RelationKind::BelongsTo => [
+                Identifiers::quote($childAlias) . '.' . Identifiers::quote($child->idColumn)
+                    . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($relation->foreignKey),
+                [],
+            ],
+            RelationKind::BelongsToMany => $this->pivotLink($relation, $parent, $parentAlias, $child, $childAlias),
+        };
+    }
+
+    /** @return array{string, list<mixed>} */
+    private function pivotLink(RelationMeta $relation, ModelMeta $parent, string $parentAlias, ModelMeta $child, string $childAlias): array
+    {
+        $pivot = $relation->pivot ?? throw new \LogicException("{$relation->key()} names no pivot.");
+        $pivotMeta = Metadata::for($pivot->class);
+        $alias = $this->alias();
+        $column = static fn (string $name): string => Identifiers::quote($alias) . '.' . Identifiers::quote($name);
+
+        $where = [
+            $column($pivot->ownerColumn) . ' = ' . Identifiers::quote($parentAlias) . '.' . Identifiers::quote($parent->idColumn),
+            $column($pivot->targetColumn) . ' = ' . Identifiers::quote($childAlias) . '.' . Identifiers::quote($child->idColumn),
+        ];
+        $bindings = [];
+        $tenant = $this->tenantPredicate($pivotMeta, $alias);
+        if ($tenant !== null) {
+            $where[] = $tenant[0];
+            $bindings = $tenant[1];
+        }
+
+        return [
+            'EXISTS (SELECT 1 FROM ' . Identifiers::quote($pivotMeta->table) . ' AS ' . Identifiers::quote($alias) . ' WHERE ' . implode(' AND ', $where) . ')',
+            $bindings,
+        ];
     }
 
     /**
@@ -407,15 +447,11 @@ final class Compiler
         $target = Metadata::for($relation->target);
         $inner = $this->scope($target, $condition->conditions, []);
 
-        $link = $relation->kind === RelationKind::HasMany
-            ? Identifiers::quote($inner->alias) . '.' . Identifiers::quote($relation->foreignKey)
-                . ' = ' . Identifiers::quote($alias) . '.' . Identifiers::quote($meta->idColumn)
-            : Identifiers::quote($inner->alias) . '.' . Identifiers::quote($target->idColumn)
-                . ' = ' . Identifiers::quote($alias) . '.' . Identifiers::quote($relation->foreignKey);
+        [$link, $linkBindings] = $this->link($relation, $meta, $alias, $target, $inner->alias);
 
         // The related model's own WHERE -- its tenant predicate and its
         // conditions -- with the link ANDed after it.
-        [$body, $bindings] = $inner->body($link);
+        [$body, $bindings] = $inner->body($link, $linkBindings);
 
         return [($condition->not ? 'NOT EXISTS (SELECT 1' : 'EXISTS (SELECT 1') . $body . ')', $bindings];
     }

@@ -2335,7 +2335,7 @@ final readonly class Query
             return false;
         }
 
-        return array_filter($relations, static fn (RelationMeta $r): bool => $r->kind === RelationKind::HasMany) !== [];
+        return array_filter($relations, static fn (RelationMeta $r): bool => $r->kind->collects()) !== [];
     }
 
     /**

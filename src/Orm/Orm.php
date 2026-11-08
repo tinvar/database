@@ -24,6 +24,9 @@ final class Orm
      */
     private const array ORM_WRITERS = [self::class, Query::class];
 
+    /** What a #[BelongsToMany]'s load reads the owner's key as, beside the target's columns (ADR 0192). */
+    private const string LINKED_BY = 'tinvar_linked_by';
+
     /** @var array<string, array<string, mixed>> relation key => group key => rows */
     private array $relationRows = [];
 
@@ -1335,23 +1338,27 @@ final class Orm
      * The tenant predicate for a model, and its binding: the tenant in
      * force, or every tenant in the subtree withinSubtree() widened to.
      *
+     * $alias qualifies the column, for a statement that reads two tables:
+     * a #[BelongsToMany]'s pivot joined to its target (ADR 0192).
+     *
      * @return array{string, list<string>}
      */
-    private function tenantScope(ModelMeta $meta): array
+    private function tenantScope(ModelMeta $meta, ?string $alias = null): array
     {
         $tenants = $this->tenantsInScope($meta);
         if ($tenants === null || $meta->tenantColumn === null) {
             return ['', []];
         }
+        $column = ($alias === null ? '' : '"' . $alias . '".') . '"' . $meta->tenantColumn . '"';
 
         if (\count($tenants) > 1) {
             return [
-                '"' . $meta->tenantColumn . '" IN (' . implode(', ', array_fill(0, \count($tenants), '?')) . ')',
+                $column . ' IN (' . implode(', ', array_fill(0, \count($tenants), '?')) . ')',
                 $tenants,
             ];
         }
 
-        return ['"' . $meta->tenantColumn . '" = ?', $tenants];
+        return [$column . ' = ?', $tenants];
     }
 
     /**
@@ -1698,7 +1705,7 @@ final class Orm
     private function installRelations(Model $model, ModelMeta $meta, array $row): void
     {
         foreach ($meta->relations as $property => $relation) {
-            if ($relation->kind === RelationKind::HasMany) {
+            if ($relation->kind->collects()) {
                 // Under the scope the parent was read in, as a ghost is.
                 $meta->set($model, $property, Collection::lazy($this->hasManyLoader(
                     $relation,
@@ -2525,11 +2532,15 @@ final class Orm
         }
 
         foreach (Metadata::relationsTo($meta->class) as $relation) {
-            if ($relation->kind === RelationKind::HasMany) {
-                $this->followHasMany($relation, $meta, $id, $row);
-            } else {
-                $this->followBelongsTo($relation, $id, $row);
-            }
+            match ($relation->kind) {
+                RelationKind::HasMany => $this->followHasMany($relation, $meta, $id, $row),
+                RelationKind::BelongsToMany => $this->forgetLinks($relation),
+                RelationKind::BelongsTo => $this->followBelongsTo($relation, $id, $row),
+            };
+        }
+        // A pivot row written links two rows, or no longer does (ADR 0192).
+        foreach (Metadata::relationsThrough($meta->class) as $relation) {
+            $this->forgetLinks($relation);
         }
     }
 
@@ -2920,7 +2931,7 @@ final class Orm
 
         $key = $this->relationCacheKey($relation);
         $widened = $this->isWidened();
-        $many = $relation->kind === RelationKind::HasMany;
+        $many = $relation->kind->collects();
         $loaded = $this->loadRelationRows($relation, $parents, $key, lazy: false);
 
         // Each parent's rows: what this load read, and -- scoped, where the
@@ -3042,7 +3053,7 @@ final class Orm
         $unscoped = $this->isWidened();
 
         foreach ($parents as $parent) {
-            $groupKey = $relation->kind === RelationKind::HasMany
+            $groupKey = $relation->kind->collects()
                 ? $parent->primaryKey()
                 : (string) ($parent->foreignKey($relation->property) ?? '');
 
@@ -3072,6 +3083,16 @@ final class Orm
 
         $ids = array_keys($groupKeys);
         $targetMeta = Metadata::for($relation->target);
+        if ($relation->pivot !== null) {
+            $grouped = $this->loadLinkedRows($relation, $relation->pivot, $targetMeta, array_map(strval(...), $ids));
+            if (!$unscoped) {
+                foreach ($ids as $id) {
+                    $this->relationRows[$key][$id] = $grouped[$id] ?? [];
+                }
+            }
+
+            return $grouped;
+        }
         // A HasMany child's foreign key is declared on the owner's relation,
         // not in the child's own metadata, so it is allowed explicitly. It is
         // still compiled metadata; it just lives on the other side.
@@ -3106,12 +3127,154 @@ final class Orm
         }
 
         foreach ($ids as $id) {
-            $this->relationRows[$key][$id] = $relation->kind === RelationKind::HasMany
+            $this->relationRows[$key][$id] = $relation->kind->collects()
                 ? ($grouped[$id] ?? [])
                 : ($grouped[$id][0] ?? null);
         }
 
         return $grouped;
+    }
+
+    /**
+     * A #[BelongsToMany]'s rows for $ids, the owners' keys, grouped by them
+     * (ADR 0192): one statement for each Query::MAX_VALUES of them, the
+     * target's table joined to the pivot's, each held to its own tenant
+     * predicate -- so a pivot row of another tenant's never links a row,
+     * nor does one of the tenant's own reach a target of another's.
+     *
+     * In the relation's order, then the pivot's key: the order the rows
+     * were linked in as far as the keys are minted in order -- an
+     * auto-increment always, UUIDv7 to the millisecond.
+     *
+     * @param list<string> $ids
+     * @return array<string, list<array<string, mixed>>>
+     */
+    private function loadLinkedRows(RelationMeta $relation, PivotMeta $pivot, ModelMeta $target, array $ids): array
+    {
+        $pivotMeta = Metadata::for($pivot->class);
+        $owner = self::identifier($pivotMeta, $pivot->ownerColumn);
+        $other = self::identifier($pivotMeta, $pivot->targetColumn);
+        $order = $relation->orderBy === null ? [] : ['"t"."' . self::identifier($target, $relation->orderBy) . '"'];
+        $order[] = '"p"."' . $pivotMeta->idColumn . '"';
+
+        $columns = implode(', ', array_map(static fn (string $c): string => '"t"."' . $c . '"', $target->selectColumns()));
+        [$pivotScope, $pivotBindings] = $this->tenantScope($pivotMeta, 'p');
+        [$targetScope, $targetBindings] = $this->tenantScope($target, 't');
+
+        $grouped = [];
+        foreach (array_chunk($ids, Query::MAX_VALUES) as $chunk) {
+            $sql = "SELECT {$columns}, \"p\".\"{$owner}\" AS \"" . self::LINKED_BY . "\""
+                . " FROM \"{$target->table}\" AS \"t\" JOIN \"{$pivotMeta->table}\" AS \"p\" ON \"p\".\"{$other}\" = \"t\".\"{$target->idColumn}\""
+                . " WHERE \"p\".\"{$owner}\" IN (" . implode(', ', array_fill(0, \count($chunk), '?')) . ')'
+                . ($pivotScope === '' ? '' : " AND {$pivotScope}")
+                . ($targetScope === '' ? '' : " AND {$targetScope}")
+                . ' ORDER BY ' . implode(', ', $order);
+
+            foreach ($this->connection->select($sql, [...$chunk, ...$pivotBindings, ...$targetBindings]) as $row) {
+                $by = (string) ($row[self::LINKED_BY] ?? '');
+                unset($row[self::LINKED_BY]);
+                $grouped[$by][] = $row;
+            }
+        }
+
+        return $grouped;
+    }
+
+    /**
+     * Every #[BelongsToMany] loaded through a pivot that was written, or of
+     * a target that was, read again when next asked for (ADR 0192): its
+     * cached rows dropped, in every tenant's cache, and each loaded
+     * collection of it unloaded -- each the identity map holds in the scope
+     * in force, and $owner, the model attach(), detach() or sync() was
+     * handed, which the map may not hold.
+     *
+     * Dropped rather than patched, as a #[HasMany] is: a pivot row deleted
+     * is known by its key alone, and which owner it linked is not.
+     *
+     * @internal for the Orm's own writes and Pivots, inside this package
+     */
+    public function forgetLinks(RelationMeta $relation, ?Model $owner = null): void
+    {
+        $suffix = "\0" . $relation->key();
+        foreach (array_keys($this->relationRows) as $key) {
+            if (str_ends_with($key, $suffix)) {
+                unset($this->relationRows[$key]);
+            }
+        }
+
+        $models = [];
+        foreach ($this->identityMap->all() as $model) {
+            if ($model instanceof $relation->owner
+                && $this->identityMap->get($relation->owner, $model->primaryKey()) === $model) {
+                $models[] = $model;
+            }
+        }
+        if ($owner instanceof $relation->owner && !\in_array($owner, $models, true)) {
+            $models[] = $owner;
+        }
+
+        $property = new \ReflectionProperty($relation->owner, $relation->property);
+        $meta = Metadata::for($relation->owner);
+        foreach ($models as $model) {
+            // Not a ghost, whose relations are not installed yet.
+            if (!self::holdsRow($model) || !$property->isInitialized($model)) {
+                continue;
+            }
+            $collection = $meta->get($model, $relation->property);
+            if ($collection instanceof Collection && $collection->isLoaded()) {
+                $collection->unload($this->hasManyLoader(
+                    $relation,
+                    $model,
+                    $this->isUnscoped() ? null : $this->captureScope(),
+                    $this->scopeName(),
+                ));
+            }
+        }
+    }
+
+    /**
+     * Links $owner to the rows of its #[BelongsToMany] $relation that
+     * $related names -- models of the target, or their keys -- each that is
+     * not linked already, by saving a pivot model for each, with $values
+     * for the pivot's own properties (ADR 0192). In one transaction, and
+     * only once the owner and every row named are read in the tenant in
+     * force: one that is not -- missing, or another tenant's -- is refused
+     * with MissingRow, worded alike for both, and nothing is written.
+     *
+     * @param iterable<Model|string|int> $related
+     * @param array<string, mixed> $values the pivot's properties, for the links made
+     * @throws MissingRow   naming a row the tenant in force does not read
+     * @throws \LogicException across tenants or a subtree, or for an owner never saved
+     */
+    public function attach(Model $owner, string $relation, iterable $related, array $values = []): PivotChange
+    {
+        return new Pivots($this)->write('attach()', $owner, $relation, $related, $values, attach: true, detach: false);
+    }
+
+    /**
+     * Unlinks $owner from the rows of its #[BelongsToMany] $relation that
+     * $related names, each that is linked, by deleting its pivot model --
+     * held as attach() is.
+     *
+     * @param iterable<Model|string|int> $related
+     */
+    public function detach(Model $owner, string $relation, iterable $related): PivotChange
+    {
+        return new Pivots($this)->write('detach()', $owner, $relation, $related, [], attach: false, detach: true);
+    }
+
+    /**
+     * Links $owner to exactly the rows $related names: attach()es what is
+     * not linked, with $values, and detach()es what is linked and not
+     * named -- in one transaction, held as attach() is. An empty $related
+     * unlinks every row.
+     *
+     * @param iterable<Model|string|int> $related
+     * @param array<string, mixed> $values the pivot's properties, for the links made
+     */
+    public function sync(Model $owner, string $relation, iterable $related, array $values = []): PivotChange
+    {
+        return new Pivots($this)->write('sync()', $owner, $relation, $related, $values, attach: true, detach: true);
     }
 
     /**

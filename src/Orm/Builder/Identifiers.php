@@ -108,7 +108,7 @@ final class Identifiers
         $relations = self::relationPath($meta, implode('.', $parts));
         $collection = false;
         foreach ($relations as $relation) {
-            $collection = $collection || $relation->kind === RelationKind::HasMany;
+            $collection = $collection || $relation->kind->collects();
         }
         if (!$collection) {
             return null;

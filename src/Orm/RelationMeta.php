@@ -12,7 +12,10 @@ final readonly class RelationMeta
     /**
      * @param class-string<Model> $owner
      * @param class-string<Model> $target
+     * @param string $foreignKey the column holding the key that links the two: the owner's for a #[BelongsTo],
+     *        the target's for a #[HasMany], the pivot's column naming the owner for a #[BelongsToMany]
      * @param value-of<self::DELETE_ACTIONS>|null $onDelete a #[BelongsTo]'s foreign key's ON DELETE, where it names one
+     * @param PivotMeta|null $pivot the pivot a #[BelongsToMany] goes through (ADR 0192)
      */
     public function __construct(
         public RelationKind $kind,
@@ -22,6 +25,7 @@ final readonly class RelationMeta
         public string $foreignKey,
         public ?string $orderBy = null,
         public ?string $onDelete = null,
+        public ?PivotMeta $pivot = null,
     ) {}
 
     /** Groups pending loads in the scheduler: one query per owner-relation pair. */
@@ -33,8 +37,8 @@ final readonly class RelationMeta
     /** The column on the child side that is matched with whereIn. */
     public function childColumn(): string
     {
-        return $this->kind === RelationKind::HasMany
-            ? $this->foreignKey
-            : Metadata::for($this->target)->idColumn;
+        return $this->kind === RelationKind::BelongsTo
+            ? Metadata::for($this->target)->idColumn
+            : $this->foreignKey;
     }
 }

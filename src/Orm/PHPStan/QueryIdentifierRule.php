@@ -21,7 +21,6 @@ use Tinvar\Orm\Metadata;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\Query;
-use Tinvar\Orm\RelationKind;
 
 /**
  * Column and relation names in query builder calls, checked by PHPStan
@@ -311,7 +310,7 @@ final class QueryIdentifierRule implements Rule
         } catch (MappingException $e) {
             try {
                 foreach (Identifiers::relationPath($meta, $name) as $relation) {
-                    if ($relation->kind === RelationKind::HasMany) {
+                    if ($relation->kind->collects()) {
                         return null;
                     }
                 }

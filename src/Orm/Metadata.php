@@ -12,6 +12,7 @@ use Tinvar\Orm\Attributes\AfterSave;
 use Tinvar\Orm\Attributes\BeforeDelete;
 use Tinvar\Orm\Attributes\BeforeSave;
 use Tinvar\Orm\Attributes\BelongsTo;
+use Tinvar\Orm\Attributes\BelongsToMany;
 use Tinvar\Orm\Attributes\Column;
 use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
@@ -470,6 +471,22 @@ final class Metadata
             );
         }
 
+        if ($belongsToMany = ($property->getAttributes(BelongsToMany::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null)) {
+            $attribute = $belongsToMany->newInstance();
+            $target = self::modelTarget($class, $property, $attribute->target);
+            $pivot = self::pivotFor($class, $property, $target, $attribute);
+
+            return new RelationMeta(
+                kind: RelationKind::BelongsToMany,
+                owner: $class,
+                property: $property->getName(),
+                target: $target,
+                foreignKey: $pivot->ownerColumn,
+                orderBy: $attribute->orderBy,
+                pivot: $pivot,
+            );
+        }
+
         if ($belongsTo = ($property->getAttributes(BelongsTo::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null)) {
             $attribute = $belongsTo->newInstance();
             $target = $attribute->target ?? self::typeOf($property);
@@ -488,6 +505,89 @@ final class Metadata
         }
 
         return null;
+    }
+
+    /**
+     * The pivot a #[BelongsToMany] goes through, checked when the model is
+     * compiled (ADR 0192): a model, with a #[BelongsTo] to each side -- the
+     * one of each type, or the ones `from:` and `to:` name -- and held to
+     * the tenant whenever either side is. A pivot that is not would let
+     * one tenant's row be linked to another's, and be read across the line:
+     * refused, as failing closed.
+     *
+     * The pivot's own metadata is compiled here, which reads only its own
+     * attributes: a #[BelongsTo] names its target without compiling it.
+     *
+     * @param class-string<Model> $class
+     * @param class-string<Model> $target
+     */
+    private static function pivotFor(string $class, \ReflectionProperty $property, string $target, BelongsToMany $attribute): PivotMeta
+    {
+        $where = "{$class}::\${$property->getName()}";
+        if (!is_subclass_of($attribute->through, Model::class)) {
+            throw new MappingException("{$where}: #[BelongsToMany] goes through {$attribute->through}, which is not a model. Name the pivot's model in through:.");
+        }
+        $pivot = self::for($attribute->through);
+
+        $side = static function (?string $named, string $model, string $which) use ($pivot, $where, $attribute): RelationMeta {
+            if ($named !== null) {
+                $relation = $pivot->relations[$named] ?? null;
+                if ($relation === null || $relation->kind !== RelationKind::BelongsTo || $relation->target !== $model) {
+                    throw new MappingException("{$where}: {$which}: '{$named}' is no #[BelongsTo] of {$attribute->through} to {$model}.");
+                }
+
+                return $relation;
+            }
+            $found = array_values(array_filter(
+                $pivot->relations,
+                static fn (RelationMeta $r): bool => $r->kind === RelationKind::BelongsTo && $r->target === $model,
+            ));
+            if ($found === []) {
+                throw new MappingException("{$where}: the pivot {$attribute->through} has no #[BelongsTo] to {$model}.");
+            }
+            if (\count($found) > 1) {
+                throw new MappingException(
+                    "{$where}: the pivot {$attribute->through} has " . \count($found) . " #[BelongsTo]s to {$model}; name them with from: and to:.",
+                );
+            }
+
+            return $found[0];
+        };
+        $owner = $side($attribute->from, $class, 'from');
+        $other = $side($attribute->to, $target, 'to');
+        if ($owner->property === $other->property) {
+            throw new MappingException("{$where}: from: and to: name the same #[BelongsTo] of {$attribute->through}; name one for each side.");
+        }
+
+        if ($pivot->tenantColumn === null && (TenantScoped::on($class) !== null || TenantScoped::on($target) !== null)) {
+            throw new MappingException(
+                "{$where}: {$attribute->through} is not #[TenantScoped], and links rows that are: its rows would be "
+                . "read and written across tenants. Make the pivot #[TenantScoped].",
+            );
+        }
+
+        return new PivotMeta($attribute->through, $owner->property, $owner->foreignKey, $other->property, $other->foreignKey);
+    }
+
+    /**
+     * Every compiled #[BelongsToMany] through the pivot $class: the relations
+     * a write to one of its rows changes (ADR 0192).
+     *
+     * @param class-string<Model> $class
+     * @return list<RelationMeta>
+     */
+    public static function relationsThrough(string $class): array
+    {
+        $found = [];
+        foreach (self::$compiled as $meta) {
+            foreach ($meta->relations as $relation) {
+                if ($relation->pivot?->class === $class) {
+                    $found[] = $relation;
+                }
+            }
+        }
+
+        return $found;
     }
 
     /**
