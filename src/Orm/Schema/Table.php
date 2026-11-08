@@ -134,6 +134,18 @@ final class Table
     }
 
     /**
+     * deleted_at, the moment a #[SoftDeletes] model's row was trashed:
+     * nullable, since a live row holds none (ADR 0191). A unique key the
+     * trashed rows should not hold is a partial index on Postgres and
+     * SQLite, made with sql() -- `CREATE UNIQUE INDEX ... WHERE
+     * "deleted_at" IS NULL` -- which MySQL has no form of.
+     */
+    public function softDeletes(string $column = 'deleted_at'): Column
+    {
+        return $this->timestamp($column)->nullable();
+    }
+
+    /**
      * A foreign key to a model's table, all of it read from the model: the
      * column is named for the model (`order_id` for Order, `order_line_id`
      * for OrderLine), as a #[BelongsTo] names the key it reads by, unless

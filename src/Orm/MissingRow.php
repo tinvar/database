@@ -56,9 +56,23 @@ final class MissingRow extends \RuntimeException
         ));
     }
 
-    /** A delete() of a model with delete hooks that was never saved, or is deleted already. */
-    public static function notPersisted(string $class): self
+    /**
+     * A restore() whose UPDATE matched no trashed row (ADR 0191): worded as
+     * onUpdate() is, for the same reason.
+     */
+    public static function onRestore(string $class, string $id): self
     {
-        return new self("Deleting a {$class} that has no row: it was never saved, or is deleted already. No hook ran.");
+        return new self(sprintf(
+            'Restoring %s "%s" matched no trashed row to restore. '
+            . 'The row has been deleted or restored, or belongs to another tenant. Nothing was written.',
+            $class,
+            $id,
+        ));
+    }
+
+    /** A delete() of a model with delete hooks that was never saved, or is deleted already; or a restore() of one. */
+    public static function notPersisted(string $class, string $doing = 'Deleting'): self
+    {
+        return new self("{$doing} a {$class} that has no row: it was never saved, or is deleted already. No hook ran.");
     }
 }

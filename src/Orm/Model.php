@@ -115,6 +115,16 @@ abstract class Model
         return $changes;
     }
 
+    /**
+     * Whether the row is trashed: a #[SoftDeletes] model's row that delete()
+     * stamped and restore() has not brought back, as it was last read or
+     * written (ADR 0191). Never, for a model that deletes its rows.
+     */
+    public function isTrashed(): bool
+    {
+        return static::meta()->isTrashed($this);
+    }
+
     public function isDirty(): bool
     {
         return $this->changes() !== [];

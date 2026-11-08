@@ -94,6 +94,7 @@ final readonly class Query
      *        aggregate, or a column it groups by -- each ORed or ANDed with those before
      * @param list<RelationMeasure> $measures the aggregates over related rows fetchAggregated() reads
      * @param list<list<Condition>>|null $unionAll each arm's conditions, once unionAll() joined them
+     * @param Trashed $trashed which of a #[SoftDeletes] model's rows it reads and writes (ADR 0191)
      */
     private function __construct(
         private Orm $orm,
@@ -109,6 +110,7 @@ final readonly class Query
         private bool $distinct = false,
         private array $measures = [],
         private ?array $unionAll = null,
+        private Trashed $trashed = Trashed::Without,
     ) {}
 
     /**
@@ -129,6 +131,35 @@ final readonly class Query
     public function model(): string
     {
         return $this->class;
+    }
+
+    // ------------------------------------------------------------ trashed
+
+    /**
+     * Every row, a #[SoftDeletes] model's trashed ones too: what a query
+     * passes by unless it says (ADR 0191). Its reads and its writes alike
+     * -- update(), restore(), forceDelete() -- reach them. Only the
+     * model's own rows: a #[HasMany] a condition or an aggregate reads
+     * through still passes its trashed children by.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function withTrashed(): self
+    {
+        return clone($this, ['trashed' => Trashed::With]);
+    }
+
+    /**
+     * The trashed rows alone: a recycle bin's, or what restore() and
+     * forceDelete() are about to reach.
+     *
+     * @return static
+     */
+    #[\NoDiscard]
+    public function onlyTrashed(): self
+    {
+        return clone($this, ['trashed' => Trashed::Only]);
     }
 
     // ------------------------------------------------------------ narrowing
@@ -749,7 +780,7 @@ final readonly class Query
         $this->assertOffsetLimited();
 
         $compiler = new Compiler($this->orm);
-        $scope = $compiler->scope($this->meta, $this->conditions, $this->orders);
+        $scope = $compiler->scope($this->meta, $this->conditions, $this->orders, trashed: $this->trashed);
         $list = '';
         $listBindings = [];
         foreach ($this->measures as $i => $measure) {
@@ -897,7 +928,7 @@ final readonly class Query
                 $also[] = $measure->column;
             }
         }
-        $scope = $compiler->scope($this->meta, $this->conditions, $this->orders, $also);
+        $scope = $compiler->scope($this->meta, $this->conditions, $this->orders, $also, trashed: $this->trashed);
 
         $list = [];
         $listBindings = [];
@@ -1022,7 +1053,7 @@ final readonly class Query
         $ref = Identifiers::column($this->meta, $column);
         $this->assertOffsetLimited();
         $scope = $this->unionAll === null
-            ? new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, [$ref])
+            ? new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, [$ref], trashed: $this->trashed)
             : $this->readScope(new Compiler($this->orm), also: [$ref]);
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
@@ -1165,7 +1196,7 @@ final readonly class Query
         $armed = $this->unionAll !== null;
         $scope = $armed
             ? (clone($this, ['orders' => $orders]))->readScope(new Compiler($this->orm), armed: true)
-            : new Compiler($this->orm)->scope($this->meta, $this->conditions, $orders);
+            : new Compiler($this->orm)->scope($this->meta, $this->conditions, $orders, trashed: $this->trashed);
         [$body, $bindings] = $scope->body();
         $fingerprint = $this->class . "\n" . $body . $scope->orderBy() . "\n" . serialize($bindings);
         $sealedFor = static fn (int $arm): string => $armed ? "{$fingerprint}\narm:{$arm}" : $fingerprint;
@@ -1336,6 +1367,7 @@ final readonly class Query
         if ($set === []) {
             throw new \InvalidArgumentException('update() sets at least one field.');
         }
+        $this->refuseTrashedByHand('update()', $set);
 
         return $this->orm->transaction(function () use ($set): int {
             $ids = $this->idsToWrite();
@@ -1408,18 +1440,138 @@ final readonly class Query
      *
      * Refused on a model with #[BeforeDelete] or #[AfterDelete] methods: a
      * statement reads no model to run them on (ADR 0122).
+     *
+     * A #[SoftDeletes] model's rows are trashed, as Orm::delete() trashes
+     * one: each live row's deleted_at stamped with now(), recorded as
+     * `trashed`, and answered as the rows it trashed (ADR 0191).
      */
     public function delete(): int
     {
         if ($this->unionAll !== null) {
             return $this->rowsToWrite('delete()')->delete();
         }
-        $this->orm->refuseWriteOf('delete()');
-        $this->refuseDeleteHooks();
+        $this->refuseRemoval('delete()');
+
+        return $this->meta->softDeletes()
+            ? $this->writeTrashed($this->orm->timestampStorage()->format($this->orm->now()))
+            : $this->remove();
+    }
+
+    /**
+     * Deletes every row the query matches, a #[SoftDeletes] model's too,
+     * as delete() deletes any other model's: `->onlyTrashed()->where(
+     * 'deletedAt', '<', $cutoff)->forceDelete()` empties a recycle bin of
+     * what is older than the cutoff (ADR 0191).
+     */
+    public function forceDelete(): int
+    {
+        if ($this->unionAll !== null) {
+            return $this->rowsToWrite('forceDelete()')->forceDelete();
+        }
+        $this->refuseRemoval('forceDelete()');
+
+        return $this->remove();
+    }
+
+    /**
+     * Brings back every trashed row the query matches -- `->onlyTrashed()`,
+     * narrowed -- as Orm::restore() brings back one: recorded as
+     * `restored`, and answered as the rows it restored. A live row it
+     * matches is left as it is (ADR 0191).
+     */
+    public function restore(): int
+    {
+        if ($this->unionAll !== null) {
+            return $this->rowsToWrite('restore()')->restore();
+        }
+        $this->orm->refuseWriteOf('restore()');
+        $this->refuseUnlessSoft('restore()');
         $this->orm->refuseUnrecorded($this->meta);
-        $this->assertRowsWritten('delete()');
+        $this->assertRowsWritten('restore()');
         $this->assertOffsetLimited();
 
+        return $this->writeTrashed(null);
+    }
+
+    /** What delete() and forceDelete() are held to before they read a row. */
+    private function refuseRemoval(string $what): void
+    {
+        $this->orm->refuseWriteOf($what);
+        $this->refuseDeleteHooks();
+        $this->orm->refuseUnrecorded($this->meta);
+        $this->assertRowsWritten($what);
+        $this->assertOffsetLimited();
+    }
+
+    /**
+     * Trashes the live rows the query matches ($stored, the moment in its
+     * stored form) or restores the trashed ones (null): the rows read and
+     * locked as update() reads them, those in the state the write changes
+     * picked out, then one UPDATE of their deleted_at by key under the
+     * tenant predicate. Each is recorded and followed.
+     */
+    private function writeTrashed(?string $stored): int
+    {
+        return $this->orm->transaction(function () use ($stored): int {
+            $ids = $this->idsToWrite();
+            $table = Identifiers::quote($this->meta->table);
+            $column = $table . '.' . Identifiers::quote((string) $this->meta->deletedAtColumn);
+
+            // The rows locked above, in the state this write changes.
+            $targets = [];
+            foreach (array_chunk($ids, self::MAX_VALUES) as $chunk) {
+                [$where, $bindings] = $this->byKeys($chunk);
+                $rows = $this->orm->statements()->select(
+                    'SELECT ' . $table . '.' . Identifiers::quote($this->meta->idColumn) . " AS \"id\" FROM {$table} WHERE {$where} AND {$column} "
+                    . ($stored === null ? 'IS NOT NULL' : 'IS NULL'),
+                    $bindings,
+                );
+                foreach ($rows as $row) {
+                    $targets[] = (string) $row['id'];
+                }
+            }
+            if ($targets === []) {
+                return 0;
+            }
+
+            $this->orm->noteRowTenants($this->meta, $targets);
+            $before = $this->meta->audited === null || $stored === null ? [] : $this->rowsOf($targets);
+
+            $count = 0;
+            foreach (array_chunk($targets, self::MAX_VALUES) as $chunk) {
+                [$where, $bindings] = $this->byKeys($chunk);
+                // Changed from NULL or to it, so MySQL's count of rows
+                // changed is the count matched (ADR 0172).
+                $count += $this->orm->statements()->execute(
+                    "UPDATE {$table} SET " . Identifiers::quote((string) $this->meta->deletedAtColumn) . " = ? WHERE {$where}",
+                    [$stored, ...$bindings],
+                );
+            }
+
+            if ($this->meta->audited !== null) {
+                if ($stored === null) {
+                    foreach ($this->rowsOf($targets) as $id => $row) {
+                        $this->orm->recordChange($this->meta, ModelChangeKind::Restored, (string) $id, null, $row);
+                    }
+                } else {
+                    foreach ($before as $id => $row) {
+                        $this->orm->recordChange($this->meta, ModelChangeKind::Trashed, (string) $id, $row, null);
+                    }
+                }
+            }
+
+            $written = [(string) $this->meta->deletedAtColumn => $stored];
+            foreach ($targets as $id) {
+                $this->orm->followStatementWrite($this->meta, $id, $written, array_keys($written));
+            }
+
+            return $count;
+        });
+    }
+
+    /** The DELETE of every row the query matches: delete()'s for any model, and forceDelete()'s. */
+    private function remove(): int
+    {
         return $this->orm->transaction(function (): int {
             $ids = $this->idsToWrite();
             // Read while the rows are there to read.
@@ -1618,6 +1770,7 @@ final readonly class Query
                 $preset[] = (string) $one[$this->meta->idColumn];
             }
             $one[$this->meta->idColumn] ??= Uuid::v7();
+            $this->refuseTrashedByHand($what, $one);
 
             $names = array_keys($one);
             sort($names);
@@ -2076,6 +2229,35 @@ final readonly class Query
     }
 
     /**
+     * Refuses a write that sets a #[SoftDeletes] model's trashed moment
+     * itself -- a non-NULL one on insert, any on update: delete(),
+     * restore() and forceDelete() write it, where the audit log hears of
+     * it as what it is (ADR 0191).
+     *
+     * @param array<string, mixed> $row column => value, as the write sends it
+     */
+    private function refuseTrashedByHand(string $what, array $row): void
+    {
+        $column = $this->meta->deletedAtColumn;
+        if ($column === null || !\array_key_exists($column, $row) || ($what !== 'update()' && $row[$column] === null)) {
+            return;
+        }
+
+        throw new \LogicException(
+            "{$what} sets {$this->class}'s #[SoftDeletes] moment, which delete(), restore() and forceDelete() alone write, "
+            . 'so the audit log hears of a row trashed or restored as that: call those rather than setting it.',
+        );
+    }
+
+    /** Refuses restore() on a model that is not #[SoftDeletes]: it has no trashed row. */
+    private function refuseUnlessSoft(string $what): void
+    {
+        if (!$this->meta->softDeletes()) {
+            throw new \LogicException("{$this->class} is not #[SoftDeletes]: its rows are deleted, never trashed, so {$what} has none to reach.");
+        }
+    }
+
+    /**
      * Refuses a delete through a statement on a model whose deletes run
      * #[BeforeDelete] or #[AfterDelete] methods: it deletes rows it never
      * read, so it has no model to run them on (ADR 0122).
@@ -2123,7 +2305,7 @@ final readonly class Query
      */
     private function idsToWrite(): array
     {
-        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders);
+        $scope = new Compiler($this->orm)->scope($this->meta, $this->conditions, $this->orders, trashed: $this->trashed);
         $id = $scope->expression(new ColumnRef([], $this->meta->idColumn));
         [$body, $bindings] = $scope->body();
         [$tail, $tailBindings] = $this->tail($this->limit, $this->offset);
@@ -2393,6 +2575,9 @@ final readonly class Query
         if ($other->orm !== $this->orm || $other->class !== $this->class) {
             throw new \LogicException("{$what} joins queries over one model, read by one Orm.");
         }
+        if ($other->trashed !== $this->trashed) {
+            throw new \LogicException("{$what} joins queries that read the same rows of a #[SoftDeletes] model: call withTrashed() or onlyTrashed() on both, or on neither.");
+        }
         if ($other->orders !== [] || $other->limit !== null || $other->offset !== null || $other->with !== [] || $other->groups !== []
             || $other->havings !== [] || $other->distinct || $other->measures !== [] || $other->unionAll !== null) {
             throw new \LogicException("{$what} takes a query narrowed by conditions alone: its order, limit, eager loads and aggregates would be the union's.");
@@ -2434,7 +2619,7 @@ final readonly class Query
     private function readScope(Compiler $compiler, bool $orders = true, array $also = [], bool $armed = false): Scope
     {
         if ($this->unionAll === null) {
-            return $compiler->scope($this->meta, $this->conditions, $orders ? $this->orders : [], $also);
+            return $compiler->scope($this->meta, $this->conditions, $orders ? $this->orders : [], $also, trashed: $this->trashed);
         }
         // What is read of a unionAll() is its arms' rows: the model's own
         // columns, which hold no join (ADR 0073).
@@ -2447,7 +2632,7 @@ final readonly class Query
         $arms = [];
         $bindings = [];
         foreach ($this->unionAll as $i => $arm) {
-            $scope = $compiler->scope($this->meta, $arm, []);
+            $scope = $compiler->scope($this->meta, $arm, [], trashed: $this->trashed);
             [$body, $armBindings] = $scope->body();
             // Which arm read the row, for a cursor: a row two arms read is
             // two places in the order, told apart by it. The position is
@@ -2742,6 +2927,9 @@ final readonly class Query
             || $query->havings !== [] || $query->distinct || $query->measures !== [] || $query->unionAll !== null) {
             throw new \LogicException("{$what} only adds conditions: its orders, limit, eager loads, groups and aggregates would be lost.");
         }
+        if ($query->trashed !== Trashed::Without) {
+            throw new \LogicException("{$what} only adds conditions: which trashed rows it reads is the relation's, a #[HasMany]'s live ones and the row a #[BelongsTo] names, and withTrashed() would be lost.");
+        }
 
         return $query;
     }
@@ -2851,7 +3039,7 @@ final readonly class Query
         }
         $ref = Identifiers::column($this->meta, $column);
         $scope = $this->unionAll === null
-            ? new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref])
+            ? new Compiler($this->orm)->scope($this->meta, $this->conditions, [], [$ref], trashed: $this->trashed)
             : $this->readScope(new Compiler($this->orm), orders: false, also: [$ref]);
         [$body, $bindings] = $scope->body();
 
@@ -2939,7 +3127,7 @@ final readonly class Query
      */
     private function anchorValues(array $orders, string $anchor): array
     {
-        $scope = new Compiler($this->orm)->scope($this->meta, [], $orders);
+        $scope = new Compiler($this->orm)->scope($this->meta, [], $orders, trashed: $this->trashed);
         $id = $scope->expression(new ColumnRef([], $this->meta->idColumn));
         [$body, $bindings] = $scope->body("{$id} = ?", [$anchor]);
 

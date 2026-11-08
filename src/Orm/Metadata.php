@@ -18,6 +18,7 @@ use Tinvar\Orm\Attributes\HasMany;
 use Tinvar\Orm\Attributes\Id;
 use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\Audited;
+use Tinvar\Orm\Attributes\SoftDeletes;
 use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Orm\Attributes\Unique;
 use Tinvar\Support\KnownAttributes;
@@ -171,6 +172,7 @@ final class Metadata
         }
         $tenantColumn = $tenant?->column;
         $audited = Audited::on($reflection);
+        $deletedAt = self::deletedAtOf($reflection, $columns, $idProperty);
 
         return new ModelMeta(
             class: $class,
@@ -194,9 +196,9 @@ final class Metadata
             beforeDelete: self::compileHooks($reflection, BeforeDelete::class),
             afterDelete: self::compileHooks($reflection, AfterDelete::class),
             carbonStamps: array_values(array_filter(
-                [$createdAt, $updatedAt],
+                [$createdAt, $updatedAt, $deletedAt],
                 static fn (?string $stamped): bool => $stamped !== null
-                    && (string) $reflection->getProperty($stamped)->getType() === CarbonImmutable::class,
+                    && ltrim((string) $reflection->getProperty($stamped)->getType(), '?') === CarbonImmutable::class,
             )),
             audited: $audited === null ? null : AuditedColumns::compile(
                 $class,
@@ -205,9 +207,49 @@ final class Metadata
                 $relations,
                 $columns[$idProperty],
                 $tenantColumn,
-                array_values(array_filter([$createdAt, $updatedAt], static fn (?string $stamp): bool => $stamp !== null)),
+                array_values(array_filter([$createdAt, $updatedAt, $deletedAt], static fn (?string $stamp): bool => $stamp !== null)),
             ),
+            deletedAtProperty: $deletedAt,
+            deletedAtColumn: $deletedAt === null ? null : $columns[$deletedAt],
         );
+    }
+
+    /**
+     * The property a #[SoftDeletes] model maps its trashed moment to, by the
+     * column the attribute names; null for a model that does not soft
+     * delete. The property must hold a moment or none -- a nullable
+     * CarbonImmutable or DateTimeImmutable -- since a live row holds none,
+     * and it is refused when the model compiles rather than at the first
+     * delete.
+     *
+     * @param \ReflectionClass<Model> $reflection
+     * @param array<string, string> $columns property => column
+     */
+    private static function deletedAtOf(\ReflectionClass $reflection, array $columns, string $idProperty): ?string
+    {
+        $declared = SoftDeletes::on($reflection);
+        if ($declared === null) {
+            return null;
+        }
+        $class = $reflection->getName();
+        $property = array_search($declared->column, $columns, true);
+        if (!\is_string($property) || $property === $idProperty) {
+            throw new MappingException(
+                "{$class} is #[SoftDeletes], and maps no property to its '{$declared->column}' column: declare "
+                . '#[Column] public ?CarbonImmutable $deletedAt = null'
+                . ($declared->column === 'deleted_at' ? '.' : " with #[Column('{$declared->column}')]."),
+            );
+        }
+        $reflected = $reflection->getProperty($property);
+        $type = $reflected->getType();
+        if (!self::isTimestamp($reflected) || $type === null || !$type->allowsNull()) {
+            throw new MappingException(
+                "{$class}::\${$property} is the #[SoftDeletes] column, which holds no moment while the row is live: type it a nullable "
+                . 'CarbonImmutable (or DateTimeImmutable), ?CarbonImmutable.',
+            );
+        }
+
+        return $property;
     }
 
     /**

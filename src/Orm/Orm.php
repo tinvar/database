@@ -1362,6 +1362,28 @@ final class Orm
     }
 
     /**
+     * What a read of $meta's own table -- named $alias, if the statement
+     * names it -- is held to: the tenant predicate,
+     * and -- for a #[SoftDeletes] model -- which rows by their trashed
+     * moment (ADR 0191). A write is held to the tenant alone
+     * (tenantScope()): save() and forceDelete() reach a trashed row.
+     *
+     * @return array{string, list<string>}
+     */
+    private function readScope(ModelMeta $meta, Trashed $trashed, ?string $alias = null): array
+    {
+        [$scope, $bindings] = $this->tenantScope($meta, $alias);
+        $predicate = $meta->deletedAtColumn === null
+            ? null
+            : $trashed->predicate(($alias === null ? '' : '"' . $alias . '".') . '"' . $meta->deletedAtColumn . '"');
+        if ($predicate !== null) {
+            $scope = $scope === '' ? $predicate : "{$scope} AND {$predicate}";
+        }
+
+        return [$scope, $bindings];
+    }
+
+    /**
      * The tenants a read of $meta is held to now -- the tenant in force, or
      * every tenant in the subtree withinSubtree() widened to -- or null when
      * nothing holds it: the model is not #[TenantScoped], or acrossTenants()
@@ -1474,8 +1496,15 @@ final class Orm
         ) !== [];
     }
 
-    /** @param class-string<Model> $class */
-    public function find(string $class, string $id): ?Model
+    /**
+     * The row of $class under $id, or null where there is none the scope
+     * in force may read. A #[SoftDeletes] model's trashed row is none
+     * unless $trashed says so -- the identity map holding it included
+     * (ADR 0191).
+     *
+     * @param class-string<Model> $class
+     */
+    public function find(string $class, string $id, Trashed $trashed = Trashed::Without): ?Model
     {
         // Every key is a UUIDv7 this Orm minted, so anything else names no
         // row -- and must be answered as such without asking the database.
@@ -1504,15 +1533,18 @@ final class Orm
         // The query runner's resolveModels() guards the same way; every other
         // resolution path (Binder, ActionRunner, Validator) comes through
         // here, so the guard belongs here too.
+        // A trashed row the map holds -- a #[BelongsTo] read it, or a
+        // withTrashed() query did -- is no answer to a read that passes
+        // trashed rows by; the database is asked instead.
+        $meta = Metadata::for($class);
         if (!$this->isWidened() && ($existing = $this->identityMap->get($class, $id))) {
             /** @var Model $existing */
-            if (self::holdsRow($existing)) {
+            if (self::holdsRow($existing) && $trashed->admits($meta->isTrashed($existing))) {
                 return $existing;
             }
         }
-        $meta = Metadata::for($class);
 
-        return $this->whereIn($class, $meta->idColumn, [$id])[0] ?? null;
+        return $this->whereIn($class, $meta->idColumn, [$id], trashed: $trashed)[0] ?? null;
     }
 
     /**
@@ -1521,13 +1553,14 @@ final class Orm
      * @param string|null     $orderBy any column the model maps, hidden ones
      *        included: a caller passing request input allowlists it first
      *        (see identifier())
+     * @param Trashed $trashed which of a #[SoftDeletes] model's rows: the live ones unless said
      * @return list<T>
      */
-    public function all(string $class, ?string $orderBy = null): array
+    public function all(string $class, ?string $orderBy = null, Trashed $trashed = Trashed::Without): array
     {
         $meta = Metadata::for($class);
         $orderBy = $orderBy === null ? null : self::identifier($meta, $orderBy);
-        [$scope, $scopeBindings] = $this->tenantScope($meta);
+        [$scope, $scopeBindings] = $this->readScope($meta, $trashed);
 
         $columns = implode(', ', array_map(static fn (string $c): string => '"' . $c . '"', $meta->selectColumns()));
         $sql = "SELECT {$columns} FROM \"{$meta->table}\"";
@@ -1550,9 +1583,10 @@ final class Orm
      *        (see identifier())
      * @param list<mixed>     $values
      * @param string|null     $orderBy the same, for the sort
+     * @param Trashed $trashed which of a #[SoftDeletes] model's rows: the live ones unless said
      * @return list<T>
      */
-    public function whereIn(string $class, string $column, array $values, ?string $orderBy = null): array
+    public function whereIn(string $class, string $column, array $values, ?string $orderBy = null, Trashed $trashed = Trashed::Without): array
     {
         if ($values === []) {
             return [];
@@ -1560,7 +1594,7 @@ final class Orm
         $meta = Metadata::for($class);
         $column = self::identifier($meta, $column);
         $orderBy = $orderBy === null ? null : self::identifier($meta, $orderBy);
-        [$scope, $scopeBindings] = $this->tenantScope($meta);
+        [$scope, $scopeBindings] = $this->readScope($meta, $trashed);
 
         // find()'s guard, for every lookup by id: a value that is not a UUIDv7
         // names no row. Postgres refuses one for a uuid column with an error
@@ -2097,6 +2131,17 @@ final class Orm
             }
         }
 
+        // A new row is live: trashed only by delete(), which the hooks and
+        // the audit log hear of (ADR 0191).
+        $deletedAt = $meta->deletedAtProperty;
+        if ($deletedAt !== null) {
+            if (!$this->isSet($model, $meta, $deletedAt)) {
+                $meta->set($model, $deletedAt, null);
+            } elseif ($meta->get($model, $deletedAt) !== null) {
+                throw self::trashedByHand($meta);
+            }
+        }
+
         // Not attached yet, so told the form a moment is written in here.
         $values = $meta->writeValues($model, $this->timestampStorage);
 
@@ -2156,6 +2201,11 @@ final class Orm
         // builder's update of the column is.
         if ($meta->tenantColumn !== null && \array_key_exists($meta->tenantColumn, $changes)) {
             throw ForeignTenantRow::moved($meta->class);
+        }
+
+        // A #[SoftDeletes] moment is delete()'s and restore()'s to write.
+        if ($meta->deletedAtColumn !== null && \array_key_exists($meta->deletedAtColumn, $changes)) {
+            throw self::trashedByHand($meta);
         }
 
         if ($changes === []) {
@@ -2282,12 +2332,208 @@ final class Orm
      * ends -- throws MissingRow inside the transaction, taking back what
      * #[BeforeDelete] wrote, and runs no #[AfterDelete]: a hook that hears
      * of a delete hears of one that happened.
+     *
+     * A #[SoftDeletes] model's row is trashed rather than removed: its
+     * deleted_at stamped with now(), the model still persisted and
+     * isTrashed(), its hooks run around the UPDATE as around a DELETE,
+     * and an audited model's change recorded as `trashed` (ADR 0191).
+     * One trashed already is no row to trash: refused with MissingRow
+     * where the model has hooks, as a row gone is. forceDelete() removes
+     * the row.
      */
     public function delete(Model $model): void
     {
         $this->refuseWrite('delete()');
 
         $meta = Metadata::for($model::class);
+        if ($meta->softDeletes()) {
+            $this->trash($model, $meta);
+
+            return;
+        }
+        $this->remove($model, $meta);
+    }
+
+    /**
+     * Removes the row, a #[SoftDeletes] model's too, trashed or not: what
+     * delete() does for any other model, its hooks and its audit entry --
+     * `deleted` -- with it (ADR 0191).
+     */
+    public function forceDelete(Model $model): void
+    {
+        $this->refuseWrite('forceDelete()');
+
+        $this->remove($model, Metadata::for($model::class));
+    }
+
+    /**
+     * Brings a trashed row of a #[SoftDeletes] model back: its deleted_at
+     * cleared, and every read reading it again. An audited model's change
+     * is recorded as `restored`, in the transaction of the write (ADR
+     * 0191). No hook runs: a restore is neither a save nor a delete.
+     *
+     * A model whose row is not trashed, as it was last read or written,
+     * is left as it is. One the UPDATE does not reach -- the row gone,
+     * restored since, or another tenant's -- throws MissingRow, worded
+     * alike for each, so the difference is no oracle.
+     */
+    public function restore(Model $model): void
+    {
+        $this->refuseWrite('restore()');
+
+        $meta = Metadata::for($model::class);
+        if (!$meta->softDeletes()) {
+            throw new \LogicException("{$meta->class} is not #[SoftDeletes]: its rows are deleted, never trashed, so there is none to restore.");
+        }
+        if (!$model->isPersisted()) {
+            throw MissingRow::notPersisted($meta->class, 'Restoring');
+        }
+        if (!$meta->isTrashed($model)) {
+            return;
+        }
+        if ($meta->audited === null) {
+            if ($this->restoreRow($model, $meta) === 0) {
+                throw MissingRow::onRestore($meta->class, $meta->keyOf($model));
+            }
+
+            return;
+        }
+        $this->refuseUnrecorded($meta);
+
+        $this->transaction(function () use ($model, $meta): void {
+            $tenant = $this->rowTenantFor($meta, $model->snapshot(), $meta->keyOf($model));
+            if ($this->restoreRow($model, $meta) === 0) {
+                throw MissingRow::onRestore($meta->class, $meta->keyOf($model));
+            }
+            $this->recordChange($meta, ModelChangeKind::Restored, $meta->keyOf($model), null, [...($model->snapshot() ?? []), ...$tenant]);
+        });
+    }
+
+    /** What insert() and update() refuse: a #[SoftDeletes] moment written by hand. */
+    private static function trashedByHand(ModelMeta $meta): \LogicException
+    {
+        return new \LogicException(
+            "{$meta->class}::\${$meta->deletedAtProperty} is #[SoftDeletes]'s, and is written by delete() and restore() alone, "
+            . 'where the delete hooks run and the audit log hears of it: call those rather than setting it.',
+        );
+    }
+
+    /**
+     * delete() of a #[SoftDeletes] model: the trashing UPDATE, in a
+     * transaction with the delete hooks and the audit entry where the
+     * model has either.
+     */
+    private function trash(Model $model, ModelMeta $meta): void
+    {
+        if (!$model->isPersisted()) {
+            throw MissingRow::notPersisted($meta->class);
+        }
+        $hooks = $meta->hasDeleteHooks();
+        if (!$hooks && $meta->audited === null) {
+            $this->trashRow($model, $meta);
+
+            return;
+        }
+        $this->refuseUnrecorded($meta);
+
+        $this->transaction(function () use ($model, $meta, $hooks): void {
+            $meta->beforeDelete($model);
+            $before = $model->snapshot();
+            $before = $before === null ? null : [...$before, ...$this->rowTenantFor($meta, $before, $meta->keyOf($model))];
+            $trashed = $this->trashRow($model, $meta);
+            if ($trashed === 0 && $hooks) {
+                throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
+            }
+            if ($trashed > 0) {
+                $this->recordChange($meta, ModelChangeKind::Trashed, $meta->keyOf($model), $before, null);
+            }
+            $meta->afterDelete($model);
+        });
+    }
+
+    /**
+     * Stamps the row's deleted_at, where it is live and the tenant's: the
+     * model takes the moment, its snapshot the stored form, and every
+     * collection it was in lets it go. All of it undone if the
+     * transaction rolls back.
+     *
+     * @return int the rows trashed: 0 where the row is gone, trashed already, or out of reach
+     */
+    private function trashRow(Model $model, ModelMeta $meta): int
+    {
+        $property = (string) $meta->deletedAtProperty;
+        $column = (string) $meta->deletedAtColumn;
+        $previous = $this->isSet($model, $meta, $property) ? [$property => $meta->get($model, $property)] : [];
+        $meta->stamp($model, $property, $this->now());
+        $stored = $meta->columnValues($model)[$column];
+
+        $written = $this->writeTrashed($model, $meta, $stored);
+        if ($written === 0) {
+            $meta->fill($model, $previous);
+        } else {
+            $this->journal(static fn () => $meta->fill($model, $previous));
+        }
+
+        return $written;
+    }
+
+    /** Clears the row's deleted_at, where it is trashed and the tenant's: trashRow()'s converse. */
+    private function restoreRow(Model $model, ModelMeta $meta): int
+    {
+        $property = (string) $meta->deletedAtProperty;
+        $previous = [$property => $meta->get($model, $property)];
+
+        $written = $this->writeTrashed($model, $meta, null);
+        if ($written > 0) {
+            $meta->set($model, $property, null);
+            $this->journal(static fn () => $meta->fill($model, $previous));
+        }
+
+        return $written;
+    }
+
+    /**
+     * The one UPDATE of a row's deleted_at: to $stored where the row is
+     * live, to NULL where it is trashed, under the tenant predicate as
+     * every write is. On a write that reached the row, the snapshot takes
+     * the value and the relations follow.
+     */
+    private function writeTrashed(Model $model, ModelMeta $meta, ?string $stored): int
+    {
+        $column = (string) $meta->deletedAtColumn;
+        $id = $meta->keyOf($model);
+        [$scope, $scopeBindings] = $this->tenantScope($meta);
+
+        $sql = sprintf(
+            'UPDATE "%s" SET "%s" = ? WHERE "%s" = ? AND "%s" %s',
+            $meta->table,
+            $column,
+            $meta->idColumn,
+            $column,
+            $stored === null ? 'IS NOT NULL' : 'IS NULL',
+        );
+        if ($scope !== '') {
+            $sql .= " AND {$scope}";
+        }
+
+        $this->noteRowTenants($meta, [$id]);
+        // Changed from NULL or to it, so MySQL's count of rows changed is
+        // the count of rows matched (ADR 0172).
+        $written = $this->connection->execute($sql, [$stored, $id, ...$scopeBindings]);
+        if ($written === 0) {
+            return 0;
+        }
+
+        $this->journalSnapshot($model);
+        $model->markClean([...($model->snapshot() ?? []), $column => $stored]);
+        $this->followWrite($meta, $id, $model->snapshot());
+
+        return $written;
+    }
+
+    /** delete() of a model that is not #[SoftDeletes], and forceDelete() of any. */
+    private function remove(Model $model, ModelMeta $meta): void
+    {
         if (!$meta->hasDeleteHooks() && $meta->audited === null) {
             $this->deleteRow($model, $meta);
 
@@ -2531,9 +2777,13 @@ final class Orm
             $observer($meta->class, $id, $row === null);
         }
 
+        // A trashed child leaves every collection it was in, as a deleted
+        // one does; its parent's #[BelongsTo] row is kept, trashed.
+        $gone = $row === null || ($meta->deletedAtColumn !== null && ($row[$meta->deletedAtColumn] ?? null) !== null);
+
         foreach (Metadata::relationsTo($meta->class) as $relation) {
             match ($relation->kind) {
-                RelationKind::HasMany => $this->followHasMany($relation, $meta, $id, $row),
+                RelationKind::HasMany => $this->followHasMany($relation, $meta, $id, $gone ? null : $row),
                 RelationKind::BelongsToMany => $this->forgetLinks($relation),
                 RelationKind::BelongsTo => $this->followBelongsTo($relation, $id, $row),
             };
@@ -3098,7 +3348,12 @@ final class Orm
         // still compiled metadata; it just lives on the other side.
         $childColumn = self::identifier($targetMeta, $relation->childColumn(), [$relation->foreignKey]);
 
-        [$scope, $scopeBindings] = $this->tenantScope($targetMeta);
+        // A #[HasMany] passes its trashed children by, as any read does; a
+        // #[BelongsTo] reads the row its key names, trashed or not, so a
+        // child whose parent was deleted still says whose it was (ADR 0191).
+        [$scope, $scopeBindings] = $relation->kind === RelationKind::HasMany
+            ? $this->readScope($targetMeta, Trashed::Without)
+            : $this->tenantScope($targetMeta);
 
         // Query::MAX_VALUES ids at a time, so a result set of any size loads:
         // one list of them all outgrew what a driver binds. Each group's
@@ -3158,8 +3413,9 @@ final class Orm
         $order[] = '"p"."' . $pivotMeta->idColumn . '"';
 
         $columns = implode(', ', array_map(static fn (string $c): string => '"t"."' . $c . '"', $target->selectColumns()));
-        [$pivotScope, $pivotBindings] = $this->tenantScope($pivotMeta, 'p');
-        [$targetScope, $targetBindings] = $this->tenantScope($target, 't');
+        // A trashed target, and a trashed pivot row, link nothing (ADR 0191).
+        [$pivotScope, $pivotBindings] = $this->readScope($pivotMeta, Trashed::Without, 'p');
+        [$targetScope, $targetBindings] = $this->readScope($target, Trashed::Without, 't');
 
         $grouped = [];
         foreach (array_chunk($ids, Query::MAX_VALUES) as $chunk) {

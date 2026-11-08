@@ -13,6 +13,7 @@ use Tinvar\Orm\Orm;
 use Tinvar\Orm\NamesDriver;
 use Tinvar\Orm\RelationKind;
 use Tinvar\Orm\RelationMeta;
+use Tinvar\Orm\Trashed;
 
 /**
  * Turns a query's resolved parts into SQL, with the tenant predicate on
@@ -54,8 +55,9 @@ final class Compiler
      * @param list<array{ColumnRef|Measure|RelationMeasure, Direction, Nulls|null}> $orders by a column, by an
      *        aggregate over the rows (a report's), or by one over each row's related rows
      * @param list<ColumnRef> $also further columns the statement reads, which need their joins
+     * @param Trashed $trashed which of a #[SoftDeletes] model's rows: the live ones unless the query said (ADR 0191)
      */
-    public function scope(ModelMeta $meta, array $conditions, array $orders, array $also = []): Scope
+    public function scope(ModelMeta $meta, array $conditions, array $orders, array $also = [], Trashed $trashed = Trashed::Without): Scope
     {
         $alias = $this->alias();
         $columns = $also;
@@ -78,6 +80,10 @@ final class Compiler
         if ($tenant !== null) {
             $where[] = $tenant[0];
             array_push($whereBindings, ...$tenant[1]);
+        }
+        $live = $this->trashedPredicate($meta, $alias, $trashed);
+        if ($live !== null) {
+            $where[] = $live;
         }
         if ($conditions !== []) {
             [$sql, $bindings] = $this->conditions($meta, $alias, $aliases, $conditions);
@@ -174,7 +180,7 @@ final class Compiler
             $metas[] = Metadata::for($relation->target);
         }
         $last = \count($path);
-        $inner = $this->scope($metas[$last], $measure->conditions, [], $measure->column === null ? [] : [$measure->column]);
+        $inner = $this->scope($metas[$last], $measure->conditions, [], $measure->column === null ? [] : [$measure->column], self::reached($path[$last - 1]));
 
         // Along a path ('shelves.items'), the model it ends at is read, as
         // any relation's rows are, and each table between joined back to
@@ -193,6 +199,10 @@ final class Compiler
             if ($tenant !== null) {
                 $joins .= ' AND ' . $tenant[0];
                 array_push($joinBindings, ...$tenant[1]);
+            }
+            $live = $this->trashedPredicate($metas[$i], $aliases[$i], self::reached($path[$i - 1]));
+            if ($live !== null) {
+                $joins .= ' AND ' . $live;
             }
         }
 
@@ -349,6 +359,29 @@ final class Compiler
     }
 
     /**
+     * Which rows of a #[SoftDeletes] model, read as $alias, the statement
+     * takes, or null where it takes every one -- or the model does not
+     * soft delete.
+     */
+    private function trashedPredicate(ModelMeta $meta, string $alias, Trashed $trashed): ?string
+    {
+        return $meta->deletedAtColumn === null
+            ? null
+            : $trashed->predicate(Identifiers::quote($alias) . '.' . Identifiers::quote($meta->deletedAtColumn));
+    }
+
+    /**
+     * The rows a relation reaches of its target: a #[HasMany]'s live
+     * children, as a loaded collection holds them; every row a
+     * #[BelongsTo]'s key may name, trashed or not, as it loads one (ADR
+     * 0191).
+     */
+    private static function reached(RelationMeta $relation): Trashed
+    {
+        return $relation->kind === RelationKind::HasMany ? Trashed::Without : Trashed::With;
+    }
+
+    /**
      * @param array<string, string> $aliases
      * @param list<Condition> $conditions
      * @return array{string, list<mixed>}
@@ -445,7 +478,7 @@ final class Compiler
     {
         $relation = $condition->relation ?? throw new \LogicException('A whereHas() condition names its relation.');
         $target = Metadata::for($relation->target);
-        $inner = $this->scope($target, $condition->conditions, []);
+        $inner = $this->scope($target, $condition->conditions, [], [], self::reached($relation));
 
         [$link, $linkBindings] = $this->link($relation, $meta, $alias, $target, $inner->alias);
 
@@ -476,7 +509,10 @@ final class Compiler
         $arms = [];
         $bindings = [];
         foreach ($condition->arms as $arm) {
-            $inner = $this->scope($meta, $arm, []);
+            // Every row, trashed or not: the read around the arms holds
+            // its own rows to what it reads (Query::arm() has each arm
+            // read as it does).
+            $inner = $this->scope($meta, $arm, [], [], Trashed::With);
             [$body, $armBindings] = $inner->body();
             $arms[] = 'SELECT ' . $inner->expression(new ColumnRef([], $meta->idColumn)) . $body;
             array_push($bindings, ...$armBindings);

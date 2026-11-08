@@ -13,4 +13,10 @@ enum ModelChangeKind: string
     case Created = 'created';
     case Updated = 'updated';
     case Deleted = 'deleted';
+
+    /** A #[SoftDeletes] model's row trashed by delete(): still there, read by nothing that does not ask (ADR 0191). */
+    case Trashed = 'trashed';
+
+    /** A trashed row brought back by restore(). */
+    case Restored = 'restored';
 }

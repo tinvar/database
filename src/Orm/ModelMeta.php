@@ -37,6 +37,9 @@ final class ModelMeta
      * @param string|null                  $updatedAtProperty an `updatedAt` column typed as a moment, which
      *        the ORM stamps on insert and on every update unless that write sets it
      * @param list<string>                 $carbonStamps of those two, the ones typed CarbonImmutable
+     * @param string|null                  $deletedAtProperty a #[SoftDeletes] model's trashed moment, which
+     *        delete() stamps and restore() clears; null for a model that deletes its rows (ADR 0191)
+     * @param string|null                  $deletedAtColumn its column
      * @param AuditedColumns|null          $audited what the audit log records of the model's rows, for an
      *        #[Audited] one; null for a model whose changes are recorded nowhere (ADR 0156)
      */
@@ -63,6 +66,8 @@ final class ModelMeta
         private readonly array $afterDelete = [],
         private readonly array $carbonStamps = [],
         public readonly ?AuditedColumns $audited = null,
+        public readonly ?string $deletedAtProperty = null,
+        public readonly ?string $deletedAtColumn = null,
     ) {
         $this->running = new \WeakMap();
     }
@@ -80,6 +85,22 @@ final class ModelMeta
             $now::class === \DateTimeImmutable::class => $now,
             default => \DateTimeImmutable::createFromInterface($now),
         });
+    }
+
+    /** Whether the model is #[SoftDeletes]: a delete() trashes its row rather than removing it. */
+    public function softDeletes(): bool
+    {
+        return $this->deletedAtColumn !== null;
+    }
+
+    /**
+     * Whether $model stands for a trashed row, as the row was last read or
+     * written: its snapshot's moment, not one assigned since. False for a
+     * model that does not soft delete, or holds no row.
+     */
+    public function isTrashed(Model $model): bool
+    {
+        return $this->deletedAtColumn !== null && ($model->snapshot()[$this->deletedAtColumn] ?? null) !== null;
     }
 
     /**
