@@ -252,6 +252,19 @@ it('asks before rolling back where TINVAR_ENV does not say development, and take
         ->and($run->out)->toContain('Rolled back 1 migration(s).');
 })->with(['nothing set' => [null], 'staging' => ['staging']]);
 
+it('asks before rolling back where TINVAR_ENV says local but a production marker says otherwise', function () {
+    $run = run();
+    // DevMode::isDevelopment() (ADR 0213): TINVAR_ENV=local copied beside a
+    // production marker is not a developer's machine.
+    $run->environment = ['TINVAR_ENV' => 'local', 'NODE_ENV' => 'production'];
+    $run->files->add('2026_10_24_000001_create_notes', CREATE_NOTES, "\$schema->drop('notes');");
+    $run('migrate');
+
+    expect($run('migrate:rollback'))->toBe(MigrateCommand::FAILED)
+        ->and($run->asked)->toHaveCount(1)
+        ->and(PdoConnection::sqlite($run->files->database())->select("SELECT name FROM sqlite_master WHERE name = 'notes'"))->toHaveCount(1);
+});
+
 it('rolls back without asking given --force, or where TINVAR_ENV says development, or with nothing to take back', function () {
     $run = run();
     $run->environment = ['TINVAR_ENV' => null];

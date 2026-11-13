@@ -207,7 +207,9 @@ final class MigrateCommand
         }
 
         $migrator = $this->migrator(false, $options);
-        $development = \in_array(strtolower(trim($this->environment['TINVAR_ENV'] ?? '')), NonProduction::ENVIRONMENTS, true);
+        // A developer's or a test's database, as DevMode reads the environment
+        // (ADR 0213): TINVAR_ENV says so and no production marker says otherwise.
+        $development = DevMode::isDevelopment($this->environment);
         $targets = $force || $development ? [] : $migrator->toRollBack($steps);
         if ($targets !== [] && !($this->ask)(\sprintf(
             'Roll back %d migration(s) (%s), and what their down() drops with them?',

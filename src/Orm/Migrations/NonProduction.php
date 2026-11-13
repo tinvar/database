@@ -27,7 +27,7 @@ final class NonProduction
     public const string FLAG = '--non-production';
 
     /** The TINVAR_ENV values that say so for every run. */
-    public const array ENVIRONMENTS = ['local', 'development', 'testing'];
+    public const array ENVIRONMENTS = DevMode::DEVELOPMENT;
 
     /**
      * @param string $command the command, as it is typed, for the message
