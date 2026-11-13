@@ -11,6 +11,7 @@ use Tinvar\Orm\Metadata;
 use Tinvar\Orm\ModelMeta;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\NamesDriver;
+use Tinvar\Orm\Query;
 use Tinvar\Orm\RelationKind;
 use Tinvar\Orm\RelationMeta;
 use Tinvar\Orm\Trashed;
@@ -419,7 +420,11 @@ final class Compiler
             case Condition::COMPARE:
                 \assert($condition->column !== null);
 
-                return [$expression($condition->column) . " {$condition->operator} " . $this->placeholder($condition->values[0] ?? null), $condition->values];
+                return [
+                    $expression($condition->column) . " {$condition->operator} " . $this->placeholder($condition->values[0] ?? null)
+                        . self::likeEscape($condition->operator),
+                    $condition->values,
+                ];
 
             case Condition::IN:
                 \assert($condition->column !== null);
@@ -549,6 +554,16 @@ final class Compiler
         $connection = $this->orm->statements();
 
         return $connection instanceof NamesDriver && $connection->driver() === 'mysql' ? '?' : 'CAST(? AS DOUBLE PRECISION)';
+    }
+
+    /**
+     * What follows a LIKE's pattern: its escape character, the same on
+     * every database (Query::LIKE_ESCAPE, ADR 0208); nothing after any
+     * other operator.
+     */
+    public static function likeEscape(?string $operator): string
+    {
+        return \in_array($operator, ['LIKE', 'NOT LIKE'], true) ? " ESCAPE '" . Query::LIKE_ESCAPE . "'" : '';
     }
 
     public static function placeholders(int $count): string

@@ -91,6 +91,27 @@ final readonly class Query
     ];
 
     /**
+     * The one escape character of every LIKE the builder writes: `ESCAPE
+     * '!'` on SQLite, Postgres and MySQL alike (ADR 0208). Not a
+     * backslash, which MySQL reads inside a string literal and SQLite
+     * escapes nothing with by default.
+     */
+    public const string LIKE_ESCAPE = '!';
+
+    /**
+     * $text as a LIKE pattern matches it: literally, its `%`, `_` and `!`
+     * each escaped. For a term from a request a pattern holds --
+     * `where('name', 'like', '%' . Query::escapeLike($term) . '%')` -- where
+     * a `%` or `_` would otherwise match any text (ADR 0208).
+     */
+    public static function escapeLike(string $text): string
+    {
+        $e = self::LIKE_ESCAPE;
+
+        return strtr($text, [$e => $e . $e, '%' => $e . '%', '_' => $e . '_']);
+    }
+
+    /**
      * @param class-string<T> $class
      * @param list<Condition> $conditions
      * @param list<array{ColumnRef|Measure|RelationMeasure, Direction, Nulls|null}> $orders by a column, by an
@@ -960,7 +981,8 @@ final readonly class Query
                 [$expression, $expressionBindings] = $measure instanceof ColumnRef
                     ? [$scope->expression($measure), []]
                     : $compiler->measure($this->meta, $scope, $measure);
-                $terms .= ($i === 0 ? '' : ($or ? ' OR ' : ' AND ')) . $expression . " {$operator} " . $compiler->placeholder($value);
+                $terms .= ($i === 0 ? '' : ($or ? ' OR ' : ' AND ')) . $expression . " {$operator} " . $compiler->placeholder($value)
+                    . Compiler::likeEscape($operator);
                 array_push($havingBindings, ...$expressionBindings);
                 $havingBindings[] = $value;
             }
