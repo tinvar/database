@@ -67,6 +67,39 @@ final class Metadata
         return self::$compiled[$class] ??= self::compile($class);
     }
 
+    /** A plain SQL identifier, as Builder\Identifiers takes one. */
+    private const string IDENTIFIER = '/^[A-Za-z_][A-Za-z0-9_]{0,62}\z/';
+
+    /**
+     * Every name an attribute gives that the ORM writes into SQL -- the
+     * table, each column, the tenant column, each relation's key -- held
+     * to a plain identifier when the model compiles (ADR 0208). Quoted in
+     * many places by sprintf() alone, a name with a quote in it would
+     * otherwise end the identifier and write SQL of its own; checked here
+     * once, none reaches any of them.
+     *
+     * @param array<string, string> $columns
+     * @param array<string, RelationMeta> $relations
+     */
+    private static function plainNames(string $table, array $columns, ?string $tenantColumn, array $relations): void
+    {
+        $names = [$table, ...array_values($columns)];
+        if ($tenantColumn !== null) {
+            $names[] = $tenantColumn;
+        }
+        foreach ($relations as $relation) {
+            $names[] = $relation->foreignKey;
+            if ($relation->orderBy !== null) {
+                $names[] = $relation->orderBy;
+            }
+        }
+        foreach ($names as $name) {
+            if (preg_match(self::IDENTIFIER, $name) !== 1) {
+                throw MappingException::malformedIdentifier($name);
+            }
+        }
+    }
+
     /**
      * The tables of the #[TenantScoped] models compiled so far: what the
      * dev toolbar flags raw SQL on (RawSql). A model this worker has not
@@ -171,6 +204,7 @@ final class Metadata
             throw MappingException::noId($class);
         }
         $tenantColumn = $tenant?->column;
+        self::plainNames($table->newInstance()->name, $columns, $tenantColumn, $relations);
         $audited = Audited::on($reflection);
         $deletedAt = self::deletedAtOf($reflection, $columns, $idProperty);
 
