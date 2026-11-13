@@ -19,6 +19,7 @@ use Tinvar\Orm\Attributes\Table;
 use Tinvar\Orm\Attributes\TenantScoped;
 use Tinvar\Orm\Collection;
 use Tinvar\Orm\IdentityMap;
+use Tinvar\Orm\MappingException;
 use Tinvar\Orm\Migrations\MigrationFailed;
 use Tinvar\Orm\Migrations\MigrationGenerator;
 use Tinvar\Orm\Migrations\Migrator;
@@ -515,22 +516,15 @@ describe('names the database gives', function () {
             ->and($generator->warnings)->toBe([]);
     });
 
-    // A model's names are the application's own, but they reach the file
-    // the same ways: as a literal, which nothing in it can end, and as
-    // comment text, which can neither break its line nor close PHP.
-    it('writes a model\'s name as a literal, and as comment text that cannot end the comment or PHP', function () {
-        [$files, $connection, $generator] = setUp();
+    // A model's names are the application's own, and are plain identifiers
+    // or the model does not compile (ADR 0208): one that would end a
+    // comment or close PHP never reaches the file at all.
+    it('refuses a model whose name could end a comment or PHP before writing anything', function () {
+        [, $connection, $generator] = setUp();
         $connection->execute('CREATE TABLE gen_hostile (id TEXT PRIMARY KEY)');
 
-        $source = (string) $generator->generate([Hostile::class], '2026-10-24');
-        $path = "{$files->directory}/2026_10_24_000001_add_to_hostile.php";
-        file_put_contents($path, $source);
-        [$status, $said] = lint($path);
-
-        expect($status)->toBe(0, $said)
-            ->and(smuggled($source))->toBe([])
-            ->and($source)->toContain("// gen_hostile.x?\\>system('id');// is NOT NULL with no default")
-            ->and($source)->toContain("\$table->string('x?>\nsystem(\\'id\\');//');");
+        expect(static fn () => $generator->generate([Hostile::class], '2026-10-24'))
+            ->toThrow(MappingException::class, 'not a well-formed');
     });
 
     it('cannot end the header\'s doc comment from the date it is given', function () {
