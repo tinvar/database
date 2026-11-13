@@ -14,6 +14,7 @@ use Tinvar\Orm\Factory;
 use Tinvar\Orm\IdentityMap;
 use Tinvar\Orm\MappingException;
 use Tinvar\Orm\Metadata;
+use Tinvar\Orm\MissingRow;
 use Tinvar\Orm\Model;
 use Tinvar\Orm\Orm;
 use Tinvar\Orm\PdoConnection;
@@ -269,7 +270,8 @@ it('deletes a tenant-scoped row only inside its own tenant', function () {
     $script = $orm->actAs('acme', fn () => $orm->find(Script::class, $fixture->scripts['acme'][0]));
 
     $fixture->connection->resetStatementCount();
-    $orm->actAs('globex', fn () => $orm->delete($script));
+    // And says so, as a row that is gone (ADR 0208).
+    expect(fn () => $orm->actAs('globex', fn () => $orm->delete($script)))->toThrow(MissingRow::class);
 
     expect($fixture->connection->statementLog()[0])->toContain('tenant_id')
         ->and($orm->actAs('acme', fn () => $orm->find(Script::class, $fixture->scripts['acme'][0])))

@@ -2599,20 +2599,21 @@ final class Orm
      * throws stops the delete, or puts the row back, and takes back what
      * the hooks wrote with it (ADR 0122).
      *
-     * Such a model is deleted only where it has a row: one never saved, or
+     * A model is deleted only where it has a row: one never saved, or
      * deleted already, is refused before any hook runs, and a DELETE that
      * removed nothing -- the row deleted since it was read, or out of the
      * tenant's reach, as a child's read inside withinSubtree() is after it
-     * ends -- throws MissingRow inside the transaction, taking back what
-     * #[BeforeDelete] wrote, and runs no #[AfterDelete]: a hook that hears
-     * of a delete hears of one that happened.
+     * ends -- throws MissingRow, worded alike for each so the difference
+     * is no oracle (ADR 0208). With hooks, inside the transaction, taking
+     * back what #[BeforeDelete] wrote, and running no #[AfterDelete]: a
+     * hook that hears of a delete hears of one that happened.
      *
      * A #[SoftDeletes] model's row is trashed rather than removed: its
      * deleted_at stamped with now(), the model still persisted and
      * isTrashed(), its hooks run around the UPDATE as around a DELETE,
      * and an audited model's change recorded as `trashed` (ADR 0191).
-     * One trashed already is no row to trash: refused with MissingRow
-     * where the model has hooks, as a row gone is. forceDelete() removes
+     * One trashed already is no row to trash: refused with MissingRow, as
+     * a row gone is. forceDelete() removes
      * the row.
      */
     public function delete(Model $model): void
@@ -2702,25 +2703,23 @@ final class Orm
         if (!$model->isPersisted()) {
             throw MissingRow::notPersisted($meta->class);
         }
-        $hooks = $meta->hasDeleteHooks();
-        if (!$hooks && $meta->audited === null) {
-            $this->trashRow($model, $meta);
+        if (!$meta->hasDeleteHooks() && $meta->audited === null) {
+            if ($this->trashRow($model, $meta) === 0) {
+                throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
+            }
 
             return;
         }
         $this->refuseUnrecorded($meta);
 
-        $this->transaction(function () use ($model, $meta, $hooks): void {
+        $this->transaction(function () use ($model, $meta): void {
             $meta->beforeDelete($model);
             $before = $model->snapshot();
             $before = $before === null ? null : [...$before, ...$this->rowTenantFor($meta, $before, $meta->keyOf($model))];
-            $trashed = $this->trashRow($model, $meta);
-            if ($trashed === 0 && $hooks) {
+            if ($this->trashRow($model, $meta) === 0) {
                 throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
             }
-            if ($trashed > 0) {
-                $this->recordChange($meta, ModelChangeKind::Trashed, $meta->keyOf($model), $before, null);
-            }
+            $this->recordChange($meta, ModelChangeKind::Trashed, $meta->keyOf($model), $before, null);
             $meta->afterDelete($model);
         });
     }
@@ -2808,40 +2807,42 @@ final class Orm
     /** delete() of a model that is not #[SoftDeletes], and forceDelete() of any. */
     private function remove(Model $model, ModelMeta $meta): void
     {
+        if (!$model->isPersisted()) {
+            throw MissingRow::notPersisted($meta->class);
+        }
+        // A DELETE that removed nothing -- the row gone already, or out of
+        // the tenant's reach -- throws, as an update that reached none
+        // does: told it succeeded, a caller went on as if the row were
+        // gone at its word (ADR 0208).
         if (!$meta->hasDeleteHooks() && $meta->audited === null) {
-            $this->deleteRow($model, $meta);
+            if ($this->deleteRow($model, $meta) === 0) {
+                throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
+            }
 
             return;
         }
         $this->refuseUnrecorded($meta);
 
-        if (!$model->isPersisted()) {
-            throw MissingRow::notPersisted($meta->class);
-        }
         $this->transaction(function () use ($model, $meta): void {
             $meta->beforeDelete($model);
             $before = $model->snapshot();
             // Read while the row is there to read.
             $before = $before === null ? null : [...$before, ...$this->rowTenantFor($meta, $before, $meta->keyOf($model))];
-            $hooks = $meta->hasDeleteHooks();
-            $deleted = $this->deleteRow($model, $meta, mustMatch: $hooks);
-            if ($deleted === 0 && $hooks) {
+            if ($this->deleteRow($model, $meta) === 0) {
                 throw MissingRow::onDelete($meta->class, $meta->keyOf($model));
             }
-            // A delete that removed nothing -- the row gone already, or out
-            // of the tenant's reach -- changed nothing to record.
-            if ($deleted > 0) {
-                $this->recordChange($meta, ModelChangeKind::Deleted, $meta->keyOf($model), $before, null);
-            }
+            $this->recordChange($meta, ModelChangeKind::Deleted, $meta->keyOf($model), $before, null);
             $meta->afterDelete($model);
         });
     }
 
     /**
-     * @param bool $mustMatch leave the model as it was where the DELETE removed nothing, for the caller to refuse
+     * The model is left as it was where the DELETE removed nothing, for the
+     * caller to refuse.
+     *
      * @return int the rows the DELETE removed
      */
-    private function deleteRow(Model $model, ModelMeta $meta, bool $mustMatch = false): int
+    private function deleteRow(Model $model, ModelMeta $meta): int
     {
         [$scope, $scopeBindings] = $this->tenantScope($meta);
 
@@ -2854,7 +2855,7 @@ final class Orm
         $this->noteRowTenants($meta, [$meta->keyOf($model)]);
 
         $deleted = $this->connection->execute($sql, [$meta->keyOf($model), ...$scopeBindings]);
-        if ($deleted === 0 && $mustMatch) {
+        if ($deleted === 0) {
             return 0;
         }
         $this->identityMap->forget($meta->class, $meta->keyOf($model));

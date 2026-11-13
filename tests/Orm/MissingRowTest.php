@@ -108,3 +108,37 @@ it('no longer counts a deleted model as persisted, so saving it inserts the row 
         ->and($rack->isPersisted())->toBeTrue()
         ->and($orm->find(Rack::class, $rack->primaryKey()))->toBe($rack);
 });
+
+it('refuses to delete a row that is no longer there, and leaves the model persisted', function () {
+    $fixture = new Fixture(racks: 1, unitsPerRack: 0);
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
+    $rack = $orm->find(Rack::class, $fixture->ids['racks'][0]) ?? throw new \LogicException('no rack');
+
+    // Deleted by someone else since it was read: delete() reported success.
+    $fixture->connection->execute('DELETE FROM racks');
+
+    expect(fn () => $orm->delete($rack))->toThrow(MissingRow::class, 'matched no row')
+        ->and($rack->isPersisted())->toBeTrue();
+});
+
+it('refuses to delete another tenant\'s row, worded as a row that is gone', function () {
+    $fixture = new TenantFixture();
+    $orm = new Orm($fixture->connection, new IdentityMap('tenant-test'), tenants: Tenancy::flat());
+    $orm->switchTenant('acme');
+    $id = $fixture->scripts['globex'][0];
+    $globex = $orm->acrossTenants(static fn () => $orm->find(Script::class, $id))
+        ?? throw new \LogicException('no script');
+
+    expect(fn () => $orm->delete($globex))->toThrow(MissingRow::onDelete(Script::class, $id)->getMessage())
+        ->and($fixture->connection->select('SELECT COUNT(*) AS n FROM scripts WHERE id = ?', [$id])[0]['n'])->toEqual(1)
+        ->and($globex->isPersisted())->toBeTrue();
+});
+
+it('refuses to delete a model deleted already', function () {
+    $fixture = new Fixture(racks: 1, unitsPerRack: 0);
+    $orm = new Orm($fixture->connection, new IdentityMap('test'), tenants: Tenancy::flat());
+    $rack = $orm->find(Rack::class, $fixture->ids['racks'][0]) ?? throw new \LogicException('no rack');
+    $orm->delete($rack);
+
+    expect(fn () => $orm->delete($rack))->toThrow(MissingRow::class);
+});
