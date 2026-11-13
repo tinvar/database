@@ -862,6 +862,12 @@ final class Orm
             return;
         }
 
+        // Under the predicate in force, as every read is: inside
+        // withinSubtree() the subtree's, so a key of a row outside it --
+        // which the write could not have reached -- names no tenant (ADR
+        // 0208). Inside acrossTenants() there is none to add.
+        [$scope, $scopeBindings] = $this->tenantScope($meta);
+
         foreach (array_chunk($ids, 1_000) as $chunk) {
             $rows = $this->connection->select(
                 sprintf(
@@ -870,8 +876,8 @@ final class Orm
                     $meta->table,
                     $meta->idColumn,
                     implode(', ', array_fill(0, \count($chunk), '?')),
-                ),
-                $chunk,
+                ) . ($scope === '' ? '' : " AND {$scope}"),
+                [...$chunk, ...$scopeBindings],
             );
             foreach ($rows as $row) {
                 $tenant = $row['tenant'] ?? null;

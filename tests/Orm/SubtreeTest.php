@@ -272,3 +272,36 @@ describe('withinSubtree()', function () {
         expect($orm->isSubtreeGranted())->toBeFalse();
     });
 });
+
+describe('the tenants a widened write names', function () {
+    // noteRowTenants() asks which tenants the rows a write reached are
+    // stored in. Inside withinSubtree() it asks under the subtree's
+    // predicate, as every read there is, so a key of a row outside the
+    // subtree names no tenant: the write could not have reached it (ADR
+    // 0208).
+    it('reads the rows\' tenants under the subtree\'s predicate', function () {
+        $fixture = new Tenants();
+        $orm = $fixture->orm();
+        $keys = [$fixture->scripts['acme-west'], $fixture->scripts['globex'], $fixture->scripts['other']];
+
+        [, $named] = across($orm, 'acme', static fn (): array => $orm->tenantsEnteredBy(
+            static fn () => $orm->noteRowTenants(Script::meta(), $keys),
+        ));
+
+        expect($named)->toBe(['acme', 'acme-west']);
+    });
+
+    it('names every row\'s tenant inside acrossTenants()', function () {
+        $fixture = new Tenants();
+        $orm = $fixture->orm();
+        $keys = [$fixture->scripts['globex'], $fixture->scripts['other']];
+
+        [, $named] = $orm->actAs('acme', static fn (): array => $orm->tenantsEnteredBy(
+            static fn () => $orm->acrossTenants(static fn () => $orm->noteRowTenants(Script::meta(), $keys)),
+        ));
+
+        sort($named);
+
+        expect($named)->toBe(['acme', 'globex', 'other']);
+    });
+});
