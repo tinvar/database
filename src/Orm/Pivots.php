@@ -97,10 +97,13 @@ final readonly class Pivots
                     $id = (string) $id;
                     // detach() unlinks what it names; sync() what it does not.
                     if (isset($named[$id]) !== $attach) {
+                        $unlinked = false;
                         foreach ($twins as $link) {
-                            $this->orm->delete($link);
+                            $unlinked = $this->unlink($link) || $unlinked;
                         }
-                        $detached[] = $id;
+                        if ($unlinked) {
+                            $detached[] = $id;
+                        }
                     }
                 }
                 if (!$attach) {
@@ -137,6 +140,23 @@ final readonly class Pivots
         }
 
         return $change;
+    }
+
+    /**
+     * Deletes one link; false when another request unlinked it first --
+     * read here, gone before this DELETE reached it, which delete() says
+     * with MissingRow (ADR 0208) -- as restore() answers a link restored
+     * first. In a savepoint, so what its hooks wrote is taken back with it.
+     */
+    private function unlink(Model $link): bool
+    {
+        try {
+            $this->orm->transaction(fn () => $this->orm->delete($link));
+        } catch (MissingRow) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
