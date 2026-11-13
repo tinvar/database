@@ -265,6 +265,11 @@ describe('raw conditions', function () {
         'a backslash' => ['name = \\?', 1],
         'nothing' => ['   '],
         'a word glued to a number' => ['position = 1abc'],
+        // A LIKE's pattern is one operand, so ESCAPE '!' follows it
+        // (ADR 0208): arithmetic after it would be read into the escape.
+        'a LIKE with nothing after it' => ['name LIKE'],
+        'a LIKE whose pattern is arithmetic' => ['name LIKE ? + 1', 1],
+        'a LIKE whose pattern is a keyword' => ['name LIKE NULL'],
     ]);
 });
 

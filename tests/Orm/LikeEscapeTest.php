@@ -49,6 +49,24 @@ function matching(Orm $orm, string $operator, string $pattern): array
     return $names;
 }
 
+/**
+ * The same, through whereRaw(): its LIKE is written with the builder's
+ * ESCAPE '!' too, so an escaped term matches literally there as well.
+ *
+ * @param list<string> $bindings
+ * @return list<string>
+ */
+function matchingRaw(Orm $orm, string $sql, array $bindings): array
+{
+    $names = array_map(
+        static fn (Brand $brand): string => $brand->name,
+        $orm->query(Brand::class)->whereRaw($sql, $bindings)->orderBy('rank')->fetch(),
+    );
+    sort($names);
+
+    return $names;
+}
+
 function escapesAlike(Orm $orm): void
 {
     $contains = static fn (string $text): string => '%' . Query::escapeLike($text) . '%';
@@ -65,6 +83,15 @@ function escapesAlike(Orm $orm): void
         ->and(matching($orm, 'like', 'a_b'))->toBe(['a!b', 'a_b', 'axb'])
         ->and(matching($orm, 'not like', 'a' . Query::escapeLike('_') . '%'))->not->toContain('a_b')
         ->and(matching($orm, 'not like', 'a' . Query::escapeLike('_') . '%'))->toContain('axb');
+
+    // A raw condition's LIKE takes the same escape character.
+    expect(matchingRaw($orm, 'name LIKE ?', [$contains('50%')]))->toBe(['50% off'])
+        ->and(matchingRaw($orm, 'name LIKE ?', [$contains('a_b')]))->toBe(['a_b'])
+        ->and(matchingRaw($orm, 'name LIKE ?', [$contains('a!b')]))->toBe(['a!b'])
+        ->and(matchingRaw($orm, 'LOWER(name) LIKE LOWER(?)', [$contains('A_B')]))->toBe(['a_b'])
+        ->and(matchingRaw($orm, '(name LIKE (?)) AND rank > ?', [$contains('a_b'), 0]))->toBe(['a_b'])
+        ->and(matchingRaw($orm, 'name NOT LIKE ? AND name LIKE ?', ['a' . Query::escapeLike('_') . '%', 'a%']))->toBe(['a!b', 'axb'])
+        ->and(matchingRaw($orm, 'name LIKE ?', ['c\\_d']))->toBe(['c\\%d', 'c\\xd']);
 
     // A group's column is compared by the same rules.
     $report = $orm->query(Brand::class)->groupBy('name')->havingColumn('name', 'like', $contains('a_b'))

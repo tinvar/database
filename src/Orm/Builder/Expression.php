@@ -6,6 +6,7 @@ namespace Tinvar\Orm\Builder;
 
 use Tinvar\Orm\MappingException;
 use Tinvar\Orm\ModelMeta;
+use Tinvar\Orm\Query;
 
 /**
  * The condition whereRaw() takes, read as tokens and written out again
@@ -144,7 +145,85 @@ final class Expression
             throw new MappingException("A raw condition has {$params} placeholder(s) and was given {$bindings} value(s).");
         }
 
-        return $tokens;
+        return self::escapeLikes($tokens);
+    }
+
+    /**
+     * Each LIKE's pattern followed by the builder's escape character,
+     * `ESCAPE '!'` (Query::LIKE_ESCAPE, ADR 0208), so a term
+     * Query::escapeLike() wrote matches literally here as it does through
+     * where(). A condition cannot write ESCAPE itself -- it holds no
+     * literal -- so a `!` in a pattern is the escape character, and one
+     * meant literally is doubled.
+     *
+     * The pattern is one operand: a `?`, a column, a number, a function's
+     * call or a parenthesized group. Arithmetic after it is refused, as
+     * the escape would be read as part of it; parentheses say what is
+     * meant.
+     *
+     * @param list<array{string, string|ColumnRef}> $tokens
+     * @return list<array{string, string|ColumnRef}>
+     */
+    private static function escapeLikes(array $tokens): array
+    {
+        $out = [];
+        $count = \count($tokens);
+        for ($i = 0; $i < $count; $i++) {
+            $out[] = $tokens[$i];
+            if ($tokens[$i] !== ['keyword', 'LIKE']) {
+                continue;
+            }
+
+            $end = self::operandEnd($tokens, $i + 1);
+            if ($end === null) {
+                throw new MappingException("A raw condition's LIKE needs its pattern next: a ?, a column, a function's call or a parenthesized group.");
+            }
+            if (isset($tokens[$end + 1]) && $tokens[$end + 1][0] === 'operator' && \in_array($tokens[$end + 1][1], ['+', '-', '*', '/', '%'], true)) {
+                throw new MappingException("A raw condition's LIKE pattern is one operand: put arithmetic on it in parentheses.");
+            }
+            for ($j = $i + 1; $j <= $end; $j++) {
+                $out[] = $tokens[$j];
+            }
+            $out[] = ['escape', "ESCAPE '" . Query::LIKE_ESCAPE . "'"];
+            $i = $end;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Where the operand starting at $at ends, or null where none starts.
+     *
+     * @param list<array{string, string|ColumnRef}> $tokens
+     */
+    private static function operandEnd(array $tokens, int $at): ?int
+    {
+        $kind = $tokens[$at][0] ?? null;
+        if (\in_array($kind, ['param', 'column', 'number'], true)) {
+            return $at;
+        }
+        if ($kind === 'function') {
+            $at++;
+            $kind = $tokens[$at][0] ?? null;
+        }
+        if ($kind !== 'open') {
+            return null;
+        }
+
+        // parse() has balanced every parenthesis already.
+        $depth = 0;
+        for ($count = \count($tokens); $at < $count; $at++) {
+            $depth += match ($tokens[$at][0]) {
+                'open' => 1,
+                'close' => -1,
+                default => 0,
+            };
+            if ($depth === 0) {
+                return $at;
+            }
+        }
+
+        return null;
     }
 
     /**
