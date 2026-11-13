@@ -162,7 +162,8 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
      * the server's own SQL mode. The ORM and its query builder write
      * "users" as standard SQL does, which MySQL otherwise reads as a
      * string, and an app opened here refused every statement they sent
-     * (ADR 0169).
+     * (ADR 0169). And with multiple statements off, so a string sent
+     * whole runs as one statement or none (ADR 0208).
      *
      * @throws \LogicException for SQLite, which sqlite() opens by its path
      */
@@ -176,7 +177,16 @@ final class PdoConnection implements Connection, TenantSetting, NamesDriver, Obs
         ?string $password = null,
         string $name = 'default',
     ): self {
-        $pdo = new \PDO($driver->dsn($host, $port, $database), $user, $password, [\PDO::ATTR_PERSISTENT => false]);
+        // MySQL's multiple statements off: pdo_mysql otherwise runs every
+        // statement in a string exec() or query() sends, so text that
+        // reached one past a `;` ran a statement of its own (ADR 0208).
+        // Prepared statements, which the ORM sends, never take more than
+        // one either way.
+        $options = [\PDO::ATTR_PERSISTENT => false];
+        if ($driver === DatabaseDriver::Mysql) {
+            $options[\Pdo\Mysql::ATTR_MULTI_STATEMENTS] = false;
+        }
+        $pdo = new \PDO($driver->dsn($host, $port, $database), $user, $password, $options);
         if ($driver === DatabaseDriver::Mysql) {
             $pdo->exec("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')");
         }

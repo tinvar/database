@@ -73,3 +73,20 @@ it('opens a MySQL server\'s database reading double quotes as names, as the ORM 
             ->and(array_values(array_diff($servers, $modes)))->toBe([]);
     });
 })->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
+
+// pdo_mysql runs a string of statements sent by exec() or query() unless
+// told otherwise, so one injected `;` there ran a statement of its own. A
+// server() connection opens with multiple statements off (ADR 0208).
+it('opens a MySQL server\'s database refusing more than one statement at a time', function () {
+    [$host, $port, $user, $password] = serverOf(Databases::dsn('mysql'));
+
+    Databases::inScratchSchema('mysql', static function (\PDO $pdo, string $database) use ($host, $port, $user, $password): void {
+        $connection = PdoConnection::server(DatabaseDriver::Mysql, $host, $port, $database, $user, $password, 'app');
+        $inner = new \ReflectionProperty(PdoConnection::class, 'pdo')->getValue($connection);
+        \assert($inner instanceof \PDO);
+
+        expect(static fn () => $inner->exec('CREATE TABLE "a" ("id" INT); CREATE TABLE "b" ("id" INT)'))->toThrow(\PDOException::class)
+            ->and($connection->select('SELECT COUNT(*) AS "n" FROM information_schema.tables WHERE table_schema = ?', [$database])[0]['n'])
+            ->toEqual(0);
+    });
+})->group('mysql')->skip(Databases::mysqlMissing() !== null, Databases::mysqlMissing() ?? '');
