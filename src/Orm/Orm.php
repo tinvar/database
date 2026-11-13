@@ -1831,8 +1831,15 @@ final class Orm
         // maxValues() at a time, so no list outgrows what a driver
         // binds -- SQLite's 32,766 values, Postgres's and MySQL's 65,535 --
         // and each value once, or a value in two chunks came back twice. An
-        // order is the database's, which only one statement keeps.
-        $values = array_values(array_unique($values, \SORT_REGULAR));
+        // order is the database's, which only one statement keeps. Once by
+        // its type and its exact value, as Query::whereIn() binds them:
+        // PHP's loose == takes '1000' and '1e3' for one, and kept the first
+        // alone, so a text column's '1e3' row was never read (ADR 0208).
+        $unique = [];
+        foreach ($values as $i => $value) {
+            $unique[\is_scalar($value) ? get_debug_type($value) . "\0" . $value : "\1" . $i] = $value;
+        }
+        $values = array_values($unique);
         if ($orderBy !== null && \count($values) > $this->maxValues()) {
             throw new \LengthException(
                 'whereIn() orders at most ' . $this->maxValues() . ' values, which one statement reads in the database\'s order: '
